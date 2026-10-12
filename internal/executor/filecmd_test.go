@@ -104,7 +104,7 @@ func TestFileCommandsInit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"GITHUB_PATH", "GITHUB_ENV", "GITHUB_STEP_SUMMARY", "GITHUB_STATE", "GITHUB_OUTPUT"} {
+	for _, name := range []string{"GITHUB_PATH", "GITHUB_ENV", "GITHUB_STEP_SUMMARY", "GITHUB_STATE", "GITHUB_OUTPUT", "GITHUB_ARTIFACTS", "GITHUB_ARTIFACTS_LIST"} {
 		p := env[name]
 		if p == "" || filepath.Dir(p) != dir {
 			t.Fatalf("%s = %q", name, p)
@@ -115,6 +115,9 @@ func TestFileCommandsInit(t *testing.T) {
 	}
 	if !strings.HasPrefix(filepath.Base(env["GITHUB_ENV"]), "set_env_") || !strings.HasPrefix(filepath.Base(env["GITHUB_PATH"]), "add_path_") {
 		t.Fatalf("prefixes: %v", env)
+	}
+	if !strings.HasPrefix(filepath.Base(env["GITHUB_ARTIFACTS"]), "artifacts_") || !strings.HasPrefix(filepath.Base(env["GITHUB_ARTIFACTS_LIST"]), "artifacts_list_") {
+		t.Fatalf("artifact prefixes: %v", env)
 	}
 	// A second Init deletes the previous files and uses new names.
 	env2, _ := fc.Init()
