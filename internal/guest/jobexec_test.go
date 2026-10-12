@@ -11,43 +11,10 @@ import (
 	"sync"
 	"testing"
 	"time"
-	"unicode/utf8"
 
 	"bnema.dev/ermite-runner/internal/execstream"
 	"bnema.dev/ermite-runner/internal/execstream/execpb"
 )
-
-func TestSplitLine(t *testing.T) {
-	if got := SplitLine("", 10); len(got) != 1 || got[0] != "" {
-		t.Fatalf("empty: %q", got)
-	}
-	if got := SplitLine("short", 10); len(got) != 1 || got[0] != "short" {
-		t.Fatalf("%q", got)
-	}
-	// Cuts at character boundaries and joins back exactly.
-	in := strings.Repeat("é€😀a", 40) // 2, 3, 4, 1 bytes
-	for _, max := range []int{4, 5, 7, 10, 33} {
-		parts := SplitLine(in, max)
-		var b strings.Builder
-		for _, p := range parts {
-			if len(p) > max || !utf8.ValidString(p) || p == "" {
-				t.Fatalf("max %d: bad piece %q", max, p)
-			}
-			b.WriteString(p)
-		}
-		if b.String() != in {
-			t.Fatalf("max %d: pieces do not rebuild the line", max)
-		}
-	}
-	// Invalid UTF-8 is replaced before cutting.
-	if got := SplitLine("a\xffb", 10); got[0] != "a\ufffdb" {
-		t.Fatalf("%q", got)
-	}
-	big := SplitLine(strings.Repeat("x", 3*MaxLogLine+5), MaxLogLine)
-	if len(big) != 4 || len(big[0]) != MaxLogLine || len(big[3]) != 5 {
-		t.Fatalf("%d pieces", len(big))
-	}
-}
 
 // runJobSession starts Exec on a unix socket and drives it with a job.
 func runJobSession(t *testing.T, yaml string, cancelAfter time.Duration, tweak func(*ExecConfig)) (steps []string, logs []*execpb.Log, res *execpb.JobResult, exit *execpb.Exit) {
@@ -149,7 +116,7 @@ func TestExecJobLongLinesAreContinued(t *testing.T) {
 		if strings.HasPrefix(l.Text, "yyyy") {
 			pieces++
 			total += len(l.Text)
-			if len(l.Text) > MaxLogLine || (pieces > 1) != l.Continued {
+			if len(l.Text) > execstream.MaxLogLine || (pieces > 1) != l.Continued {
 				t.Fatalf("piece %d: len %d continued %v", pieces, len(l.Text), l.Continued)
 			}
 		}
