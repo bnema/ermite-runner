@@ -101,9 +101,9 @@ func (sc scope) under(p string) bool {
 // /proc directory is dir, or "". Besides IDFromCmdline:
 //   - a jailer (--exec-file) must have been given our --chroot-base-dir;
 //   - a Firecracker that carries only the jailer's --start-time-us (no
-//     --api-sock) is the jailed VMM: its /proc/<pid>/root must be below our
-//     jail base. Anything else with that flag and an id of our shape belongs to
-//     someone else's jailer and is never touched.
+//     --api-sock) is the jailed VMM: its root must be the chroot of that id
+//     below our jail base (rootIsOurs). Anything else with that flag and an id
+//     of our shape belongs to someone else's jailer and is never touched.
 //
 // A Firecracker started with --api-sock (no jailer) is ours by its id alone.
 func (sc scope) match(dir string, args []string) string {
@@ -119,11 +119,36 @@ func (sc scope) match(dir string, args []string) string {
 			return a.id
 		}
 	case a.markers[MarkerStartTime]:
-		if root, err := os.Readlink(filepath.Join(dir, "root")); err == nil && sc.under(root) {
+		if sc.rootIsOurs(dir, a.id) {
 			return a.id
 		}
 	}
 	return ""
+}
+
+// rootIsOurs reports whether the process's root directory is the chroot the
+// jailer made for id below our jail base. The jailer pivot_roots into a new
+// mount namespace, so readlink(/proc/<pid>/root) says "/" and cannot be used:
+// stat follows the magic link into the VM's root, which is the very directory
+// <base>/<exec name>/<id>/root of the host (same device and inode). A root
+// whose path is lexically below our base is accepted too.
+func (sc scope) rootIsOurs(dir, id string) bool {
+	if root, err := os.Readlink(filepath.Join(dir, "root")); err == nil && sc.under(root) {
+		return true
+	}
+	rootFI, err := os.Stat(filepath.Join(dir, "root"))
+	if err != nil {
+		return false
+	}
+	for _, b := range sc.jailBases {
+		execDirs, _ := os.ReadDir(b)
+		for _, e := range execDirs {
+			if fi, err := os.Stat(filepath.Join(b, e.Name(), id, "root")); err == nil && os.SameFile(fi, rootFI) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // vmmProcs scans a /proc tree for processes started by this runner for a VM:

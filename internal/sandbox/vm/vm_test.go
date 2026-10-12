@@ -1184,17 +1184,35 @@ func TestScanIsScopedToOurJailBase(t *testing.T) {
 		}
 	}
 	ours := filepath.Join(jailBase(state), "firecracker", "er00112233", "root")
+	if err := os.MkdirAll(ours, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// What a pivot_root'ed jailed VMM looks like: its root is our chroot directory
+	// but readlink does not say so (it says "/"); a symlinked alias reproduces
+	// that: another path, same inode.
+	alias := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(ours, alias); err != nil {
+		t.Fatal(err)
+	}
+	// Our jail base has a chroot for another id: a foreign VMM must not match it.
+	if err := os.MkdirAll(filepath.Join(jailBase(state), "firecracker", "er44556677", "root"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	foreignRoot := filepath.Join(foreign, "jail", "firecracker", "er44556677", "root")
+	_ = os.MkdirAll(foreignRoot, 0o755)
 	mk("100", ours, "/firecracker", "--id", "er00112233", "--start-time-us", "1", "--start-time-cpu-us", "2")
-	mk("101", filepath.Join(foreign, "jail", "firecracker", "er44556677", "root"), "/firecracker", "--id", "er44556677", "--start-time-us", "1")
-	mk("102", "/", "/firecracker", "--id", "er8899aabb", "--start-time-us", "1") // not chrooted at all
-	mk("103", "", "/firecracker", "--id", "er0000cccc", "--start-time-us", "1")  // root unreadable
+	mk("101", foreignRoot, "/firecracker", "--id", "er44556677", "--start-time-us", "1")
+	mk("109", alias, "/firecracker", "--id", "er00112233", "--start-time-us", "1") // same inode, other path
+	mk("110", alias, "/firecracker", "--id", "er77777777", "--start-time-us", "1") // our dir, but not that id's chroot
+	mk("102", "/", "/firecracker", "--id", "er8899aabb", "--start-time-us", "1")   // not chrooted at all
+	mk("103", "", "/firecracker", "--id", "er0000cccc", "--start-time-us", "1")    // root unreadable
 	mk("104", "/", "jailer", "--id", "er11111111", "--exec-file", "/fc", "--chroot-base-dir", jailBase(state))
 	mk("105", "/", "jailer", "--id", "er22222222", "--exec-file", "/fc", "--chroot-base-dir", filepath.Join(foreign, "jail"))
 	mk("106", "/", "jailer", "--id", "er33333333", "--exec-file", "/fc")
 	mk("107", ours+"/../../../../x", "/firecracker", "--id", "er55555555", "--start-time-us", "1") // lexical escape
 	mk("108", "/", "firecracker", "--id", "er66666666", "--api-sock", "/x")                        // unjailed: by id
 	got := vmmProcs(proc, sc)
-	want := map[int]string{100: "er00112233", 104: "er11111111", 108: "er66666666"}
+	want := map[int]string{100: "er00112233", 104: "er11111111", 108: "er66666666", 109: "er00112233"}
 	if len(got) != len(want) {
 		t.Fatalf("got %v want %v", got, want)
 	}
