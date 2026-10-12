@@ -83,6 +83,83 @@ the host process; the sandbox receives the workflow and its contexts only.
 | `ERMITE_RUNNER_LABELS` | extra labels, comma separated (`ubuntu-latest,ubuntu-24.04`) |
 | `ERMITE_RUNNER_REGISTER_TOKEN` | token for `register` |
 
+## Installing the service
+
+`contrib/ermite-runner.service` is a systemd unit. The runner runs as **root**
+on the host (TAP devices, nftables, loop mounts, the jailer, containers); the
+jobs never do: they run as user `runner` in a micro-VM or a container.
+
+```sh
+sudo install -m 0755 ermite-runner /usr/local/bin/ermite-runner     # a static build: CGO_ENABLED=0
+sudo install -m 0644 contrib/ermite-runner.service /etc/systemd/system/
+sudo install -d -m 0700 /etc/ermite-runner
+sudo tee /etc/ermite-runner/env >/dev/null <<'ENV'
+ERMITE_RUNNER_URL=https://ermite.example.org
+ERMITE_RUNNER_NAME=igor
+ERMITE_RUNNER_LABELS=ubuntu-latest,ubuntu-24.04
+ERMITE_RUNNER_ISOLATION=auto
+ERMITE_RUNNER_CAPACITY=2
+ERMITE_RUNNER_JOB_CPUS=4
+ERMITE_RUNNER_JOB_MEMORY=8G
+ERMITE_RUNNER_JOB_DISK=64G
+ENV
+sudo chmod 0600 /etc/ermite-runner/env
+ERMITE_RUNNER_STATE_DIR=/var/lib/ermite-runner ERMITE_RUNNER_URL=https://ermite.example.org \
+  sudo -E ermite-runner register --token <token with runner:register>
+sudo systemctl enable --now ermite-runner
+```
+
+`systemctl stop` sends SIGTERM: running jobs are cancelled with
+`runner_shutdown`, reported to ermite, and their sandboxes removed before the
+service exits (the unit allows 120 s). A crash or a power cut leaves sandboxes
+behind; the next start reaps them. Only one runner may live on a host (a
+host-wide lock enforces it), because reaping removes everything labelled as the
+runner's own.
+
+## The image
+
+A job runs in the image named by `ERMITE_RUNNER_IMAGE` (container: an OCI
+reference; vm: the directory with `vmlinux` and `base.ext4`, both built from
+`images/ubuntu-24.04/Dockerfile`). The runner binary is attached to the sandbox
+by the host and is never part of the image. What the executor needs from the
+image:
+
+- a user **`runner`** with uid and gid 1001 and the home `/home/runner`; the
+  executor starts as root (init needs it to start `dockerd`) and runs every step
+  as this user, with HOME, USER and LOGNAME set. Without such a user the steps
+  run as root (a test image only);
+- the directories `/home/runner/work` and `/opt/hostedtoolcache` owned by
+  `runner` (`RUNNER_TOOL_CACHE`, which the executor reads from its environment
+  like the official runner; each job gets `/home/runner/work/<repo>/<repo>` and
+  `/home/runner/work/_temp`, cleaned at the start of the job);
+- **`bash`** and **`sh`** (the default shell is `bash -e {0}` when bash exists,
+  else `sh -e {0}`; like on hosted runners `shell: bash` adds
+  `--noprofile --norc -eo pipefail`), `python3` and a `python` command for
+  `shell: python`; `pwsh` is not part of the CI-1 image (a step that asks for it
+  fails with `pwsh: command not found`);
+- `dockerd` (and passwordless `sudo` for `runner`) for jobs that use Docker: the
+  job gets its own daemon with its data root on the scratch disk;
+- what workflows commonly use: git, curl, jq, build-essential, ca-certificates,
+  tzdata, zip/unzip. Full parity with the hosted images (`actions/runner-images`)
+  is a later phase.
+
+## Job limits
+
+Each job gets its own resources, set for the runner as a whole:
+
+| Variable | Default | Effect |
+|---|---|---|
+| `ERMITE_RUNNER_CAPACITY` | `1` | jobs in parallel: one sandbox, one uid, one `/30` network and one disk per slot. The runner polls ermite only when a slot is free. |
+| `ERMITE_RUNNER_JOB_CPUS` | `2` | vCPUs of a micro-VM; CPU quota of a container |
+| `ERMITE_RUNNER_JOB_MEMORY` | `4G` | guest memory (`M`, `G`, `T`; at least `256M`); a jailed VMM gets this plus 256 MiB of cgroup headroom |
+| `ERMITE_RUNNER_JOB_DISK` | `64G` | size of the sparse scratch disk (at least `1G`): the overlay upper layer of a VM and the Docker data root of a container. Deleted with the job |
+| `ERMITE_RUNNER_JOB_PIDS` | `32768` | process limit of a container |
+| `ERMITE_RUNNER_JOB_DISK_BANDWIDTH`, `_JOB_DISK_IOPS`, `_JOB_NET_BANDWIDTH` | `400`, `20000`, `1000` | VM rate limits (MiB/s, IOPS, Mbit/s); `0` disables |
+
+The job timeout is not a runner setting: it is the workflow's `timeout-minutes`
+(360 by default), which ermite sends with the job and the executor enforces from
+the moment it starts.
+
 ## Configuration (sandbox part)
 
 | Variable | Default | |
@@ -139,6 +216,19 @@ sudo env GOWORK=off ERMITE_RUNNER_IT_VM=1 ERMITE_RUNNER_ISOLATION=vm \
 sudo env GOWORK=off ERMITE_RUNNER_IT_CONTAINER=1 ERMITE_RUNNER_IMAGE=ermite-runner-ubuntu-24.04:latest \
   DOCKER_HOST=unix:///var/run/docker.sock "$(command -v go)" test -count=1 -v ./internal/sandbox/integration -run Container
 ```
+
+**Jobs end to end** (`ERMITE_RUNNER_IT_E2E=1`, `internal/e2e`): the real executor in the real image, started through the container driver. They also run on a workstation with a *rootless* Docker daemon (the test-only option `AllowRootless`; the nested `dockerd` of the image cannot start there, and the jobs do not need it). `mount` and `umount` are replaced by stand-ins, since loop mounts need root.
+
+```sh
+IMAGE_TAG=ermite-runner-ubuntu-24.04:dev scripts/build-image.sh tmp/image     # or: docker build -t ermite-runner-ubuntu-24.04:dev images/ubuntu-24.04
+ERMITE_RUNNER_IT_E2E=1 ERMITE_RUNNER_TEST_IMAGE=ermite-runner-ubuntu-24.04:dev GOWORK=off go test -race -count=1 ./internal/e2e
+```
+
+- `TestContainerRunsAJobAsTheRunnerUser` and `TestContainerCancelStopsTheJobAndOrphans` drive a job over the stream: steps run as `runner` (1001), file ownership, `GITHUB_PATH` and `GITHUB_ENV`, `python`, cancellation by SIGINT, the `always()` step, and the orphan cleanup of "Complete job".
+- `TestChainCorpus` runs the whole chain: a fake `RunnerService` (`internal/host/hosttest`, which checks the offsets, limits and tokens of `runner.proto`) hands out 22 jobs of the ermite-conformance corpus, the real host loop starts them in containers (two at a time), and what the fake stored (steps, conclusions, outputs, log lines) is compared with the recordings made on github.com. It reads `ERMITE_CONFORMANCE_DIR` (default: a sibling checkout of ermite-conformance) and never writes to it.
+- `TestVMRunsAJob` (`internal/sandbox/integration`, run by `scripts/it-vm-userns.sh`) does the first of these in a micro-VM.
+
+Not covered anywhere yet, because they need root on a real host: the jailer (uid drop, chroot, cgroups), a rootful Docker daemon or sysbox with the nested `dockerd`, and the firewall of container mode.
 
 `ERMITE_RUNNER_IT_DOCKER_API=1 ERMITE_RUNNER_TEST_IMAGE=<image> go test -run DockerAPIWiring ./internal/sandbox/container` exercises the real Docker Engine calls (labels, networks, volumes, reaping) against any daemon, including a rootless one; it does not test isolation.
 
