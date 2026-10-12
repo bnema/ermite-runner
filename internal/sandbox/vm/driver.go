@@ -120,16 +120,16 @@ func New(ctx context.Context, cfg sandbox.Config, opt Options) (*Driver, error) 
 	}
 	fail := func(err error) (*Driver, error) { _ = d.Close(); return nil, err }
 
+	// A path over sun_path fails later as a 10 s "API not ready" (or a vsock
+	// that never connects): refuse at start, in both modes.
+	if err := checkSocketPaths(cfg.StateDir, filepath.Base(d.fcPath), !cfg.JailerOff); err != nil {
+		return fail(err)
+	}
 	if !cfg.JailerOff {
 		// Jailer 1.17 canonicalizes --chroot-base-dir and fails when it does not
 		// exist ("Failed to canonicalize path"); older releases created it.
 		if err := os.MkdirAll(jailBase(cfg.StateDir), 0o700); err != nil {
 			return fail(fmt.Errorf("jailer chroot base: %w", err))
-		}
-		// The API socket lives deep in the jail; a path over sun_path fails
-		// as a 10 s "API not ready" timeout otherwise.
-		if sock := newLayout(cfg.StateDir, filepath.Base(d.fcPath), "er00000000", true, 0).host("run/firecracker.socket"); len(sock) > maxSockPath {
-			return fail(fmt.Errorf("firecracker API socket path %q is %d bytes, over the %d-byte limit of a Unix socket: use a shorter %s", sock, len(sock), maxSockPath, sandbox.EnvStateDir))
 		}
 		for _, p := range []string{cfg.KernelPath(), cfg.BaseImagePath()} {
 			if err := checkWorldReadable(p); err != nil {
@@ -405,6 +405,29 @@ const udsName = "v.sock"
 
 // maxSockPath is the longest Unix socket path Linux accepts (108 with the NUL).
 const maxSockPath = 107
+
+// socketPaths lists the host paths of the unix sockets of a VM: the API socket
+// and the vsock listener (the guest's UDS path plus "_<port>"). With the jailer
+// they are deep in the chroot; without it they sit in <state>/vm/<id>.
+func socketPaths(stateDir, execName string, jailed bool) []string {
+	lay := newLayout(stateDir, execName, "er00000000", jailed, 0)
+	api := lay.host("api.sock")
+	if jailed {
+		api = lay.host("run/firecracker.socket")
+	}
+	return []string{api, lay.host(udsName) + fmt.Sprintf("_%d", sandbox.VsockPort)}
+}
+
+// checkSocketPaths refuses a state directory that makes a VM socket path longer
+// than a unix socket address.
+func checkSocketPaths(stateDir, execName string, jailed bool) error {
+	for _, p := range socketPaths(stateDir, execName, jailed) {
+		if len(p) > maxSockPath {
+			return fmt.Errorf("socket path %q is %d bytes, over the %d-byte limit of a Unix socket: use a shorter %s", p, len(p), maxSockPath, sandbox.EnvStateDir)
+		}
+	}
+	return nil
+}
 
 func (s *vmSandbox) vmConfig(spec sandbox.JobSpec, netw netpolicy.Net, f vmFiles) vmConfig {
 	cfg := s.d.cfg

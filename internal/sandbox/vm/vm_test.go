@@ -1050,14 +1050,49 @@ func TestNewCreatesTheJailerChrootBase(t *testing.T) {
 	}
 }
 
-func TestNewRejectsAStateDirThatMakesTheAPISocketPathTooLong(t *testing.T) {
-	e := newEnv(t, "ok")
-	e.cfg.JailerOff = false
-	e.cfg.Jailer = e.cfg.Firecracker
-	e.cfg.StateDir = filepath.Join(e.cfg.StateDir, strings.Repeat("d", 60))
-	_, err := New(context.Background(), e.cfg, Options{Run: e.run, Net: e.plumb, BootTimeout: 5 * time.Second})
-	if err == nil || !strings.Contains(err.Error(), "limit of a Unix socket") {
-		t.Fatalf("want a clear socket path error, got %v", err)
+// GO-004: the longest socket path of a VM, in both jailer modes, 107 bytes ok /
+// 108 rejected.
+func TestSocketPathBoundaryInBothModes(t *testing.T) {
+	for _, jailed := range []bool{true, false} {
+		name := map[bool]string{true: "jailed", false: "unjailed"}[jailed]
+		// Find the longest socket path with an empty-ish state dir, then pad the
+		// state dir so that it is exactly maxSockPath, then one more.
+		longest := func(state string) int {
+			n := 0
+			for _, p := range socketPaths(state, "firecracker", jailed) {
+				n = max(n, len(p))
+			}
+			return n
+		}
+		base := "/s"
+		pad := maxSockPath - longest(base)
+		if pad < 0 {
+			t.Fatalf("%s: base already too long", name)
+		}
+		ok := base + strings.Repeat("d", pad)
+		if longest(ok) != maxSockPath {
+			t.Fatalf("%s: longest=%d want %d", name, longest(ok), maxSockPath)
+		}
+		if err := checkSocketPaths(ok, "firecracker", jailed); err != nil {
+			t.Errorf("%s: %d bytes rejected: %v", name, maxSockPath, err)
+		}
+		err := checkSocketPaths(ok+"d", "firecracker", jailed)
+		if err == nil || !strings.Contains(err.Error(), "limit of a Unix socket") {
+			t.Errorf("%s: %d bytes accepted: %v", name, maxSockPath+1, err)
+		}
+	}
+}
+
+func TestNewRejectsAStateDirThatMakesASocketPathTooLong(t *testing.T) {
+	for _, jailerOff := range []bool{false, true} {
+		e := newEnv(t, "ok")
+		e.cfg.JailerOff = jailerOff
+		e.cfg.Jailer = e.cfg.Firecracker
+		e.cfg.StateDir = filepath.Join(e.cfg.StateDir, strings.Repeat("d", 60))
+		_, err := New(context.Background(), e.cfg, Options{Run: e.run, Net: e.plumb, BootTimeout: 5 * time.Second})
+		if err == nil || !strings.Contains(err.Error(), "limit of a Unix socket") {
+			t.Fatalf("jailerOff=%v: want a clear socket path error, got %v", jailerOff, err)
+		}
 	}
 }
 
