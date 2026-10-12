@@ -121,6 +121,11 @@ func New(ctx context.Context, cfg sandbox.Config, opt Options) (*Driver, error) 
 	fail := func(err error) (*Driver, error) { _ = d.Close(); return nil, err }
 
 	if !cfg.JailerOff {
+		// Jailer 1.17 canonicalizes --chroot-base-dir and fails when it does not
+		// exist ("Failed to canonicalize path"); older releases created it.
+		if err := os.MkdirAll(jailBase(cfg.StateDir), 0o700); err != nil {
+			return fail(fmt.Errorf("jailer chroot base: %w", err))
+		}
 		for _, p := range []string{cfg.KernelPath(), cfg.BaseImagePath()} {
 			if err := checkWorldReadable(p); err != nil {
 				return fail(err)

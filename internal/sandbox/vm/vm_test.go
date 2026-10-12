@@ -1022,3 +1022,20 @@ func TestRemoveCgroup(t *testing.T) {
 		t.Fatal("a non-empty cgroup cannot be removed and must be reported")
 	}
 }
+
+// Jailer 1.17 canonicalizes --chroot-base-dir and exits when it does not exist:
+// the driver must create it (seen on a real host, invisible with the jailer off).
+func TestNewCreatesTheJailerChrootBase(t *testing.T) {
+	e := newEnv(t, "ok")
+	e.cfg.JailerOff = false
+	e.cfg.Jailer = e.cfg.Firecracker // any executable: it is only resolved here
+	d, err := New(context.Background(), e.cfg, Options{Run: e.run, Net: e.plumb, BootTimeout: 5 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = d.Close() }()
+	st, err := os.Stat(jailBase(e.cfg.StateDir))
+	if err != nil || !st.IsDir() {
+		t.Fatalf("jail base not created: %v", err)
+	}
+}
