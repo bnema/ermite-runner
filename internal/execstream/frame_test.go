@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"strings"
 	"testing"
 	"testing/iotest"
 	"time"
@@ -134,5 +135,40 @@ func TestDriveHelloMissing(t *testing.T) {
 	}()
 	if _, _, err := Drive(host, &execpb.Run{}, nil, nil); err == nil {
 		t.Fatal("want error when the first frame is not hello")
+	}
+}
+
+func TestDriveJobDeliversJobFrames(t *testing.T) {
+	host, guest := net.Pipe()
+	go func() {
+		g := NewConn(guest)
+		_ = g.Send(&execpb.Frame{Body: &execpb.Frame_Hello{Hello: &execpb.Hello{Version: "v"}}})
+		r, _ := g.Recv()
+		if r.GetRun().GetJob().GetJobKey() != "build" {
+			t.Errorf("run: %v", r)
+		}
+		for _, b := range []*execpb.Frame{
+			{Body: &execpb.Frame_StepStarted{StepStarted: &execpb.StepStarted{Number: 1, Name: "Set up job"}}},
+			{Body: &execpb.Frame_Log{Log: &execpb.Log{Step: 1, Text: "hello", UnixNano: 5}}},
+			{Body: &execpb.Frame_StepCompleted{StepCompleted: &execpb.StepCompleted{Number: 1, Conclusion: execpb.StepConclusion_STEP_CONCLUSION_SUCCESS}}},
+			{Body: &execpb.Frame_JobResult{JobResult: &execpb.JobResult{Conclusion: execpb.StepConclusion_STEP_CONCLUSION_SUCCESS, Outputs: map[string]string{"a": "b"}}}},
+			{Body: &execpb.Frame_Exit{Exit: &execpb.Exit{}}},
+		} {
+			_ = g.Send(b)
+		}
+	}()
+	var got []string
+	_, exit, err := DriveJob(host, &execpb.Run{Job: &execpb.JobSpec{JobKey: "build"}}, nil, JobHandler{
+		StepStarted:   func(s *execpb.StepStarted) { got = append(got, "start:"+s.Name) },
+		Log:           func(l *execpb.Log) { got = append(got, "log:"+l.Text) },
+		StepCompleted: func(s *execpb.StepCompleted) { got = append(got, "done:"+s.Conclusion.String()) },
+		JobResult:     func(r *execpb.JobResult) { got = append(got, "result:"+r.Outputs["a"]) },
+	})
+	if err != nil || exit == nil {
+		t.Fatal(err)
+	}
+	want := "start:Set up job log:hello done:STEP_CONCLUSION_SUCCESS result:b"
+	if strings.Join(got, " ") != want {
+		t.Fatalf("%v", got)
 	}
 }
