@@ -20,6 +20,17 @@ import (
 // DefaultScript is what the stub executor runs when the host sends no script.
 const DefaultScript = "uname -a; id; cat /etc/os-release; docker info"
 
+// Cancellation timings, like the official runner's ProcessInvoker: SIGINT, then
+// SIGTERM after 7.5 s, then SIGKILL 2.5 s later.
+const (
+	DefaultTermAfter = 7500 * time.Millisecond
+	DefaultKillAfter = 2500 * time.Millisecond
+	// DefaultWaitDelay bounds how long the executor waits for the output pipes
+	// to close after the script's shell exited (background children may hold
+	// them open).
+	DefaultWaitDelay = 500 * time.Millisecond
+)
+
 // ExecConfig configures the executor.
 type ExecConfig struct {
 	Target  Target
@@ -31,28 +42,133 @@ type ExecConfig struct {
 	ConnectTimeout time.Duration
 	// RunTimeout bounds the wait for the host's Run frame (default 60 s).
 	RunTimeout time.Duration
+	// TermAfter and KillAfter are the escalation delays after a Cancel (or after
+	// the executor's own context ends): SIGINT at once, SIGTERM after TermAfter,
+	// SIGKILL KillAfter later. WaitDelay is the pipe-drain grace after the shell
+	// exits. Zero means the defaults above.
+	TermAfter, KillAfter, WaitDelay time.Duration
+
+	// signal sends a signal to a process group; tests replace it to observe the
+	// escalation. Default: syscall.Kill(-pgid, sig).
+	signal func(pgid int, sig syscall.Signal)
+}
+
+func (c *ExecConfig) defaults() {
+	if c.Shell == "" {
+		c.Shell = "/bin/sh"
+	}
+	if c.ConnectTimeout == 0 {
+		c.ConnectTimeout = 30 * time.Second
+	}
+	if c.RunTimeout == 0 {
+		c.RunTimeout = 60 * time.Second
+	}
+	if c.TermAfter == 0 {
+		c.TermAfter = DefaultTermAfter
+	}
+	if c.KillAfter == 0 {
+		c.KillAfter = DefaultKillAfter
+	}
+	if c.WaitDelay == 0 {
+		c.WaitDelay = DefaultWaitDelay
+	}
+	if c.signal == nil {
+		c.signal = func(pgid int, sig syscall.Signal) { _ = syscall.Kill(-pgid, sig) }
+	}
 }
 
 // Exec is `ermite-runner exec`, the CI-1 stub executor: it connects back to the
 // host, receives one Run, runs the script with the shell, streams stdout and
 // stderr as Output frames, and ends with an Exit frame. It returns the exit code
-// it reported. A Cancel frame sends SIGINT to the script's process group.
+// it reported. A Cancel frame, or the end of ctx, stops the script's process
+// group with escalating signals (see ExecConfig).
 func Exec(ctx context.Context, cfg ExecConfig) (int, error) {
-	if cfg.Shell == "" {
-		cfg.Shell = "/bin/sh"
-	}
-	if cfg.ConnectTimeout == 0 {
-		cfg.ConnectTimeout = 30 * time.Second
-	}
-	if cfg.RunTimeout == 0 {
-		cfg.RunTimeout = 60 * time.Second
-	}
+	cfg.defaults()
 	raw, err := cfg.Target.Dial(ctx, cfg.ConnectTimeout)
 	if err != nil {
 		return 1, err
 	}
 	defer func() { _ = raw.Close() }()
 	return serve(ctx, raw, cfg)
+}
+
+// frameWriter turns writes into Output frames of at most ChunkSize bytes. It is
+// the command's Stdout/Stderr, so no goroutine of ours sits between the pipe
+// and the stream.
+type frameWriter struct {
+	conn *execstream.Conn
+	kind execpb.StreamKind
+}
+
+func (w frameWriter) Write(p []byte) (int, error) {
+	n := 0
+	for len(p) > 0 {
+		chunk := p
+		if len(chunk) > execstream.ChunkSize {
+			chunk = chunk[:execstream.ChunkSize]
+		}
+		err := w.conn.Send(&execpb.Frame{Body: &execpb.Frame_Output{Output: &execpb.Output{
+			Stream: w.kind, Data: append([]byte(nil), chunk...), UnixNano: time.Now().UnixNano(),
+		}}})
+		if err != nil {
+			return n, err
+		}
+		n += len(chunk)
+		p = p[len(chunk):]
+	}
+	return n, nil
+}
+
+// escalator signals a process group and escalates after a cancel. Once finish
+// has been called (the shell was reaped) it never signals again: the group id
+// could have been reused by then.
+type escalator struct {
+	cfg  ExecConfig
+	pgid int
+
+	mu       sync.Mutex
+	finished bool
+	started  bool
+	timers   []*time.Timer
+}
+
+func (e *escalator) send(sig syscall.Signal) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if !e.finished {
+		e.cfg.signal(e.pgid, sig)
+	}
+}
+
+// cancel starts the escalation; only the first call does anything.
+func (e *escalator) cancel() {
+	e.mu.Lock()
+	if e.finished || e.started {
+		e.mu.Unlock()
+		return
+	}
+	e.started = true
+	e.cfg.signal(e.pgid, syscall.SIGINT)
+	e.timers = append(e.timers,
+		time.AfterFunc(e.cfg.TermAfter, func() { e.send(syscall.SIGTERM) }),
+		time.AfterFunc(e.cfg.TermAfter+e.cfg.KillAfter, func() { e.send(syscall.SIGKILL) }),
+	)
+	e.mu.Unlock()
+}
+
+// finish is called right after the shell was reaped: it kills what is left of
+// the group (background children), stops the timers and forbids further signals.
+func (e *escalator) finish() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.finished {
+		return
+	}
+	e.cfg.signal(e.pgid, syscall.SIGKILL)
+	e.finished = true
+	for _, t := range e.timers {
+		t.Stop()
+	}
 }
 
 func serve(ctx context.Context, rw io.ReadWriteCloser, cfg ExecConfig) (int, error) {
@@ -96,58 +212,43 @@ func serve(ctx context.Context, rw io.ReadWriteCloser, cfg ExecConfig) (int, err
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return sendExit(conn, 1, err)
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return sendExit(conn, 1, err)
-	}
+	// Frame writers as stdout/stderr: exec copies the pipes for us, and
+	// WaitDelay bounds the wait when a background child keeps a pipe open.
+	cmd.Stdout = frameWriter{conn, execpb.StreamKind_STREAM_KIND_STDOUT}
+	cmd.Stderr = frameWriter{conn, execpb.StreamKind_STREAM_KIND_STDERR}
+	cmd.WaitDelay = cfg.WaitDelay
 	if err := cmd.Start(); err != nil {
 		return sendExit(conn, 127, fmt.Errorf("start %s: %w", cfg.Shell, err))
 	}
+	esc := &escalator{cfg: cfg, pgid: cmd.Process.Pid}
 
-	// Cancel frames arrive while the script runs.
+	// Frames from the host while the script runs: a Cancel starts the escalation;
+	// a lost host kills the script rather than let it run unobserved.
 	go func() {
 		for {
 			f, err := conn.Recv()
 			if err != nil {
-				// Host went away: stop the script rather than run unobserved.
-				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+				esc.send(syscall.SIGKILL)
 				return
 			}
 			if f.GetCancel() != nil {
-				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGINT)
+				esc.cancel()
 			}
 		}
 	}()
+	// The executor's own context (SIGTERM forwarded by init) cancels the same way.
+	stopCtx := context.AfterFunc(ctx, esc.cancel)
+	defer stopCtx()
 
-	var wg sync.WaitGroup
-	pump := func(r io.Reader, kind execpb.StreamKind) {
-		defer wg.Done()
-		buf := make([]byte, execstream.ChunkSize)
-		for {
-			n, err := r.Read(buf)
-			if n > 0 {
-				_ = conn.Send(&execpb.Frame{Body: &execpb.Frame_Output{Output: &execpb.Output{
-					Stream: kind, Data: append([]byte(nil), buf[:n]...), UnixNano: time.Now().UnixNano(),
-				}}})
-			}
-			if err != nil {
-				return
-			}
-		}
-	}
-	wg.Add(2)
-	go pump(stdout, execpb.StreamKind_STREAM_KIND_STDOUT)
-	go pump(stderr, execpb.StreamKind_STREAM_KIND_STDERR)
-	wg.Wait() // pipes must be drained before Wait closes them
 	waitErr := cmd.Wait()
+	esc.finish()
+
 	code := 0
 	var ee *exec.ExitError
 	switch {
-	case waitErr == nil:
+	case waitErr == nil, errors.Is(waitErr, exec.ErrWaitDelay):
+		// ErrWaitDelay: the shell exited cleanly but a background child kept the
+		// pipes open; the group was killed above.
 	case errors.As(waitErr, &ee):
 		code = ee.ExitCode()
 		if code < 0 { // killed by a signal: 128+signal like a shell

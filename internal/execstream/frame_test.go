@@ -4,7 +4,6 @@ package execstream
 
 import (
 	"bytes"
-	"context"
 	"encoding/binary"
 	"errors"
 	"io"
@@ -93,7 +92,7 @@ func TestDrive(t *testing.T) {
 		_ = g.Send(&execpb.Frame{Body: &execpb.Frame_Exit{Exit: &execpb.Exit{Code: 7}}})
 	}()
 	var got []byte
-	hello, exit, err := Drive(context.Background(), host, &execpb.Run{Script: "echo hi"}, func(o *execpb.Output) { got = append(got, o.Data...) })
+	hello, exit, err := Drive(host, &execpb.Run{Script: "echo hi"}, nil, func(o *execpb.Output) { got = append(got, o.Data...) })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,12 +111,12 @@ func TestDriveCancelSendsCancel(t *testing.T) {
 		_ = g.Send(&execpb.Frame{Body: &execpb.Frame_Hello{Hello: &execpb.Hello{}}})
 		_, _ = g.Recv() // run
 		f, err := g.Recv()
-		gotCancel <- err == nil && f.GetCancel() != nil
+		gotCancel <- err == nil && f.GetCancel() != nil && f.GetCancel().Reason == "cancelled by the user"
 		_ = g.Send(&execpb.Frame{Body: &execpb.Frame_Exit{Exit: &execpb.Exit{Code: 130}}})
 	}()
-	ctx, cancel := context.WithCancel(context.Background())
-	time.AfterFunc(50*time.Millisecond, cancel)
-	_, exit, err := Drive(ctx, host, &execpb.Run{}, nil)
+	cancel := make(chan *execpb.Cancel, 1)
+	time.AfterFunc(50*time.Millisecond, func() { cancel <- &execpb.Cancel{Reason: "cancelled by the user"} })
+	_, exit, err := Drive(host, &execpb.Run{}, cancel, nil)
 	if err != nil || exit.Code != 130 {
 		t.Fatalf("exit=%v err=%v", exit, err)
 	}
@@ -133,7 +132,7 @@ func TestDriveHelloMissing(t *testing.T) {
 		defer func() { _ = guest.Close() }()
 		_ = NewConn(guest).Send(&execpb.Frame{Body: &execpb.Frame_Exit{Exit: &execpb.Exit{}}})
 	}()
-	if _, _, err := Drive(context.Background(), host, &execpb.Run{}, nil); err == nil {
+	if _, _, err := Drive(host, &execpb.Run{}, nil, nil); err == nil {
 		t.Fatal("want error when the first frame is not hello")
 	}
 }

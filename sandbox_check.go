@@ -55,7 +55,11 @@ func sandboxCheck(ctx context.Context, args []string) int {
 		fmt.Fprintln(os.Stderr, "ermite-runner:", err)
 		return 1
 	}
-	_, exit, err := execstream.Drive(ctx, conn, &execpb.Run{Script: strings.Join(args, " ")}, func(o *execpb.Output) {
+	// Ctrl-C / SIGTERM cancel the job: the executor escalates by itself.
+	cancel := make(chan *execpb.Cancel, 1)
+	stop := context.AfterFunc(ctx, func() { cancel <- &execpb.Cancel{Reason: "interrupted"} })
+	defer stop()
+	_, exit, err := execstream.Drive(conn, &execpb.Run{Script: strings.Join(args, " ")}, cancel, func(o *execpb.Output) {
 		f := os.Stdout
 		if o.Stream == execpb.StreamKind_STREAM_KIND_STDERR {
 			f = os.Stderr

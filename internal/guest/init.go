@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/signal"
 	"strings"
 	"syscall"
 	"time"
@@ -24,8 +25,9 @@ type InitConfig struct {
 	Cmdline string
 	// Getpid reports the process id; Init only acts as a VM's PID 1 when it is 1.
 	Getpid func() int
-	// DockerTimeout bounds the wait for the Docker socket (default 60 s).
-	DockerTimeout time.Duration
+	// Signals delivers the termination signals to forward to the executor;
+	// nil means "subscribe to SIGTERM and SIGINT". Tests inject their own.
+	Signals <-chan os.Signal
 	// SkipDocker does not start dockerd (tests, images without Docker).
 	SkipDocker bool
 	// ExecArgs is the executor command line; default
@@ -50,9 +52,6 @@ func Init(ctx context.Context, cfg InitConfig) int {
 	log := zerowrap.FromCtx(ctx)
 	if cfg.Getpid == nil {
 		cfg.Getpid = os.Getpid
-	}
-	if cfg.DockerTimeout == 0 {
-		cfg.DockerTimeout = 60 * time.Second
 	}
 	if cfg.ExecArgs == nil {
 		cfg.ExecArgs = []string{sandbox.GuestExecDir + "/" + sandbox.GuestExecName, "exec"}
@@ -134,11 +133,32 @@ func runPayload(ctx context.Context, cfg InitConfig, mode string, args map[strin
 		log.Error().Err(err).Msg("init: start executor")
 		return 1
 	}
-	// Docker is awaited in the background: the executor starts right away and
-	// the stub script's `docker info` waits for the socket itself.
-	if dockerPid != 0 {
-		go waitSocket(ctx, "/var/run/docker.sock", cfg.DockerTimeout)
+	// SIGTERM/SIGINT (docker stop, or the host stopping the VM) go to the
+	// executor, which cancels its script with the usual escalation and reports
+	// its Exit; init then finishes normally instead of dying with children.
+	sigs := cfg.Signals
+	if sigs == nil {
+		ch := make(chan os.Signal, 4)
+		signal.Notify(ch, syscall.SIGTERM, syscall.SIGINT)
+		defer signal.Stop(ch)
+		sigs = ch
 	}
+	stopFwd := make(chan struct{})
+	defer close(stopFwd)
+	go func() {
+		for {
+			select {
+			case sig := <-sigs:
+				if s, ok := sig.(syscall.Signal); ok {
+					log.Info().Str("signal", s.String()).Msg("init: forwarding the signal to the executor")
+					_ = syscall.Kill(-execPid, s) // the executor leads its own process group
+					_ = syscall.Kill(execPid, s)
+				}
+			case <-stopFwd:
+				return
+			}
+		}
+	}()
 	code := reapUntil(execPid)
 	if dockerPid != 0 {
 		_ = syscall.Kill(dockerPid, syscall.SIGTERM)
@@ -152,18 +172,6 @@ func runPayload(ctx context.Context, cfg InitConfig, mode string, args map[strin
 		_ = syscall.Kill(dockerPid, syscall.SIGKILL)
 	}
 	return code
-}
-
-func waitSocket(ctx context.Context, path string, timeout time.Duration) {
-	log := zerowrap.FromCtx(ctx)
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(path); err == nil {
-			return
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
-	log.Warn().Str("socket", path).Msg("init: docker socket did not appear")
 }
 
 // spawn starts argv[0] as a child (own process group) without os/exec, so that

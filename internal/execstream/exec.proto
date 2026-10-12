@@ -54,5 +54,11 @@ message Exit {
   string error = 2; // set when the executor failed to run the script at all
 }
 
-// Cancel asks the executor to stop the running script: SIGINT now.
-message Cancel {}
+// Cancel asks the executor to stop the running script. The executor escalates
+// like the official runner: SIGINT to the script's process group at once,
+// SIGTERM 7.5 s later, SIGKILL 2.5 s after that.
+message Cancel {
+  // reason is for the job log and diagnostics ("cancelled by the user",
+  // "job timeout", ...); it never changes the behaviour.
+  string reason = 1;
+}

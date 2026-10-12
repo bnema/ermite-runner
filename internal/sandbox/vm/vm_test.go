@@ -196,7 +196,7 @@ func (e *env) leftovers(t *testing.T) []string {
 func runStub(t *testing.T, conn sandbox.Conn) (string, int) {
 	t.Helper()
 	var out strings.Builder
-	_, exit, err := execstream.Drive(context.Background(), conn, &execpb.Run{}, func(o *execpb.Output) { out.Write(o.Data) })
+	_, exit, err := execstream.Drive(conn, &execpb.Run{}, nil, func(o *execpb.Output) { out.Write(o.Data) })
 	if err != nil {
 		t.Fatal(err)
 	}

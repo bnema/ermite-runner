@@ -125,7 +125,7 @@ type result struct {
 
 func runJob(ctx context.Context, conn sandbox.Conn, script string) (result, error) {
 	var so, se strings.Builder
-	hello, exit, err := execstream.Drive(ctx, conn, &execpb.Run{Script: script}, func(o *execpb.Output) {
+	hello, exit, err := execstream.Drive(conn, &execpb.Run{Script: script}, nil, func(o *execpb.Output) {
 		if o.Stream == execpb.StreamKind_STREAM_KIND_STDERR {
 			se.Write(o.Data)
 		} else {

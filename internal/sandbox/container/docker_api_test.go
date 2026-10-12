@@ -73,7 +73,7 @@ func TestDockerAPIWiring(t *testing.T) {
 			t.Fatalf("job %d: %v", i, err)
 		}
 		var out strings.Builder
-		hello, exit, err := execstream.Drive(ctx, conn, &execpb.Run{Script: "echo wired; id -u; exit 4"}, func(o *execpb.Output) { out.Write(o.Data) })
+		hello, exit, err := execstream.Drive(conn, &execpb.Run{Script: "echo wired; id -u; exit 4"}, nil, func(o *execpb.Output) { out.Write(o.Data) })
 		if err != nil {
 			t.Fatal(err)
 		}

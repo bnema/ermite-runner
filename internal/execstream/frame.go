@@ -9,11 +9,10 @@
 // transport-agnostic: vsock in a micro-VM, a Unix socket in a container.
 package execstream
 
-//go:generate protoc --proto_path=. --go_out=execpb --go_opt=paths=source_relative exec.proto
+//go:generate go tool buf generate ../.. --template ../../buf.gen.yaml
 
 import (
 	"bufio"
-	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -92,10 +91,15 @@ func (c *Conn) Recv() (*execpb.Frame, error) {
 
 // Drive is the host side of a session: it waits for the executor's Hello, sends
 // run, passes every Output frame to onOutput, and returns the Exit frame.
-// When ctx ends first, a Cancel frame is sent once and Drive keeps waiting for
-// the executor's Exit; the caller bounds that wait by stopping the sandbox,
-// which closes the stream and makes Drive return an error.
-func Drive(ctx context.Context, rw io.ReadWriter, run *execpb.Run, onOutput func(*execpb.Output)) (*execpb.Hello, *execpb.Exit, error) {
+//
+// cancel, when non-nil, asks the executor to stop the script: the first value
+// received is sent as one Cancel frame (the executor escalates SIGINT, SIGTERM,
+// SIGKILL by itself); closing the channel without a value sends nothing. It is
+// deliberately not a context: cancelling the session's context would also abort
+// the reads that deliver the executor's Exit. Drive keeps waiting for Exit after
+// a Cancel; the caller bounds that wait by stopping the sandbox, which closes
+// the stream and makes Drive return an error.
+func Drive(rw io.ReadWriter, run *execpb.Run, cancel <-chan *execpb.Cancel, onOutput func(*execpb.Output)) (*execpb.Hello, *execpb.Exit, error) {
 	c := NewConn(rw)
 	first, err := c.Recv()
 	if err != nil {
@@ -111,13 +115,20 @@ func Drive(ctx context.Context, rw io.ReadWriter, run *execpb.Run, onOutput func
 
 	done := make(chan struct{})
 	defer close(done)
-	go func() {
-		select {
-		case <-ctx.Done():
-			_ = c.Send(&execpb.Frame{Body: &execpb.Frame_Cancel{Cancel: &execpb.Cancel{}}})
-		case <-done:
-		}
-	}()
+	if cancel != nil {
+		go func() {
+			select {
+			case cn, ok := <-cancel:
+				if ok {
+					if cn == nil {
+						cn = &execpb.Cancel{}
+					}
+					_ = c.Send(&execpb.Frame{Body: &execpb.Frame_Cancel{Cancel: cn}})
+				}
+			case <-done:
+			}
+		}()
+	}
 
 	for {
 		f, err := c.Recv()
