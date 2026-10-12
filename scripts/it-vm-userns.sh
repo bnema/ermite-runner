@@ -19,7 +19,10 @@ cd "$root"
 fc=${FIRECRACKER:-$(command -v firecracker || true)}
 [ -x "${fc:-}" ] || { echo "firecracker not found: set FIRECRACKER" >&2; exit 1; }
 img=${IMAGE_DIR:-$root/tmp/image}
-exec unshare --user --map-root-user --net bash -c '
+# Two separate namespaces: the VM tests leave TAP devices behind when they fail,
+# and the packet-level firewall test must start from a clean network stack.
+rc=0
+unshare --user --map-root-user --net bash -c '
   ip link set lo up
   # A default route, so that forwarded packets reach the firewall instead of
   # being answered "network unreachable" by the routing table: the drops the
@@ -33,9 +36,11 @@ exec unshare --user --map-root-user --net bash -c '
     ERMITE_RUNNER_FIRECRACKER="$2" ERMITE_RUNNER_JAILER_MODE=off \
     ERMITE_RUNNER_LOCK_FILE="${TMPDIR:-/tmp}/ermite-runner-it-$$.lock"
   shift 2
-  rc=0
-  go test -count=1 -v -timeout 10m ./internal/sandbox/integration "$@" || rc=$?
-  # The packet-level firewall test needs only the namespace, not Firecracker.
-  ERMITE_RUNNER_IT_NET=1 go test -count=1 -v -timeout 10m -run TwoGuests ./internal/netpolicy || rc=$?
-  exit $rc
-' _ "$img" "$fc" "$@"
+  exec go test -count=1 -v -timeout 10m ./internal/sandbox/integration "$@"
+' _ "$img" "$fc" "$@" || rc=$?
+# The packet-level firewall test needs only a namespace, not Firecracker.
+unshare --user --map-root-user --net bash -c '
+  ip link set lo up
+  GOWORK=off ERMITE_RUNNER_IT_NET=1 exec go test -count=1 -v -timeout 10m -run TwoGuests ./internal/netpolicy
+' || rc=$?
+exit $rc

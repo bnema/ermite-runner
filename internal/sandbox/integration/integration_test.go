@@ -207,8 +207,17 @@ func leftovers(stateDir string) []string {
 			return nil
 		})
 	}
-	// Any process whose command line carries one of our VM ids, whatever the
-	// program is called (the same rule the driver's Reap uses).
+	for pid, id := range vmmProcs() {
+		left = append(left, fmt.Sprintf("process %d %s", pid, id))
+	}
+	return left
+}
+
+// vmmProcs returns the processes whose command line carries one of our VM ids
+// (and --api-sock or --exec-file), whatever the program is called: the rule the
+// driver's Reap uses.
+func vmmProcs() map[int]string {
+	out := map[int]string{}
 	procs, _ := filepath.Glob("/proc/[0-9]*/cmdline")
 	for _, p := range procs {
 		b, err := os.ReadFile(p)
@@ -228,11 +237,23 @@ func leftovers(stateDir string) []string {
 				marker = true
 			}
 		}
-		if id != "" && marker {
-			left = append(left, "process "+p+" "+id)
+		if id == "" || !marker {
+			continue
+		}
+		var pid int
+		if _, err := fmt.Sscanf(p, "/proc/%d/cmdline", &pid); err == nil {
+			out[pid] = id
 		}
 	}
-	return left
+	return out
+}
+
+func vmmPIDs() []int {
+	var pids []int
+	for pid := range vmmProcs() {
+		pids = append(pids, pid)
+	}
+	return pids
 }
 
 func checkStubOutput(t *testing.T, r result, wantSandbox string) {
@@ -262,6 +283,17 @@ func scenario(t *testing.T, ctx context.Context, cfg sandbox.Config, mode sandbo
 	if drv.Mode() != mode {
 		t.Fatalf("driver mode %s, want %s", drv.Mode(), mode)
 	}
+	// Whatever happens below (a Fatal included), leave nothing behind on the host.
+	t.Cleanup(func() {
+		_ = drv.Close()
+		d2, err := sandbox.Select(context.Background(), cfg, drivers.Factories(), sandbox.Prober{})
+		if err != nil {
+			t.Logf("emergency cleanup: %v", err)
+			return
+		}
+		_ = d2.Reap(context.Background())
+		_ = d2.Close()
+	})
 	if err := drv.Reap(ctx); err != nil {
 		t.Fatalf("initial reap: %v", err)
 	}
