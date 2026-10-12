@@ -1029,6 +1029,12 @@ func TestNewCreatesTheJailerChrootBase(t *testing.T) {
 	e := newEnv(t, "ok")
 	e.cfg.JailerOff = false
 	e.cfg.Jailer = e.cfg.Firecracker // any executable: it is only resolved here
+	short, err := os.MkdirTemp("", "er")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.RemoveAll(short) }()
+	e.cfg.StateDir = filepath.Join(short, "s") // the jailed API socket path must fit in sun_path
 	d, err := New(context.Background(), e.cfg, Options{Run: e.run, Net: e.plumb, BootTimeout: 5 * time.Second})
 	if err != nil {
 		t.Fatal(err)
@@ -1037,5 +1043,16 @@ func TestNewCreatesTheJailerChrootBase(t *testing.T) {
 	st, err := os.Stat(jailBase(e.cfg.StateDir))
 	if err != nil || !st.IsDir() {
 		t.Fatalf("jail base not created: %v", err)
+	}
+}
+
+func TestNewRejectsAStateDirThatMakesTheAPISocketPathTooLong(t *testing.T) {
+	e := newEnv(t, "ok")
+	e.cfg.JailerOff = false
+	e.cfg.Jailer = e.cfg.Firecracker
+	e.cfg.StateDir = filepath.Join(e.cfg.StateDir, strings.Repeat("d", 60))
+	_, err := New(context.Background(), e.cfg, Options{Run: e.run, Net: e.plumb, BootTimeout: 5 * time.Second})
+	if err == nil || !strings.Contains(err.Error(), "limit of a Unix socket") {
+		t.Fatalf("want a clear socket path error, got %v", err)
 	}
 }

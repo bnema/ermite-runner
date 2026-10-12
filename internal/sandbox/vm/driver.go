@@ -126,6 +126,11 @@ func New(ctx context.Context, cfg sandbox.Config, opt Options) (*Driver, error) 
 		if err := os.MkdirAll(jailBase(cfg.StateDir), 0o700); err != nil {
 			return fail(fmt.Errorf("jailer chroot base: %w", err))
 		}
+		// The API socket lives deep in the jail; a path over sun_path fails
+		// as a 10 s "API not ready" timeout otherwise.
+		if sock := newLayout(cfg.StateDir, filepath.Base(d.fcPath), "er00000000", true, 0).host("run/firecracker.socket"); len(sock) > maxSockPath {
+			return fail(fmt.Errorf("firecracker API socket path %q is %d bytes, over the %d-byte limit of a Unix socket: use a shorter %s", sock, len(sock), maxSockPath, sandbox.EnvStateDir))
+		}
 		for _, p := range []string{cfg.KernelPath(), cfg.BaseImagePath()} {
 			if err := checkWorldReadable(p); err != nil {
 				return fail(err)
@@ -394,6 +399,9 @@ func (s *vmSandbox) bootVsock() (<-chan acceptResult, error) {
 }
 
 const udsName = "v.sock"
+
+// maxSockPath is the longest Unix socket path Linux accepts (108 with the NUL).
+const maxSockPath = 107
 
 func (s *vmSandbox) vmConfig(spec sandbox.JobSpec, netw netpolicy.Net, f vmFiles) vmConfig {
 	cfg := s.d.cfg
