@@ -18,7 +18,7 @@ import (
 )
 
 // runJobSession starts Exec on a unix socket and drives it with a job.
-func runJobSession(t *testing.T, yaml string, cancelAfter time.Duration, tweak func(*ExecConfig)) (steps []string, logs []*execpb.Log, res *execpb.JobResult, exit *execpb.Exit) {
+func runJobSession(t *testing.T, yaml string, cancelOn string, tweak func(*ExecConfig)) (steps []string, logs []*execpb.Log, res *execpb.JobResult, exit *execpb.Exit) {
 	t.Helper()
 	sock := filepath.Join(t.TempDir(), "s")
 	ln, err := net.Listen("unix", sock)
@@ -45,11 +45,13 @@ func runJobSession(t *testing.T, yaml string, cancelAfter time.Duration, tweak f
 		t.Fatal(err)
 	}
 	defer func() { _ = conn.Close() }()
+	// With cancelOn, the job is cancelled when it logs that line (the script
+	// prints it once it is ready to be interrupted): no timer to guess.
 	var cancel chan *execpb.Cancel
-	if cancelAfter > 0 {
+	if cancelOn != "" {
 		cancel = make(chan *execpb.Cancel, 1)
-		time.AfterFunc(cancelAfter, func() { cancel <- &execpb.Cancel{Reason: "test", Kind: execpb.CancelKind_CANCEL_KIND_USER} })
 	}
+	var cancelOnce sync.Once
 	var mu sync.Mutex
 	_, exit, err = execstream.DriveJob(conn, &execpb.Run{Job: &execpb.JobSpec{
 		WorkflowPath: ".github/workflows/ci.yml", WorkflowYaml: yaml, JobKey: "j", Repo: "hello", RunnerName: "r", RunnerVersion: "v",
@@ -60,7 +62,12 @@ func runJobSession(t *testing.T, yaml string, cancelAfter time.Duration, tweak f
 			steps = append(steps, s.Name)
 			mu.Unlock()
 		},
-		Log:       func(l *execpb.Log) { logs = append(logs, l) },
+		Log: func(l *execpb.Log) {
+			logs = append(logs, l)
+			if cancelOn != "" && l.Text == cancelOn {
+				cancelOnce.Do(func() { cancel <- &execpb.Cancel{Reason: "test", Kind: execpb.CancelKind_CANCEL_KIND_USER} })
+			}
+		},
 		JobResult: func(r *execpb.JobResult) { res = r },
 	})
 	if err != nil {
@@ -79,7 +86,7 @@ func requireBash(t *testing.T) {
 
 func TestExecRunsAJob(t *testing.T) {
 	requireBash(t)
-	steps, logs, res, exit := runJobSession(t, "on: push\njobs:\n  j:\n    runs-on: x\n    outputs:\n      o: ${{ steps.s.outputs.v }}\n    steps:\n      - id: s\n        run: |\n          echo hello-from-job\n          echo v=42 >> \"$GITHUB_OUTPUT\"\n", 0, nil)
+	steps, logs, res, exit := runJobSession(t, "on: push\njobs:\n  j:\n    runs-on: x\n    outputs:\n      o: ${{ steps.s.outputs.v }}\n    steps:\n      - id: s\n        run: |\n          echo hello-from-job\n          echo v=42 >> \"$GITHUB_OUTPUT\"\n", "", nil)
 	if res == nil || res.Conclusion != execpb.StepConclusion_STEP_CONCLUSION_SUCCESS || res.Outputs["o"] != "42" || exit.Code != 0 {
 		t.Fatalf("res=%v exit=%v", res, exit)
 	}
@@ -99,7 +106,7 @@ func TestExecRunsAJob(t *testing.T) {
 
 func TestExecJobFailureExitsNonZero(t *testing.T) {
 	requireBash(t)
-	_, _, res, exit := runJobSession(t, "on: push\njobs:\n  j:\n    runs-on: x\n    steps:\n      - run: exit 4\n", 0, nil)
+	_, _, res, exit := runJobSession(t, "on: push\njobs:\n  j:\n    runs-on: x\n    steps:\n      - run: exit 4\n", "", nil)
 	if res.Conclusion != execpb.StepConclusion_STEP_CONCLUSION_FAILURE || exit.Code == 0 {
 		t.Fatalf("res=%v exit=%v", res, exit)
 	}
@@ -107,7 +114,7 @@ func TestExecJobFailureExitsNonZero(t *testing.T) {
 
 func TestExecJobLongLinesAreContinued(t *testing.T) {
 	requireBash(t)
-	_, logs, res, _ := runJobSession(t, "on: push\njobs:\n  j:\n    runs-on: x\n    steps:\n      - run: head -c 150000 /dev/zero | tr '\\0' y; echo\n", 0, nil)
+	_, logs, res, _ := runJobSession(t, "on: push\njobs:\n  j:\n    runs-on: x\n    steps:\n      - run: head -c 150000 /dev/zero | tr '\\0' y; echo\n", "", nil)
 	if res.Conclusion != execpb.StepConclusion_STEP_CONCLUSION_SUCCESS {
 		t.Fatalf("%v", res)
 	}
@@ -130,7 +137,7 @@ func TestExecJobLongLinesAreContinued(t *testing.T) {
 func TestExecJobCancel(t *testing.T) {
 	requireBash(t)
 	start := time.Now()
-	_, _, res, _ := runJobSession(t, "on: push\njobs:\n  j:\n    runs-on: x\n    steps:\n      - run: |\n          echo ready\n          sleep 30\n", 700*time.Millisecond, nil)
+	_, _, res, _ := runJobSession(t, "on: push\njobs:\n  j:\n    runs-on: x\n    steps:\n      - run: |\n          echo ready\n          sleep 30\n", "ready", nil)
 	if res.Conclusion != execpb.StepConclusion_STEP_CONCLUSION_CANCELLED || res.RunnerShutdown {
 		t.Fatalf("%v", res)
 	}
@@ -161,10 +168,19 @@ func TestExecJobHostGoneIsAShutdown(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = c.Send(&execpb.Frame{Body: &execpb.Frame_Run{Run: &execpb.Run{Job: &execpb.JobSpec{
-		WorkflowYaml: "on: push\njobs:\n  j:\n    runs-on: x\n    steps:\n      - run: sleep 60\n", JobKey: "j", Repo: "hello",
+		WorkflowYaml: "on: push\njobs:\n  j:\n    runs-on: x\n    steps:\n      - run: echo running; sleep 60\n", JobKey: "j", Repo: "hello",
 		Contexts: `{"github":{"repository":"o/hello"}}`,
 	}}}})
-	time.Sleep(700 * time.Millisecond)
+	// Close the stream once the step is running (its first line arrived).
+	for {
+		f, err := c.Recv()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if l := f.GetLog(); l != nil && l.Text == "running" {
+			break
+		}
+	}
 	_ = conn.Close()
 	select {
 	case <-done:

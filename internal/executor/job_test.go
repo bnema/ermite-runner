@@ -278,9 +278,10 @@ func TestCancelSendsSIGINTThenStopsTheJob(t *testing.T) {
 	needTools(t, "bash")
 	c := NewCanceller()
 	started := make(chan struct{})
+	// The script prints "ready" after it installed its trap: the cancel can come
+	// at once.
 	go func() {
 		<-started
-		time.Sleep(300 * time.Millisecond)
 		c.Cancel(CancelUser)
 	}()
 	rec := newRecorder()
