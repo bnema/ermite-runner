@@ -25,9 +25,11 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/bnema/zerowrap"
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -55,6 +57,11 @@ type Forwarder struct {
 	port      int
 	// Lifetime overrides TCPLifetime; set before Listen (tests).
 	Lifetime time.Duration
+	// FreeBind binds with IP_FREEBIND, so that the gateway address may be
+	// configured after the listener. Off by default: with Docker the address
+	// exists when the network is created and a missing one is an error to
+	// report at once, not a listener on an address nobody owns. Set before Listen.
+	FreeBind bool
 
 	mu        sync.Mutex
 	listeners map[netip.Addr]*listener
@@ -94,6 +101,17 @@ func (f *Forwarder) Listen(ctx context.Context, addr netip.Addr) error {
 	}
 	hp := net.JoinHostPort(addr.String(), strconv.Itoa(f.port))
 	var lc net.ListenConfig
+	if f.FreeBind {
+		// The gateway address may not exist yet (podman's netavark configures the
+		// bridge address when the first container starts, after this listener).
+		lc.Control = func(_, _ string, c syscall.RawConn) error {
+			var serr error
+			if err := c.Control(func(fd uintptr) { serr = unix.SetsockoptInt(int(fd), unix.IPPROTO_IP, unix.IP_FREEBIND, 1) }); err != nil {
+				return err
+			}
+			return serr
+		}
+	}
 	pc, err := lc.ListenPacket(ctx, "udp", hp)
 	if err != nil {
 		return fmt.Errorf("dnsfwd: listen udp %s: %w", hp, err)

@@ -33,6 +33,7 @@ import (
 	"bnema.dev/ermite-runner/internal/netpolicy"
 	"bnema.dev/ermite-runner/internal/sandbox"
 	"bnema.dev/ermite-runner/internal/sandbox/drivers"
+	"bnema.dev/ermite-runner/internal/sandbox/vm"
 )
 
 // stubScript is the CI-1 stub job of the plan.
@@ -202,6 +203,11 @@ func leftovers(stateDir string) []string {
 		_ = filepath.WalkDir(filepath.Join(stateDir, d), func(p string, e os.DirEntry, err error) error {
 			if err == nil && p != filepath.Join(stateDir, d) {
 				rel, _ := filepath.Rel(stateDir, p)
+				// <state>/jail/<exec file name> is the jailer's static parent of the
+				// per-job chroots (like jail/ itself): not a leftover when empty.
+				if e.IsDir() && d == "jail" && filepath.Dir(rel) == "jail" {
+					return nil
+				}
 				left = append(left, "file "+rel)
 			}
 			return nil
@@ -214,8 +220,9 @@ func leftovers(stateDir string) []string {
 }
 
 // vmmProcs returns the processes whose command line carries one of our VM ids
-// (and --api-sock or --exec-file), whatever the program is called: the rule the
-// driver's Reap uses.
+// and a VMM marker (vm.IDFromCmdline: the rule the driver's scan is built on),
+// whatever the program is called. Deliberately not narrowed to the state
+// directory: the leak check wants to see any process of ours.
 func vmmProcs() map[int]string {
 	out := map[int]string{}
 	procs, _ := filepath.Glob("/proc/[0-9]*/cmdline")
@@ -224,20 +231,8 @@ func vmmProcs() map[int]string {
 		if err != nil {
 			continue
 		}
-		args := strings.Split(strings.TrimRight(string(b), "\x00"), "\x00")
-		var id string
-		var marker bool
-		for i, a := range args {
-			switch a {
-			case "--id":
-				if i+1 < len(args) && sandbox.ValidID(args[i+1]) {
-					id = args[i+1]
-				}
-			case "--api-sock", "--exec-file":
-				marker = true
-			}
-		}
-		if id == "" || !marker {
+		id := vm.IDFromCmdline(strings.Split(strings.TrimRight(string(b), "\x00"), "\x00"))
+		if id == "" {
 			continue
 		}
 		var pid int

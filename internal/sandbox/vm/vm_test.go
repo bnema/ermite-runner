@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"net/netip"
@@ -22,6 +23,7 @@ import (
 	"time"
 
 	"github.com/bnema/zerowrap"
+	"golang.org/x/sys/unix"
 
 	"bnema.dev/ermite-runner/internal/cmdrun"
 	"bnema.dev/ermite-runner/internal/execstream"
@@ -168,6 +170,8 @@ func newEnvNamed(t *testing.T, mode, argv0 string) *env {
 	}}
 	return e
 }
+
+func (e *env) driverScope() scope { return newScope(e.cfg.StateDir) }
 
 func (e *env) tapCount() int { e.mu.Lock(); defer e.mu.Unlock(); return len(e.taps) }
 
@@ -649,13 +653,13 @@ func TestFirecrackerProcsScan(t *testing.T) {
 		_ = os.MkdirAll(filepath.Join(proc, pid), 0o755)
 		_ = os.WriteFile(filepath.Join(proc, pid, "cmdline"), []byte(cmdline), 0o644)
 	}
-	mk("100", "firecracker\x00--id\x00er00112233\x00--api-sock\x00/x\x00")
-	mk("101", "/usr/bin/firecracker\x00--api-sock\x00/x\x00--id\x00er44556677\x00")
+	mk("100", "firecracker\x00--id\x00er00112233\x00--api-sock\x00/var/lib/er/vm/er00112233/api.sock\x00")
+	mk("101", "/usr/bin/firecracker\x00--api-sock\x00/var/lib/er/vm/er44556677/api.sock\x00--id\x00er44556677\x00")
 	mk("102", "firecracker\x00--id\x00other-tool-vm\x00") // someone else's VM
 	mk("103", "bash\x00--id\x00er00112233\x00")           // not firecracker
 	mk("1", "firecracker\x00--id\x00er99999999\x00")      // pid 1 is never touched
 	mk("abc", "")
-	got := vmmProcs(proc)
+	got := vmmProcs(proc, newScope("/var/lib/er"))
 	if len(got) != 2 || got[100] != "er00112233" || got[101] != "er44556677" {
 		t.Fatalf("%v", got)
 	}
@@ -705,7 +709,7 @@ func TestReapFindsRenamedVMMByID(t *testing.T) {
 	}
 	runStub(t, conn)
 	pid := sb.(*vmSandbox).rec.PID
-	if got := cmdlineID("/proc", pid); got != sb.ID() {
+	if got := cmdlineID("/proc", pid, e.driverScope()); got != sb.ID() {
 		t.Fatalf("cmdlineID=%q want %q (argv[0] is %q)", got, sb.ID(), "fc-renamed-1.17")
 	}
 	_ = d1.lock.Release()
@@ -719,20 +723,22 @@ func TestReapFindsRenamedVMMByID(t *testing.T) {
 	}
 }
 
-func TestVMIDFromCmdline(t *testing.T) {
+func TestIDFromCmdline(t *testing.T) {
 	for name, tc := range map[string]struct {
 		args []string
 		want string
 	}{
-		"firecracker":      {[]string{"firecracker", "--id", "er00112233", "--api-sock", "/x"}, "er00112233"},
-		"jailer":           {[]string{"jailer", "--id", "er00112233", "--exec-file", "/fc", "--uid", "1"}, "er00112233"},
-		"renamed":          {[]string{"anything", "--api-sock", "/x", "--id", "er44556677"}, "er44556677"},
-		"foreign id":       {[]string{"firecracker", "--id", "my-vm", "--api-sock", "/x"}, ""},
-		"no marker":        {[]string{"python", "--id", "er00112233"}, ""},
-		"id without value": {[]string{"firecracker", "--api-sock", "/x", "--id"}, ""},
-		"path-like id":     {[]string{"firecracker", "--id", "er../../../x", "--api-sock", "/x"}, ""},
+		"firecracker": {[]string{"firecracker", "--id", "er00112233", "--api-sock", "/x"}, "er00112233"},
+		"jailer":      {[]string{"jailer", "--id", "er00112233", "--exec-file", "/fc", "--uid", "1"}, "er00112233"},
+		"renamed":     {[]string{"anything", "--api-sock", "/x", "--id", "er44556677"}, "er44556677"},
+		// What a real jailer 1.17 leaves: /firecracker --id <id> --start-time-us ...
+		"jailed firecracker": {[]string{"/firecracker", "--id", "er00112233", "--start-time-us", "150801025577", "--start-time-cpu-us", "60", "--parent-cpu-time-us", "1332"}, "er00112233"},
+		"foreign id":         {[]string{"firecracker", "--id", "my-vm", "--api-sock", "/x"}, ""},
+		"no marker":          {[]string{"python", "--id", "er00112233"}, ""},
+		"id without value":   {[]string{"firecracker", "--api-sock", "/x", "--id"}, ""},
+		"path-like id":       {[]string{"firecracker", "--id", "er../../../x", "--api-sock", "/x"}, ""},
 	} {
-		if got := vmIDFromCmdline(tc.args); got != tc.want {
+		if got := IDFromCmdline(tc.args); got != tc.want {
 			t.Errorf("%s: got %q want %q", name, got, tc.want)
 		}
 	}
@@ -760,11 +766,11 @@ func TestStopKeepsNetworkWhenTheVMMSurvives(t *testing.T) {
 	e := newEnv(t, "")
 	stubborn := true
 	d, err := New(context.Background(), e.cfg, Options{Run: e.run, Net: e.plumb, BootTimeout: 5 * time.Second,
-		kill: func(pid int, to time.Duration) bool {
+		kill: func(pid int, still func() bool, to time.Duration) bool {
 			if stubborn {
 				return false
 			}
-			return killAndWait(pid, to)
+			return killAndWait(pid, still, to)
 		}})
 	if err != nil {
 		t.Fatal(err)
@@ -1020,5 +1026,284 @@ func TestRemoveCgroup(t *testing.T) {
 	_ = os.MkdirAll(filepath.Join(root, "firecracker", "er44556677", "child"), 0o755)
 	if err := removeCgroup(root, "firecracker", "er44556677"); err == nil {
 		t.Fatal("a non-empty cgroup cannot be removed and must be reported")
+	}
+}
+
+// Jailer 1.17 canonicalizes --chroot-base-dir and exits when it does not exist:
+// the driver must create it (seen on a real host, invisible with the jailer off).
+func TestNewCreatesTheJailerChrootBase(t *testing.T) {
+	e := newEnv(t, "ok")
+	e.cfg.JailerOff = false
+	e.cfg.Jailer = e.cfg.Firecracker // any executable: it is only resolved here
+	short, err := os.MkdirTemp("", "er")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.RemoveAll(short) }()
+	e.cfg.StateDir = filepath.Join(short, "s") // the jailed API socket path must fit in sun_path
+	d, err := New(context.Background(), e.cfg, Options{Run: e.run, Net: e.plumb, BootTimeout: 5 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = d.Close() }()
+	st, err := os.Stat(jailBase(e.cfg.StateDir))
+	if err != nil || !st.IsDir() {
+		t.Fatalf("jail base not created: %v", err)
+	}
+}
+
+// GO-004: the longest socket path of a VM, in both jailer modes, 107 bytes ok /
+// 108 rejected.
+func TestSocketPathBoundaryInBothModes(t *testing.T) {
+	for _, jailed := range []bool{true, false} {
+		name := map[bool]string{true: "jailed", false: "unjailed"}[jailed]
+		// Find the longest socket path with an empty-ish state dir, then pad the
+		// state dir so that it is exactly maxSockPath, then one more.
+		longest := func(state string) int {
+			n := 0
+			for _, p := range socketPaths(state, "firecracker", jailed) {
+				n = max(n, len(p))
+			}
+			return n
+		}
+		base := "/s"
+		pad := maxSockPath - longest(base)
+		if pad < 0 {
+			t.Fatalf("%s: base already too long", name)
+		}
+		ok := base + strings.Repeat("d", pad)
+		if longest(ok) != maxSockPath {
+			t.Fatalf("%s: longest=%d want %d", name, longest(ok), maxSockPath)
+		}
+		if err := checkSocketPaths(ok, "firecracker", jailed); err != nil {
+			t.Errorf("%s: %d bytes rejected: %v", name, maxSockPath, err)
+		}
+		err := checkSocketPaths(ok+"d", "firecracker", jailed)
+		if err == nil || !strings.Contains(err.Error(), "limit of a Unix socket") {
+			t.Errorf("%s: %d bytes accepted: %v", name, maxSockPath+1, err)
+		}
+	}
+}
+
+func TestNewRejectsAStateDirThatMakesASocketPathTooLong(t *testing.T) {
+	for _, jailerOff := range []bool{false, true} {
+		e := newEnv(t, "ok")
+		e.cfg.JailerOff = jailerOff
+		e.cfg.Jailer = e.cfg.Firecracker
+		e.cfg.StateDir = filepath.Join(e.cfg.StateDir, strings.Repeat("d", 60))
+		_, err := New(context.Background(), e.cfg, Options{Run: e.run, Net: e.plumb, BootTimeout: 5 * time.Second})
+		if err == nil || !strings.Contains(err.Error(), "limit of a Unix socket") {
+			t.Fatalf("jailerOff=%v: want a clear socket path error, got %v", jailerOff, err)
+		}
+	}
+}
+
+// GO-003: the chroot base must be a real directory, owned by root (or the
+// runner's own user), not writable by group or others; an existing one is never
+// chmod-ed into compliance.
+func TestEnsureJailBase(t *testing.T) {
+	root := t.TempDir()
+	good := filepath.Join(root, "good")
+	if err := ensureJailBase(good); err != nil {
+		t.Fatal(err)
+	}
+	if fi, _ := os.Stat(good); fi.Mode().Perm() != 0o700 {
+		t.Fatalf("created with %v", fi.Mode().Perm())
+	}
+	if err := ensureJailBase(good); err != nil { // idempotent
+		t.Fatal(err)
+	}
+	for name, mode := range map[string]os.FileMode{"group-writable": 0o770, "other-writable": 0o707, "sticky-world": 0o777} {
+		d := filepath.Join(root, name)
+		_ = os.Mkdir(d, 0o700)
+		_ = os.Chmod(d, mode)
+		if err := ensureJailBase(d); err == nil || !strings.Contains(err.Error(), "writable by group or others") {
+			t.Errorf("%s: %v", name, err)
+		}
+		if fi, _ := os.Stat(d); fi.Mode().Perm() != mode {
+			t.Errorf("%s: mode was changed to %v", name, fi.Mode().Perm())
+		}
+	}
+	rx := filepath.Join(root, "rx")
+	_ = os.Mkdir(rx, 0o755) // readable by others is fine
+	_ = os.Chmod(rx, 0o755)
+	if err := ensureJailBase(rx); err != nil {
+		t.Errorf("0755 refused: %v", err)
+	}
+	file := filepath.Join(root, "file")
+	_ = os.WriteFile(file, nil, 0o600)
+	if err := ensureJailBase(file); err == nil {
+		t.Error("a file accepted")
+	}
+	link := filepath.Join(root, "link")
+	_ = os.Symlink(good, link)
+	if err := ensureJailBase(link); err == nil || !strings.Contains(err.Error(), "not a directory") {
+		t.Errorf("a symlink accepted: %v", err)
+	}
+}
+
+type fakeInfo struct {
+	fs.FileInfo
+	uid uint32
+}
+
+func (f fakeInfo) Sys() any { return &syscall.Stat_t{Uid: f.uid} }
+
+func TestJailBaseOwner(t *testing.T) {
+	fi, err := os.Stat(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := "/x/jail"
+	mine := os.Geteuid()
+	if err := checkJailBaseInfo(d, fakeInfo{fi, 0}, mine); err != nil {
+		t.Errorf("root-owned refused: %v", err)
+	}
+	if err := checkJailBaseInfo(d, fakeInfo{fi, uint32(mine)}, mine); err != nil {
+		t.Errorf("own user refused: %v", err)
+	}
+	if err := checkJailBaseInfo(d, fakeInfo{fi, uint32(mine) + 4242}, mine); err == nil || !strings.Contains(err.Error(), "owned by uid") {
+		t.Errorf("foreign owner accepted: %v", err)
+	}
+}
+
+// GO-001: a Firecracker with only the jailer's --start-time-us is ours only when
+// it lives in our jail base; a jailer only when it was given our chroot base.
+func TestScanIsScopedToOurJailBase(t *testing.T) {
+	state := t.TempDir()
+	sc := newScope(state)
+	foreign := t.TempDir()
+	proc := t.TempDir()
+	mk := func(pid, root string, args ...string) {
+		dir := filepath.Join(proc, pid)
+		_ = os.MkdirAll(dir, 0o755)
+		_ = os.WriteFile(filepath.Join(dir, "cmdline"), []byte(strings.Join(args, "\x00")+"\x00"), 0o644)
+		if root != "" {
+			if err := os.Symlink(root, filepath.Join(dir, "root")); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	ours := filepath.Join(jailBase(state), "firecracker", "er00112233", "root")
+	if err := os.MkdirAll(ours, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// What a pivot_root'ed jailed VMM looks like: its root is our chroot directory
+	// but readlink does not say so (it says "/"); a symlinked alias reproduces
+	// that: another path, same inode.
+	alias := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(ours, alias); err != nil {
+		t.Fatal(err)
+	}
+	// Our jail base has a chroot for another id: a foreign VMM must not match it.
+	if err := os.MkdirAll(filepath.Join(jailBase(state), "firecracker", "er44556677", "root"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	foreignRoot := filepath.Join(foreign, "jail", "firecracker", "er44556677", "root")
+	_ = os.MkdirAll(foreignRoot, 0o755)
+	mk("100", ours, "/firecracker", "--id", "er00112233", "--start-time-us", "1", "--start-time-cpu-us", "2")
+	mk("101", foreignRoot, "/firecracker", "--id", "er44556677", "--start-time-us", "1")
+	mk("109", alias, "/firecracker", "--id", "er00112233", "--start-time-us", "1") // same inode, other path
+	mk("110", alias, "/firecracker", "--id", "er77777777", "--start-time-us", "1") // our dir, but not that id's chroot
+	mk("102", "/", "/firecracker", "--id", "er8899aabb", "--start-time-us", "1")   // not chrooted at all
+	mk("103", "", "/firecracker", "--id", "er0000cccc", "--start-time-us", "1")    // root unreadable
+	mk("104", "/", "jailer", "--id", "er11111111", "--exec-file", "/fc", "--chroot-base-dir", jailBase(state))
+	mk("105", "/", "jailer", "--id", "er22222222", "--exec-file", "/fc", "--chroot-base-dir", filepath.Join(foreign, "jail"))
+	mk("106", "/", "jailer", "--id", "er33333333", "--exec-file", "/fc")
+	mk("107", ours+"/../../../../x", "/firecracker", "--id", "er55555555", "--start-time-us", "1") // lexical escape
+	vmDir := filepath.Join(state, "vm", "er66666666")
+	mk("108", "/", "firecracker", "--id", "er66666666", "--api-sock", filepath.Join(vmDir, "api.sock")) // unjailed, in our dir
+	mk("111", "/", "firecracker", "--id", "er99999999", "--api-sock", "/x")                             // socket elsewhere
+	mk("112", "/", "firecracker", "--id", "erabababab", "--api-sock", filepath.Join(vmDir, "api.sock")) // our dir, another id
+	mk("113", "/", "firecracker", "--id", "er66666666", "--api-sock", vmDir+"/../../x/api.sock")        // escapes by ..
+	mk("114", "/", "firecracker", "--id", "er66666666", "--api-sock", "vm/er66666666/api.sock")         // relative
+	mk("115", "/", "firecracker", "--id", "er66666666", "--api-sock")                                   // no value
+	mk("116", "/", "firecracker", "--id", "er66666666", "--api-sock", vmDir+"x/api.sock")               // prefix sibling
+	got := vmmProcs(proc, sc)
+	want := map[int]string{100: "er00112233", 104: "er11111111", 108: "er66666666", 109: "er00112233"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v want %v", got, want)
+	}
+	for pid, id := range want {
+		if got[pid] != id {
+			t.Fatalf("got %v want %v", got, want)
+		}
+	}
+	if cmdlineID(proc, 101, sc) != "" || cmdlineID(proc, 100, sc) != "er00112233" {
+		t.Fatal("cmdlineID must apply the same scope")
+	}
+}
+
+// GO-001 (pid reuse): the kill goes through a pidfd, after the identity check.
+func startSleeper(t *testing.T) *exec.Cmd {
+	t.Helper()
+	c := exec.Command("sleep", "60")
+	if err := c.Start(); err != nil {
+		t.Skipf("cannot start sleep: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Process.Kill(); _ = c.Wait() })
+	return c
+}
+
+func needPidfd(t *testing.T) {
+	t.Helper()
+	fd, err := unix.PidfdOpen(os.Getpid(), 0)
+	if err != nil {
+		t.Skipf("no pidfd on this kernel: %v", err)
+	}
+	_ = unix.Close(fd)
+}
+
+func TestKillAndWaitKillsThroughThePidfd(t *testing.T) {
+	needPidfd(t)
+	c := startSleeper(t)
+	asked := false
+	if !killAndWait(c.Process.Pid, func() bool { asked = true; return true }, 5*time.Second) {
+		t.Fatal("the process is still there")
+	}
+	if !asked {
+		t.Fatal("the identity check did not run")
+	}
+	// The child is a zombie now (we have not waited for it): it must count as gone.
+	if _, err := c.Process.Wait(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestKillAndWaitDoesNotKillAMismatchAfterTheOpen(t *testing.T) {
+	needPidfd(t)
+	c := startSleeper(t)
+	// The pid now belongs to something that is not the VMM we meant (what a
+	// recycled pid looks like): no signal, and "gone" (the VMM we meant is).
+	if !killAndWait(c.Process.Pid, func() bool { return false }, 2*time.Second) {
+		t.Fatal("a mismatch means the intended process is gone: true expected")
+	}
+	if !pidAlive(c.Process.Pid) {
+		t.Fatal("a process that failed the identity check was killed")
+	}
+}
+
+func TestKillAndWaitOnAProcessThatIsAlreadyGone(t *testing.T) {
+	needPidfd(t)
+	c := exec.Command("true")
+	if err := c.Run(); err != nil {
+		t.Skip(err)
+	}
+	called := false
+	if !killAndWait(c.Process.Pid, func() bool { called = true; return true }, time.Second) {
+		t.Fatal("a reaped process must count as gone")
+	}
+	_ = called
+}
+
+func TestKillAndWaitReportsAProcessThatStays(t *testing.T) {
+	needPidfd(t)
+	// pid 1 cannot be killed by us in a test (and must never be: the identity
+	// check says it is ours here only to show the failure path would not hang).
+	if os.Geteuid() == 0 {
+		t.Skip("root could signal pid 1")
+	}
+	if killAndWait(1, func() bool { return true }, 200*time.Millisecond) {
+		t.Fatal("an unkillable process was reported gone")
 	}
 }

@@ -15,6 +15,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"net/netip"
 	"os"
@@ -52,7 +53,7 @@ type Options struct {
 	// FreeSpace overrides statfs for the free-space warning (tests).
 	FreeSpace func(string) (int64, error)
 	// kill overrides killAndWait (tests simulate a VMM that cannot be killed).
-	kill func(pid int, timeout time.Duration) bool
+	kill func(pid int, still func() bool, timeout time.Duration) bool
 }
 
 // vmmOverheadMiB is what the Firecracker process itself may use on top of the
@@ -120,7 +121,17 @@ func New(ctx context.Context, cfg sandbox.Config, opt Options) (*Driver, error) 
 	}
 	fail := func(err error) (*Driver, error) { _ = d.Close(); return nil, err }
 
+	// A path over sun_path fails later as a 10 s "API not ready" (or a vsock
+	// that never connects): refuse at start, in both modes.
+	if err := checkSocketPaths(cfg.StateDir, filepath.Base(d.fcPath), !cfg.JailerOff); err != nil {
+		return fail(err)
+	}
 	if !cfg.JailerOff {
+		// Jailer 1.17 canonicalizes --chroot-base-dir and fails when it does not
+		// exist ("Failed to canonicalize path"); older releases created it.
+		if err := ensureJailBase(jailBase(cfg.StateDir)); err != nil {
+			return fail(err)
+		}
 		for _, p := range []string{cfg.KernelPath(), cfg.BaseImagePath()} {
 			if err := checkWorldReadable(p); err != nil {
 				return fail(err)
@@ -190,6 +201,9 @@ func (d *Driver) New() (sandbox.Sandbox, error) {
 	}
 	return &vmSandbox{d: d, slot: slot, id: id}, nil
 }
+
+// scope narrows the /proc scan to this driver's own jail base.
+func (d *Driver) scope() scope { return newScope(d.cfg.StateDir) }
 
 func (d *Driver) release(slot int) {
 	d.mu.Lock()
@@ -390,6 +404,66 @@ func (s *vmSandbox) bootVsock() (<-chan acceptResult, error) {
 
 const udsName = "v.sock"
 
+// maxSockPath is the longest Unix socket path Linux accepts (108 with the NUL).
+const maxSockPath = 107
+
+// socketPaths lists the host paths of the unix sockets of a VM: the API socket
+// and the vsock listener (the guest's UDS path plus "_<port>"). With the jailer
+// they are deep in the chroot; without it they sit in <state>/vm/<id>.
+func socketPaths(stateDir, execName string, jailed bool) []string {
+	lay := newLayout(stateDir, execName, "er00000000", jailed, 0)
+	api := lay.host("api.sock")
+	if jailed {
+		api = lay.host("run/firecracker.socket")
+	}
+	return []string{api, lay.host(udsName) + fmt.Sprintf("_%d", sandbox.VsockPort)}
+}
+
+// checkSocketPaths refuses a state directory that makes a VM socket path longer
+// than a unix socket address.
+func checkSocketPaths(stateDir, execName string, jailed bool) error {
+	for _, p := range socketPaths(stateDir, execName, jailed) {
+		if len(p) > maxSockPath {
+			return fmt.Errorf("socket path %q is %d bytes, over the %d-byte limit of a Unix socket: use a shorter %s", p, len(p), maxSockPath, sandbox.EnvStateDir)
+		}
+	}
+	return nil
+}
+
+// ensureJailBase creates the jailer's chroot base and refuses one that others
+// could use to redirect the jailer: anything but a real directory (a symlink is
+// not followed), owned by neither root nor the runner's own user, or writable by
+// group or others. An existing directory is checked, never chmod-ed.
+func ensureJailBase(dir string) error {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("jailer chroot base: %w", err)
+	}
+	fi, err := os.Lstat(dir)
+	if err != nil {
+		return fmt.Errorf("jailer chroot base: %w", err)
+	}
+	return checkJailBaseInfo(dir, fi, os.Geteuid())
+}
+
+func checkJailBaseInfo(dir string, fi fs.FileInfo, euid int) error {
+	if !fi.IsDir() {
+		return fmt.Errorf("jailer chroot base %s is not a directory (%v): remove it", dir, fi.Mode().Type())
+	}
+	if fi.Mode().Perm()&0o022 != 0 {
+		return fmt.Errorf("jailer chroot base %s is writable by group or others (mode %04o): chmod go-w it", dir, fi.Mode().Perm())
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return fmt.Errorf("jailer chroot base %s: cannot read its owner", dir)
+	}
+	// The jailer needs root, so the runner is root in production; accepting its own
+	// user as well keeps the driver testable without root.
+	if int(st.Uid) != 0 && int(st.Uid) != euid {
+		return fmt.Errorf("jailer chroot base %s is owned by uid %d, not root: chown it", dir, st.Uid)
+	}
+	return nil
+}
+
 func (s *vmSandbox) vmConfig(spec sandbox.JobSpec, netw netpolicy.Net, f vmFiles) vmConfig {
 	cfg := s.d.cfg
 	return vmConfig{
@@ -495,7 +569,7 @@ func (s *vmSandbox) startVMM(spec sandbox.JobSpec, apiSock string) error {
 func (s *vmSandbox) awaitVMMGone() {
 	for {
 		alive := false
-		for pid, id := range vmmProcs(s.d.opt.ProcDir) {
+		for pid, id := range vmmProcs(s.d.opt.ProcDir, s.d.scope()) {
 			if id == s.id && pidAlive(pid) {
 				alive = true
 			}
@@ -554,7 +628,7 @@ func (s *vmSandbox) vmmPIDs() []int {
 	if s.cmd != nil && s.cmd.Process != nil {
 		set[s.cmd.Process.Pid] = true
 	}
-	for pid, id := range vmmProcs(s.d.opt.ProcDir) {
+	for pid, id := range vmmProcs(s.d.opt.ProcDir, s.d.scope()) {
 		if id == s.id {
 			set[pid] = true
 		}
@@ -564,6 +638,12 @@ func (s *vmSandbox) vmmPIDs() []int {
 		out = append(out, pid)
 	}
 	return out
+}
+
+// stillMine is the identity check handed to the kill: pid still carries this
+// VM's id and passes the scope (command line and root).
+func (s *vmSandbox) stillMine(pid int) func() bool {
+	return func() bool { return cmdlineID(s.d.opt.ProcDir, pid, s.d.scope()) == s.id }
 }
 
 // cleanupLocked removes everything the VM created, in dependency order. Steps
@@ -585,11 +665,11 @@ func (s *vmSandbox) cleanupLocked(ctx context.Context) error {
 		s.listener = nil
 	}
 	dead := true
-	if s.cmd != nil && s.cmd.Process != nil {
-		_ = syscall.Kill(-s.cmd.Process.Pid, syscall.SIGKILL) // the whole group
-	}
+	// No kill(-pgid) of the launched command: once it has been waited for, its
+	// pid (and so its group id) may belong to anyone. Every process of this VM is
+	// found by the scan (id, markers and scope) and killed through a pidfd.
 	for _, pid := range s.vmmPIDs() {
-		if !d.opt.kill(pid, 5*time.Second) {
+		if !d.opt.kill(pid, s.stillMine(pid), 5*time.Second) {
 			dead = false
 			errs = append(errs, fmt.Errorf("vmm process %d did not exit", pid))
 		}

@@ -39,7 +39,7 @@ func (d *Driver) Reap(ctx context.Context) error {
 	if err != nil {
 		errs = append(errs, err)
 	}
-	procs := vmmProcs(d.opt.ProcDir)
+	procs := vmmProcs(d.opt.ProcDir, d.scope())
 	killed := map[int]bool{}
 	killProc := func(pid int, id string) {
 		if killed[pid] {
@@ -47,7 +47,7 @@ func (d *Driver) Reap(ctx context.Context) error {
 		}
 		killed[pid] = true
 		log.Warn().Int("pid", pid).Str("vm", id).Msg("reaping leftover VMM process")
-		if !d.opt.kill(pid, 5*time.Second) {
+		if !d.opt.kill(pid, func() bool { return cmdlineID(d.opt.ProcDir, pid, d.scope()) == id }, 5*time.Second) {
 			errs = append(errs, fmt.Errorf("vmm process %d (%s) did not exit", pid, id))
 		}
 	}
@@ -55,7 +55,7 @@ func (d *Driver) Reap(ctx context.Context) error {
 	// carries this record's id (pids are reused); then every other process of
 	// ours found in /proc, which also covers a lost state directory.
 	for _, r := range recs {
-		if r.PID > 0 && cmdlineID(d.opt.ProcDir, r.PID) == r.ID {
+		if r.PID > 0 && cmdlineID(d.opt.ProcDir, r.PID, d.scope()) == r.ID {
 			killProc(r.PID, r.ID)
 		}
 	}
@@ -124,10 +124,11 @@ func (d *Driver) Reap(ctx context.Context) error {
 
 // cmdlineID returns the VM id in the command line of pid, or "" (not running,
 // not ours, or recycled for another program).
-func cmdlineID(procDir string, pid int) string {
-	b, err := os.ReadFile(filepath.Join(procDir, strconv.Itoa(pid), "cmdline"))
+func cmdlineID(procDir string, pid int, sc scope) string {
+	dir := filepath.Join(procDir, strconv.Itoa(pid))
+	b, err := os.ReadFile(filepath.Join(dir, "cmdline"))
 	if err != nil || len(b) == 0 {
 		return ""
 	}
-	return vmIDFromCmdline(strings.Split(strings.TrimRight(string(b), "\x00"), "\x00"))
+	return sc.match(dir, strings.Split(strings.TrimRight(string(b), "\x00"), "\x00"))
 }

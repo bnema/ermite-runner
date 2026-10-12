@@ -8,11 +8,13 @@ import (
 	"fmt"
 	"io"
 	"net/netip"
+	"strings"
 
 	cerrdefs "github.com/containerd/errdefs"
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/mount"
 	"github.com/moby/moby/api/types/network"
+	"github.com/moby/moby/api/types/system"
 	"github.com/moby/moby/client"
 )
 
@@ -47,6 +49,9 @@ type daemonInfo struct {
 	Rootless bool
 	Runtimes []string
 	OSType   string
+	// Podman: the "Docker API" is podman's compatibility service, whose netavark
+	// configures a bridge address only when the first container starts.
+	Podman bool
 }
 
 type networkSpec struct {
@@ -108,7 +113,22 @@ func (e *dockerEngine) Info(ctx context.Context) (daemonInfo, error) {
 	for name := range r.Info.Runtimes {
 		di.Runtimes = append(di.Runtimes, name)
 	}
+	// Best effort: a daemon that cannot say what it is is treated as Docker.
+	if v, err := e.cli.ServerVersion(ctx, client.ServerVersionOptions{}); err == nil {
+		di.Podman = isPodman(v.Components)
+	}
 	return di, nil
+}
+
+// isPodman reports whether the daemon's version components name Podman (its
+// compatibility service lists "Podman Engine"; Docker lists "Engine").
+func isPodman(components []system.ComponentVersion) bool {
+	for _, c := range components {
+		if strings.HasPrefix(c.Name, "Podman") {
+			return true
+		}
+	}
+	return false
 }
 
 func (e *dockerEngine) EnsureImage(ctx context.Context, ref string) error {
