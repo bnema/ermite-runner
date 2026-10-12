@@ -6,7 +6,7 @@
 //	ERMITE_RUNNER_IT_E2E=1 ERMITE_RUNNER_TEST_IMAGE=ermite-runner-ubuntu-24.04:dev go test ./internal/e2e
 //
 // On a workstation with a rootless Docker daemon the container driver is used
-// with AllowRootless (a test-only option): the jobs run as in production except
+// with UnsafeAllowRootlessForTests (a test-only option): the jobs run as in production except
 // that the nested dockerd of the image cannot start, which these tests do not
 // need. The production paths that need root (jailer, rootful Docker, sysbox)
 // are not covered here.
@@ -79,7 +79,7 @@ func newDriver(t *testing.T, image string) sandbox.Driver {
 	_ = os.WriteFile(empty, nil, 0o644)
 	run := rootlessMountRunner{image: image, mountinfo: empty, mu: &sync.Mutex{}}
 	d, err := container.New(context.Background(), cfg, container.Options{
-		Net: sandboxtest.NewPlumbing(), AllowRootless: true, ConnectTimeout: 90 * time.Second, Run: run,
+		Net: sandboxtest.NewPlumbing(), UnsafeAllowRootlessForTests: true, ConnectTimeout: 90 * time.Second, Run: run,
 		Mounter: &disk.Mounter{Run: run, Mountinfo: empty},
 	})
 	if err != nil {

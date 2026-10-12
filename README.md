@@ -217,7 +217,7 @@ sudo env GOWORK=off ERMITE_RUNNER_IT_CONTAINER=1 ERMITE_RUNNER_IMAGE=ermite-runn
   DOCKER_HOST=unix:///var/run/docker.sock "$(command -v go)" test -count=1 -v ./internal/sandbox/integration -run Container
 ```
 
-**Jobs end to end** (`ERMITE_RUNNER_IT_E2E=1`, `internal/e2e`): the real executor in the real image, started through the container driver. They also run on a workstation with a *rootless* Docker daemon (the test-only option `AllowRootless`; the nested `dockerd` of the image cannot start there, and the jobs do not need it). `mount` and `umount` are replaced by stand-ins, since loop mounts need root.
+**Jobs end to end** (`ERMITE_RUNNER_IT_E2E=1`, `internal/e2e`): the real executor in the real image, started through the container driver. They also run on a workstation with a *rootless* Docker daemon (the test-only option `UnsafeAllowRootlessForTests`; the nested `dockerd` of the image cannot start there, and the jobs do not need it). `mount` and `umount` are replaced by stand-ins, since loop mounts need root.
 
 ```sh
 IMAGE_TAG=ermite-runner-ubuntu-24.04:dev scripts/build-image.sh tmp/image     # or: docker build -t ermite-runner-ubuntu-24.04:dev images/ubuntu-24.04
