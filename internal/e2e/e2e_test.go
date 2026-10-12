@@ -147,16 +147,6 @@ type session struct {
 	Exit    *execpb.Exit
 }
 
-func (s *session) log(step int32) []string {
-	var out []string
-	for i, l := range s.Logs {
-		if s.LogStep[i] == step {
-			out = append(out, l)
-		}
-	}
-	return out
-}
-
 // runJob starts a sandbox, drives the job and stops the sandbox.
 func runJob(t *testing.T, d sandbox.Driver, spec *execpb.JobSpec, cancel <-chan *execpb.Cancel) *session {
 	t.Helper()
