@@ -551,7 +551,7 @@ func validOutputName(n string) bool {
 	}
 	for i, r := range n {
 		letter := r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r == '_'
-		if !(letter || (i > 0 && (r >= '0' && r <= '9' || r == '-'))) {
+		if ok := letter || (i > 0 && (r >= '0' && r <= '9' || r == '-')); !ok {
 			return false
 		}
 	}

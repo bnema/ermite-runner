@@ -14,8 +14,6 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
-	"golang.org/x/net/http2"
-	"golang.org/x/net/http2/h2c"
 
 	ermite "bnema.dev/ermite-api/gen/ermite"
 	"bnema.dev/ermite-api/gen/ermite/ermiteconnect"
@@ -40,10 +38,9 @@ type fakeServer struct {
 	pollCalls  int
 	retryAfter time.Duration
 
-	beats       []time.Time
-	beatHook    func(n int) error
-	registers   []*ermite.RegisterRunnerRequest
-	registerTok string
+	beats     []time.Time
+	beatHook  func(n int) error
+	registers []*ermite.RegisterRunnerRequest
 
 	lines      []string // log text, joined pieces are not merged: one per line
 	cont       []bool
@@ -283,12 +280,11 @@ func (s *fakeServer) WatchJob(ctx context.Context, r *connect.Request[ermite.Wat
 	}
 }
 
-// start serves the handler over h2c on a local port and returns its URL.
+// start serves the handler over HTTP/1.1 on a local port (Connect streams server messages over it) and returns its URL.
 func (s *fakeServer) start(t *testing.T) string {
 	t.Helper()
 	_, h := ermiteconnect.NewRunnerServiceHandler(s)
-	srv := httptest.NewUnstartedServer(h2c.NewHandler(h, &http2.Server{}))
-	srv.Start()
+	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
 	return srv.URL
 }

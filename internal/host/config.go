@@ -71,7 +71,7 @@ func LoadConfig(getenv func(string) string, hostname, stateDir string, capacity 
 func sanitizeName(s string) string {
 	b := []byte(s)
 	for i, ch := range b {
-		if !(ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z' || ch >= '0' && ch <= '9' || ch == '.' || ch == '_' || ch == '-') {
+		if ok := ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z' || ch >= '0' && ch <= '9' || ch == '.' || ch == '_' || ch == '-'; !ok {
 			b[i] = '-'
 		}
 	}

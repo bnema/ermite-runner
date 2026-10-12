@@ -48,6 +48,41 @@ The host sends a `Cancel{reason}` frame (`execstream.Drive` takes a cancel chann
 
 Everything a job creates (process, TAP or bridge, nftables rules, files, loop mounts, containers, networks, cgroups) is removed by `Stop`, which also runs with a cancelled context, aborts a `Start` in progress, and by `Reap` at start for what a crash left behind. A VM leaves a state record (`<state dir>/vms/<id>.json`) before its first resource. **The network policy and the TAP or bridge are never removed while the VMM or the container may still be running**: when a process cannot be killed or a container cannot be removed, `Stop` returns an error wrapping `sandbox.ErrLeaked`, the sandbox's slot stays taken, and `Driver.Reap` (which returns `sandbox.ErrBusy` while a sandbox is running) finishes the job and frees the slot. The host should stop taking jobs on a leaked slot until then. `Sandbox.ID()` names a sandbox's files and Docker objects.
 
+## Running jobs
+
+```
+ermite-runner register --token <token with runner:register>   # once
+ermite-runner run                                              # as a service
+```
+
+`register` picks the isolation mode like `run` will, registers the runner with
+ermite (name, labels, version, isolation, architecture) and stores the runner
+token in `$ERMITE_RUNNER_STATE_DIR/runner.json` (mode 0600; a file readable by
+others is refused). The register token can also come from
+`ERMITE_RUNNER_REGISTER_TOKEN`; `--replace` removes a runner of the same name
+first.
+
+`run` reaps what a previous run left, then polls `FetchJob` whenever a slot is
+free (`ERMITE_RUNNER_CAPACITY`), with a `poll_id` that is kept when a response
+is lost and obeying `retry_after`. For each job it sends the acknowledging
+heartbeat first, then one every 30 s (a failed one is retried every 5 s), opens
+`WatchJob` (a cancel request reaches the executor, which interrupts, terminates
+and kills like the official runner), forwards the log with `AppendLog`
+(batches of at most 1,000 lines and 64 KiB per step, numbered offsets, retried
+with the same lines), sends step snapshots with `UpdateJob` and ends with an
+idempotent `CompleteJob`. When ermite says the job ended (`JobEnded`) or revokes
+the assignment (`unauthenticated`) the sandbox is destroyed and nothing more is
+sent. On SIGINT or SIGTERM the running jobs are cancelled with
+`runner_shutdown`, reported, and the sandboxes removed. The job token stays in
+the host process; the sandbox receives the workflow and its contexts only.
+
+| Variable | Meaning |
+| --- | --- |
+| `ERMITE_RUNNER_URL` | base URL of ermite |
+| `ERMITE_RUNNER_NAME` | runner name (default: the host name) |
+| `ERMITE_RUNNER_LABELS` | extra labels, comma separated (`ubuntu-latest,ubuntu-24.04`) |
+| `ERMITE_RUNNER_REGISTER_TOKEN` | token for `register` |
+
 ## Configuration (sandbox part)
 
 | Variable | Default | |
