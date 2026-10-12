@@ -440,3 +440,18 @@ func TestUDPSaturationDropsAndIsolatesListeners(t *testing.T) {
 		t.Fatalf("another listener must not be starved by the flood: n=%d err=%v", n, err)
 	}
 }
+
+// The gateway address can be configured after the listener starts (podman's
+// netavark creates the bridge address only when the first container starts):
+// Listen must bind an address the host does not own yet (IP_FREEBIND).
+func TestListenOnAnAddressTheHostDoesNotOwnYet(t *testing.T) {
+	f := New(func() []string { return nil }, 0)
+	t.Cleanup(f.CloseAll)
+	ip := netip.MustParseAddr("203.0.113.77") // TEST-NET-3: never configured here
+	if err := f.Listen(context.Background(), ip); err != nil {
+		t.Fatalf("listen on a not-yet-configured address: %v", err)
+	}
+	if _, ok := f.Addr(ip); !ok {
+		t.Fatal("no listener")
+	}
+}

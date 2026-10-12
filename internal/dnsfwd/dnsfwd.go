@@ -25,9 +25,11 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/bnema/zerowrap"
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -93,7 +95,16 @@ func (f *Forwarder) Listen(ctx context.Context, addr netip.Addr) error {
 		return fmt.Errorf("dnsfwd: already listening on %s", addr)
 	}
 	hp := net.JoinHostPort(addr.String(), strconv.Itoa(f.port))
-	var lc net.ListenConfig
+	// IP_FREEBIND: the gateway address may not exist yet. Docker creates the
+	// bridge (and its address) with the network, but podman's netavark only when
+	// the first container starts, which is after the policy and this listener.
+	lc := net.ListenConfig{Control: func(_, _ string, c syscall.RawConn) error {
+		var serr error
+		if err := c.Control(func(fd uintptr) { serr = unix.SetsockoptInt(int(fd), unix.IPPROTO_IP, unix.IP_FREEBIND, 1) }); err != nil {
+			return err
+		}
+		return serr
+	}}
 	pc, err := lc.ListenPacket(ctx, "udp", hp)
 	if err != nil {
 		return fmt.Errorf("dnsfwd: listen udp %s: %w", hp, err)
