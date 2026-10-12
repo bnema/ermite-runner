@@ -20,12 +20,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/bnema/zerowrap"
-	"golang.org/x/sys/unix"
 
 	"bnema.dev/ermite-runner/internal/cmdrun"
 	"bnema.dev/ermite-runner/internal/netpolicy"
@@ -36,8 +36,11 @@ import (
 // Options are the testable knobs of the driver.
 type Options struct {
 	Run cmdrun.Runner
-	// ProcDir is the /proc used to find orphan Firecracker processes.
+	// ProcDir is the /proc used to find orphan VMM processes.
 	ProcDir string
+	// CgroupRoot is the cgroup v2 mount, where the jailer creates one cgroup per
+	// VM (default /sys/fs/cgroup).
+	CgroupRoot string
 	// BootTimeout bounds boot + init + executor connection (default 90 s).
 	BootTimeout time.Duration
 	// Net overrides the network plumbing (tests).
@@ -45,7 +48,16 @@ type Options struct {
 	// FirecrackerArgs are extra arguments for Firecracker (tests use them to
 	// select the fake).
 	FirecrackerArgs []string
+	// FreeSpace overrides statfs for the free-space warning (tests).
+	FreeSpace func(string) (int64, error)
+	// kill overrides killAndWait (tests simulate a VMM that cannot be killed).
+	kill func(pid int, timeout time.Duration) bool
 }
+
+// vmmOverheadMiB is what the Firecracker process itself may use on top of the
+// guest memory (device emulation, the API server, the seccomp filter, stacks):
+// it is added to memory.max so that the guest, not the VMM, is what gets limited.
+const vmmOverheadMiB = 256
 
 // Driver implements sandbox.Driver for micro-VMs.
 type Driver struct {
@@ -56,14 +68,15 @@ type Driver struct {
 	execDisk string
 	store    store
 	net      netsetup.Plumbing
-	lock     *os.File
+	lock     *sandbox.HostLock
 
 	mu    sync.Mutex
 	slots *sandbox.Slots
 }
 
-// New builds the driver: resolves binaries, builds the exec disk, takes the
-// state-directory lock and enables IPv4 forwarding. Run Reap before New sandboxes.
+// New builds the driver: takes the host-wide lock, resolves binaries, builds the
+// exec disk and enables IPv4 forwarding (a host-wide sysctl that stays on: see
+// the README). Run Reap before New sandboxes.
 func New(ctx context.Context, cfg sandbox.Config, opt Options) (*Driver, error) {
 	if opt.Run == nil {
 		opt.Run = cmdrun.Exec{}
@@ -71,8 +84,14 @@ func New(ctx context.Context, cfg sandbox.Config, opt Options) (*Driver, error) 
 	if opt.ProcDir == "" {
 		opt.ProcDir = "/proc"
 	}
+	if opt.CgroupRoot == "" {
+		opt.CgroupRoot = "/sys/fs/cgroup"
+	}
 	if opt.BootTimeout == 0 {
 		opt.BootTimeout = 90 * time.Second
+	}
+	if opt.kill == nil {
+		opt.kill = killAndWait
 	}
 	d := &Driver{cfg: cfg, opt: opt, slots: sandbox.NewSlots(cfg.Capacity), store: store{dir: filepath.Join(cfg.StateDir, "vms")}}
 
@@ -95,7 +114,7 @@ func New(ctx context.Context, cfg sandbox.Config, opt Options) (*Driver, error) 
 	if err := os.MkdirAll(cfg.StateDir, 0o755); err != nil {
 		return nil, fmt.Errorf("state directory: %w", err)
 	}
-	if err := d.acquireLock(); err != nil {
+	if d.lock, err = sandbox.AcquireHostLock(cfg.LockFile); err != nil {
 		return nil, err
 	}
 	fail := func(err error) (*Driver, error) { _ = d.Close(); return nil, err }
@@ -107,6 +126,7 @@ func New(ctx context.Context, cfg sandbox.Config, opt Options) (*Driver, error) 
 			}
 		}
 	}
+	sandbox.WarnIfLowSpace(ctx, cfg.StateDir, cfg.Capacity, cfg.JobDiskMiB, opt.FreeSpace)
 	if d.execDisk, err = ensureExecDisk(ctx, opt.Run, exe, cfg.StateDir); err != nil {
 		return fail(err)
 	}
@@ -138,44 +158,33 @@ func resolveBin(configured, name string) (string, error) {
 	return abs, nil
 }
 
-func (d *Driver) acquireLock() error {
-	f, err := os.OpenFile(filepath.Join(d.cfg.StateDir, "vm.lock"), os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return err
-	}
-	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
-		_ = f.Close()
-		return fmt.Errorf("another ermite-runner already uses state directory %s (reaping would destroy its VMs): %w", d.cfg.StateDir, err)
-	}
-	d.lock = f
-	return nil
-}
-
 // Mode implements sandbox.Driver.
 func (d *Driver) Mode() sandbox.Mode { return sandbox.VM }
 
-// Close releases the lock and the DNS listeners.
+// Isolation implements sandbox.Driver.
+func (d *Driver) Isolation() sandbox.Isolation { return sandbox.IsolationVM }
+
+// Close releases the host lock and the DNS listeners.
 func (d *Driver) Close() error {
 	if d.net != nil {
 		d.net.Close()
 	}
-	if d.lock != nil {
-		err := d.lock.Close()
-		d.lock = nil
-		return err
-	}
-	return nil
+	return d.lock.Release()
 }
 
 // New implements sandbox.Driver.
 func (d *Driver) New() (sandbox.Sandbox, error) {
+	id, err := sandbox.NewID()
+	if err != nil {
+		return nil, err
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	slot, err := d.slots.Acquire()
 	if err != nil {
 		return nil, err
 	}
-	return &vmSandbox{d: d, slot: slot}, nil
+	return &vmSandbox{d: d, slot: slot, id: id}, nil
 }
 
 func (d *Driver) release(slot int) {
@@ -184,14 +193,26 @@ func (d *Driver) release(slot int) {
 	d.mu.Unlock()
 }
 
+func (d *Driver) markLeaked(slot int) {
+	d.mu.Lock()
+	d.slots.MarkLeaked(slot)
+	d.mu.Unlock()
+}
+
 // vmSandbox is one VM, single use.
 type vmSandbox struct {
 	d    *Driver
 	slot int
+	id   string
+	gate sandbox.BootGate
 
-	mu       sync.Mutex
-	started  bool
-	stopped  bool
+	mu      sync.Mutex
+	started bool
+	stopped bool
+	// leakErr is the error of a cleanup that left something behind; later Stop
+	// calls return it again.
+	leakErr error
+
 	rec      record
 	lay      layout
 	cmd      *exec.Cmd
@@ -204,10 +225,20 @@ type vmSandbox struct {
 	attached bool
 }
 
+// ID implements sandbox.Sandbox.
+func (s *vmSandbox) ID() string { return s.id }
+
 func (s *vmSandbox) uid() int { return s.d.cfg.UIDBase + s.slot }
 
 // Start implements sandbox.Sandbox.
 func (s *vmSandbox) Start(ctx context.Context, spec sandbox.JobSpec) (sandbox.Conn, error) {
+	// A Stop from another goroutine aborts the boot through the gate.
+	bootCtx, err := s.gate.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("vm sandbox: %w", err)
+	}
+	defer s.gate.End()
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.started || s.stopped {
@@ -218,18 +249,13 @@ func (s *vmSandbox) Start(ctx context.Context, spec sandbox.JobSpec) (sandbox.Co
 	d := s.d
 	spec = d.cfg.Resolve(spec)
 
-	id, err := sandbox.NewID()
-	if err != nil {
-		s.releaseLocked()
-		return nil, err
-	}
 	jailed := !d.cfg.JailerOff
 	runUID := s.uid()
 	if !jailed {
 		runUID = os.Getuid()
 	}
-	s.lay = newLayout(d.cfg.StateDir, filepath.Base(d.fcPath), id, jailed, runUID)
-	s.rec = record{ID: id, Slot: s.slot, Job: spec.JobID, Dir: s.lay.dir}
+	s.lay = newLayout(d.cfg.StateDir, filepath.Base(d.fcPath), s.id, jailed, runUID)
+	s.rec = record{ID: s.id, Slot: s.slot, Job: spec.JobID, Dir: s.lay.dir}
 	// The record exists before the first resource, so any crash from here on is
 	// reapable.
 	if err := d.store.save(s.rec); err != nil {
@@ -237,7 +263,7 @@ func (s *vmSandbox) Start(ctx context.Context, spec sandbox.JobSpec) (sandbox.Co
 		return nil, fmt.Errorf("write state record: %w", err)
 	}
 
-	conn, err := s.boot(ctx, spec, id)
+	conn, err := s.boot(bootCtx, spec)
 	if err != nil {
 		console := ""
 		if s.console != nil {
@@ -249,98 +275,140 @@ func (s *vmSandbox) Start(ctx context.Context, spec sandbox.JobSpec) (sandbox.Co
 		}
 		return nil, errors.Join(err, cerr)
 	}
-	log.Info().Str("vm", id).Int("slot", s.slot).Str("job", spec.JobID).Msg("micro-VM running")
+	log.Info().Str("vm", s.id).Int("slot", s.slot).Str("job", spec.JobID).Msg("micro-VM running")
 	return conn, nil
 }
 
-func (s *vmSandbox) boot(ctx context.Context, spec sandbox.JobSpec, id string) (sandbox.Conn, error) {
-	d := s.d
-	netw, err := netpolicy.Subnet(d.cfg.Network, s.slot)
+// boot runs the stages in order; each stage records what it created so that
+// cleanupLocked can undo exactly that.
+func (s *vmSandbox) boot(ctx context.Context, spec sandbox.JobSpec) (sandbox.Conn, error) {
+	netw, err := netpolicy.Subnet(s.d.cfg.Network, s.slot)
 	if err != nil {
 		return nil, err
 	}
+	if err := s.bootNetwork(ctx, netw); err != nil {
+		return nil, err
+	}
+	api, err := s.bootVMM(ctx, spec)
+	if err != nil {
+		return nil, err
+	}
+	files, err := s.bootFiles(ctx, spec)
+	if err != nil {
+		return nil, err
+	}
+	accepted, err := s.bootVsock()
+	if err != nil {
+		return nil, err
+	}
+	if err := api.configure(ctx, s.vmConfig(spec, netw, files)); err != nil {
+		return nil, err
+	}
+	return s.waitExecutor(ctx, accepted)
+}
 
-	// Network first: the TAP must exist when Firecracker opens it.
+// bootNetwork creates the TAP (it must exist when Firecracker opens it) and
+// installs the firewall policy and the DNS listener.
+func (s *vmSandbox) bootNetwork(ctx context.Context, netw netpolicy.Net) error {
+	d := s.d
 	s.tap, s.gateway = tapName(s.slot), netw.Gateway
 	s.rec.Tap, s.rec.Gate = s.tap, s.gateway.String()
 	if err := d.store.save(s.rec); err != nil {
-		return nil, err
+		return err
 	}
 	if err := createTap(ctx, d.opt.Run, s.tap, s.lay.uid, s.gateway); err != nil {
-		return nil, err
+		return err
 	}
 	s.attached = true // from here Detach is idempotent and always safe
-	if err := d.net.Attach(ctx, netpolicy.Guest{Iface: s.tap, Gateway: netw.Gateway, Addr: netw.Guest}); err != nil {
-		return nil, err
-	}
+	return d.net.Attach(ctx, netpolicy.Guest{Iface: s.tap, Gateway: netw.Gateway, Addr: netw.Guest})
+}
 
-	// The VMM process.
+// bootVMM starts the jailer (or Firecracker) and waits for its API.
+func (s *vmSandbox) bootVMM(ctx context.Context, spec sandbox.JobSpec) (*apiClient, error) {
 	apiSock := s.lay.host("api.sock")
 	if s.lay.jailed {
 		apiSock = s.lay.host("run/firecracker.socket")
 	} else if err := os.MkdirAll(s.lay.root, 0o700); err != nil {
 		return nil, err
 	}
-	if err := s.startVMM(id, apiSock); err != nil {
+	if err := s.startVMM(spec, apiSock); err != nil {
 		return nil, err
 	}
 	api := newAPIClient(apiSock)
 	if err := s.waitAPI(ctx, api, apiSock); err != nil {
 		return nil, err
 	}
+	return api, nil
+}
 
-	// Files: the process only opens them when configured below.
-	execDisk, err := s.lay.share(d.execDisk, "exec.ext4")
-	if err != nil {
-		return nil, err
-	}
-	baseDisk, err := s.lay.share(d.cfg.BaseImagePath(), "base.ext4")
-	if err != nil {
-		return nil, err
-	}
-	kernel, err := s.lay.share(d.cfg.KernelPath(), "kernel")
-	if err != nil {
-		return nil, err
-	}
-	if err := makeScratch(ctx, d.opt.Run, s.lay.host("scratch.ext4"), spec.DiskMiB); err != nil {
-		return nil, err
-	}
-	if err := s.lay.own("scratch.ext4"); err != nil {
-		return nil, err
-	}
+// vmFiles are the paths Firecracker is given.
+type vmFiles struct{ execDisk, baseDisk, kernel string }
 
-	// The host side of the vsock stream: Firecracker connects to
-	// <uds_path>_<port> when the guest connects to the host CID.
-	udsName := "v.sock"
-	ln, err := net.Listen("unix", s.lay.host(udsName)+fmt.Sprintf("_%d", sandbox.VsockPort))
+// bootFiles makes the shared files available and creates the scratch disk.
+func (s *vmSandbox) bootFiles(ctx context.Context, spec sandbox.JobSpec) (vmFiles, error) {
+	d := s.d
+	var f vmFiles
+	var err error
+	if f.execDisk, err = s.lay.share(d.execDisk, "exec.ext4"); err != nil {
+		return f, err
+	}
+	if f.baseDisk, err = s.lay.share(d.cfg.BaseImagePath(), "base.ext4"); err != nil {
+		return f, err
+	}
+	if f.kernel, err = s.lay.share(d.cfg.KernelPath(), "kernel"); err != nil {
+		return f, err
+	}
+	owner := -1
+	if s.lay.jailed {
+		owner = s.lay.uid
+	}
+	return f, makeScratch(ctx, d.opt.Run, s.lay.host("scratch.ext4"), spec.DiskMiB, owner)
+}
+
+// bootVsock listens on the host side of the vsock stream: Firecracker connects
+// to <uds_path>_<port> when the guest connects to the host CID.
+func (s *vmSandbox) bootVsock() (<-chan acceptResult, error) {
+	path := s.lay.host(udsName) + fmt.Sprintf("_%d", sandbox.VsockPort)
+	ln, err := net.Listen("unix", path)
 	if err != nil {
 		return nil, fmt.Errorf("listen vsock socket: %w", err)
 	}
 	s.listener = ln
 	if s.lay.jailed {
-		if err := os.Chown(s.lay.host(udsName+fmt.Sprintf("_%d", sandbox.VsockPort)), s.lay.uid, s.lay.uid); err != nil {
+		if err := os.Lchown(path, s.lay.uid, s.lay.uid); err != nil {
 			return nil, err
 		}
 	}
 	accepted := make(chan acceptResult, 1)
 	go func() { c, err := ln.Accept(); accepted <- acceptResult{c, err} }()
+	return accepted, nil
+}
 
-	err = api.configure(ctx, vmConfig{
+const udsName = "v.sock"
+
+func (s *vmSandbox) vmConfig(spec sandbox.JobSpec, netw netpolicy.Net, f vmFiles) vmConfig {
+	cfg := s.d.cfg
+	return vmConfig{
 		Machine: machineConfig{VcpuCount: spec.CPUs, MemSizeMiB: spec.MemoryMiB},
-		Boot:    bootSource{KernelImagePath: kernel, BootArgs: bootArgs(netw.Guest, netw.Gateway, time.Now().Unix())},
+		Boot:    bootSource{KernelImagePath: f.kernel, BootArgs: bootArgs(netw.Guest, netw.Gateway, time.Now().Unix())},
 		Drives: []drive{
-			{DriveID: "rootfs", PathOnHost: execDisk, IsRootDevice: true, IsReadOnly: true},
-			{DriveID: "base", PathOnHost: baseDisk, IsReadOnly: true},
-			{DriveID: "scratch", PathOnHost: s.lay.fc("scratch.ext4")},
+			{DriveID: "rootfs", PathOnHost: f.execDisk, IsRootDevice: true, IsReadOnly: true},
+			{DriveID: "base", PathOnHost: f.baseDisk, IsReadOnly: true},
+			{DriveID: "scratch", PathOnHost: s.lay.fc("scratch.ext4"), RateLimiter: diskLimiter(cfg.DiskBandwidthMiB, cfg.DiskIOPS)},
 		},
-		Net:   networkInterface{IfaceID: "eth0", HostDevName: s.tap, GuestMAC: macFor(s.slot)},
+		Net: networkInterface{
+			IfaceID: "eth0", HostDevName: s.tap, GuestMAC: macFor(s.slot),
+			RxRateLimiter: netLimiter(cfg.NetMbit), TxRateLimiter: netLimiter(cfg.NetMbit),
+		},
 		Vsock: vsockDevice{GuestCID: 3, UDSPath: s.lay.fc(udsName)},
-	})
-	if err != nil {
-		return nil, err
 	}
+}
 
-	timer := time.NewTimer(d.opt.BootTimeout)
+// waitExecutor waits for the guest's executor to connect. Only ctx (the caller's
+// context, or Stop through the boot gate) and the boot timeout end the wait: a
+// boot cannot be aborted any other way.
+func (s *vmSandbox) waitExecutor(ctx context.Context, accepted <-chan acceptResult) (sandbox.Conn, error) {
+	timer := time.NewTimer(s.d.opt.BootTimeout)
 	defer timer.Stop()
 	select {
 	case r := <-accepted:
@@ -352,9 +420,9 @@ func (s *vmSandbox) boot(ctx context.Context, spec sandbox.JobSpec, id string) (
 	case <-s.exited:
 		return nil, errors.New("firecracker exited before the executor connected")
 	case <-timer.C:
-		return nil, fmt.Errorf("executor did not connect within %s", d.opt.BootTimeout)
+		return nil, fmt.Errorf("executor did not connect within %s", s.d.opt.BootTimeout)
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return nil, context.Cause(ctx)
 	}
 }
 
@@ -363,18 +431,38 @@ type acceptResult struct {
 	err error
 }
 
-func (s *vmSandbox) startVMM(id, apiSock string) error {
+// jailerArgs builds the jailer command line (after the binary name).
+//
+//   - cgroup v2 with memory.max (guest memory + VMM overhead) and pids.max (a
+//     VMM needs a handful of threads per vCPU): a runaway or compromised VMM
+//     cannot take the host's memory or fork-bomb it;
+//   - a new PID namespace: the VMM cannot see or signal host processes;
+//   - no-file: the descriptor budget of the VMM.
+func jailerArgs(jailer, fc, id string, uid int, chrootBase string, spec sandbox.JobSpec, extra []string) []string {
+	memBytes := (int64(spec.MemoryMiB) + vmmOverheadMiB) << 20
+	pids := 32 + 8*spec.CPUs
+	args := []string{
+		"--id", id, "--exec-file", fc,
+		"--uid", strconv.Itoa(uid), "--gid", strconv.Itoa(uid),
+		"--chroot-base-dir", chrootBase,
+		"--cgroup-version", "2",
+		"--cgroup", "memory.max=" + strconv.FormatInt(memBytes, 10),
+		"--cgroup", "pids.max=" + strconv.Itoa(pids),
+		"--new-pid-ns",
+		"--resource-limit", "no-file=4096",
+		"--",
+	}
+	return append(args, extra...)
+}
+
+func (s *vmSandbox) startVMM(spec sandbox.JobSpec, apiSock string) error {
 	d := s.d
 	var cmd *exec.Cmd
 	if s.lay.jailed {
-		args := []string{"--id", id, "--exec-file", d.fcPath,
-			"--uid", fmt.Sprint(s.uid()), "--gid", fmt.Sprint(s.uid()),
-			"--chroot-base-dir", jailBase(d.cfg.StateDir),
-			"--resource-limit", "no-file=4096",
-			"--"}
-		cmd = exec.Command(d.jailer, append(args, d.opt.FirecrackerArgs...)...)
+		args := jailerArgs(d.jailer, d.fcPath, s.id, s.uid(), jailBase(d.cfg.StateDir), spec, d.opt.FirecrackerArgs)
+		cmd = exec.Command(d.jailer, args...)
 	} else {
-		args := append([]string{"--id", id, "--api-sock", apiSock}, d.opt.FirecrackerArgs...)
+		args := append([]string{"--id", s.id, "--api-sock", apiSock}, d.opt.FirecrackerArgs...)
 		cmd = exec.Command(d.fcPath, args...)
 	}
 	s.console = newRing(16 << 10)
@@ -385,9 +473,34 @@ func (s *vmSandbox) startVMM(id, apiSock string) error {
 	}
 	s.cmd = cmd
 	s.exited = make(chan struct{})
-	go func() { _ = cmd.Wait(); close(s.exited) }()
+	jailed := s.lay.jailed
+	go func() {
+		_ = cmd.Wait()
+		// With --new-pid-ns the jailer may exit as soon as it has started the
+		// VMM in its namespace: the VMM is then gone only when its own pid is.
+		if jailed {
+			s.awaitVMMGone()
+		}
+		close(s.exited)
+	}()
 	s.rec.PID = cmd.Process.Pid
 	return s.d.store.save(s.rec)
+}
+
+// awaitVMMGone blocks until no process of this VM's id is left.
+func (s *vmSandbox) awaitVMMGone() {
+	for {
+		alive := false
+		for pid, id := range vmmProcs(s.d.opt.ProcDir) {
+			if id == s.id && pidAlive(pid) {
+				alive = true
+			}
+		}
+		if !alive {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 func (s *vmSandbox) waitAPI(ctx context.Context, api *apiClient, sock string) error {
@@ -400,7 +513,7 @@ func (s *vmSandbox) waitAPI(ctx context.Context, api *apiClient, sock string) er
 		case <-s.exited:
 			return errors.New("firecracker exited before its API was ready")
 		case <-ctx.Done():
-			return ctx.Err()
+			return context.Cause(ctx)
 		case <-time.After(25 * time.Millisecond):
 		}
 		if time.Now().After(deadline) {
@@ -411,13 +524,14 @@ func (s *vmSandbox) waitAPI(ctx context.Context, api *apiClient, sock string) er
 
 // Stop implements sandbox.Sandbox.
 func (s *vmSandbox) Stop(ctx context.Context) error {
+	// Abort a boot in progress first: Start holds s.mu for its whole duration.
+	s.gate.Abort()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.stopped {
-		return nil
+		return s.leakErr
 	}
 	if !s.started {
-		s.stopped = true
 		s.releaseLocked()
 		return nil
 	}
@@ -429,10 +543,31 @@ func (s *vmSandbox) releaseLocked() {
 	s.d.release(s.slot)
 }
 
-// cleanupLocked removes everything the VM created, in dependency order, and
-// keeps going after an error. The state record and the slot are released only
-// when everything is gone, so that a half-failed cleanup is retried by Reap
-// rather than forgotten and the slot (hence TAP name) is not reused meanwhile.
+// vmmPIDs returns every host process of this VM: the launched command and
+// whatever the /proc scan finds with this id.
+func (s *vmSandbox) vmmPIDs() []int {
+	set := map[int]bool{}
+	if s.cmd != nil && s.cmd.Process != nil {
+		set[s.cmd.Process.Pid] = true
+	}
+	for pid, id := range vmmProcs(s.d.opt.ProcDir) {
+		if id == s.id {
+			set[pid] = true
+		}
+	}
+	var out []int
+	for pid := range set {
+		out = append(out, pid)
+	}
+	return out
+}
+
+// cleanupLocked removes everything the VM created, in dependency order. Steps
+// that need the VMM to be dead (network device, firewall rules, files, cgroup)
+// are skipped when it could not be killed: removing the TAP or the policy under
+// a VM that may still run would break the isolation it relies on, so the
+// sandbox is reported as leaked (sandbox.ErrLeaked), its slot stays taken, and
+// Reap finishes the job.
 func (s *vmSandbox) cleanupLocked(ctx context.Context) error {
 	log := zerowrap.FromCtx(ctx)
 	d := s.d
@@ -445,42 +580,60 @@ func (s *vmSandbox) cleanupLocked(ctx context.Context) error {
 		_ = s.listener.Close()
 		s.listener = nil
 	}
+	dead := true
 	if s.cmd != nil && s.cmd.Process != nil {
-		killAndWait(s.cmd.Process.Pid, 5*time.Second)
+		_ = syscall.Kill(-s.cmd.Process.Pid, syscall.SIGKILL) // the whole group
+	}
+	for _, pid := range s.vmmPIDs() {
+		if !d.opt.kill(pid, 5*time.Second) {
+			dead = false
+			errs = append(errs, fmt.Errorf("vmm process %d did not exit", pid))
+		}
+	}
+	if dead && s.exited != nil {
 		select {
 		case <-s.exited:
 		case <-time.After(5 * time.Second):
-			errs = append(errs, fmt.Errorf("firecracker pid %d did not exit", s.cmd.Process.Pid))
+			dead = false
+			errs = append(errs, errors.New("vmm exit was not observed"))
 		}
 	}
-	if s.attached {
-		if err := d.net.Detach(ctx, s.tap, s.gateway); err != nil {
-			errs = append(errs, err)
+	if dead {
+		if s.attached {
+			if err := d.net.Detach(ctx, s.tap, s.gateway); err != nil {
+				errs = append(errs, err)
+			}
+			if err := deleteTap(ctx, d.opt.Run, s.tap); err != nil {
+				errs = append(errs, err)
+			} else {
+				s.attached = false
+			}
 		}
-		if err := deleteTap(ctx, d.opt.Run, s.tap); err != nil {
-			errs = append(errs, err)
-		} else {
-			s.attached = false
+		if s.lay.dir != "" {
+			if err := removeAll(s.lay.dir); err != nil {
+				errs = append(errs, err)
+			}
 		}
-	}
-	if s.lay.dir != "" {
-		if err := removeAll(s.lay.dir); err != nil {
-			errs = append(errs, err)
+		if s.lay.jailed {
+			if err := removeCgroup(d.opt.CgroupRoot, filepath.Base(d.fcPath), s.id); err != nil {
+				errs = append(errs, err)
+			}
 		}
-	}
-	if len(errs) == 0 {
-		if err := d.store.remove(s.rec.ID); err != nil {
-			errs = append(errs, err)
+		if len(errs) == 0 {
+			if err := d.store.remove(s.id); err != nil {
+				errs = append(errs, err)
+			}
 		}
 	}
 	if len(errs) == 0 {
 		s.releaseLocked()
 		return nil
 	}
-	s.stopped = true // do not retry from here; Reap at the next start will
-	err := errors.Join(errs...)
-	log.Error().Err(err).Str("vm", s.rec.ID).Msg("micro-VM cleanup incomplete; the next runner start will retry")
-	return err
+	s.stopped = true
+	d.markLeaked(s.slot)
+	s.leakErr = fmt.Errorf("%w: vm %s: %w", sandbox.ErrLeaked, s.id, errors.Join(errs...))
+	log.Error().Err(s.leakErr).Str("vm", s.id).Msg("micro-VM cleanup incomplete; call Reap to finish it")
+	return s.leakErr
 }
 
 // removeAll is os.RemoveAll that also reports a directory that is still there.
@@ -492,4 +645,15 @@ func removeAll(dir string) error {
 		return fmt.Errorf("%s still exists after removal", dir)
 	}
 	return nil
+}
+
+// removeCgroup removes the cgroup the jailer created for a VM
+// (<root>/<parent>/<id>, parent = the exec file name). The jailer never removes
+// it. A missing cgroup is fine; a non-empty one fails (rmdir semantics).
+func removeCgroup(root, parent, id string) error {
+	err := os.Remove(filepath.Join(root, parent, id))
+	if err == nil || errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return fmt.Errorf("remove cgroup %s: %w", filepath.Join(root, parent, id), err)
 }

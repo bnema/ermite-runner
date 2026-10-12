@@ -69,11 +69,13 @@ func (l layout) share(src, name string) (string, error) {
 }
 
 // own hands a per-job file in the jail to the jailed uid; no-op without jailer.
+// It never follows a symlink (Lchown): the jail is writable by the jailed uid
+// once Firecracker runs, so a link planted there must not redirect the chown.
 func (l layout) own(name string) error {
 	if !l.jailed {
 		return nil
 	}
-	return os.Chown(l.host(name), l.uid, l.uid)
+	return os.Lchown(l.host(name), l.uid, l.uid)
 }
 
 // checkReadable verifies that other users can read the shared file, which the

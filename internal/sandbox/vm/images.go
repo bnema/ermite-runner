@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"syscall"
 
 	"bnema.dev/ermite-runner/internal/cmdrun"
 	"bnema.dev/ermite-runner/internal/sandbox"
@@ -83,10 +84,18 @@ func ensureExecDisk(ctx context.Context, run cmdrun.Runner, exe, stateDir string
 }
 
 // makeScratch creates the per-job sparse scratch disk of sizeMiB and formats it.
-func makeScratch(ctx context.Context, run cmdrun.Runner, path string, sizeMiB int) error {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+// The file is created exclusively without following symlinks and handed to
+// owner (fchown on the open descriptor, never by path) when owner >= 0.
+func makeScratch(ctx context.Context, run cmdrun.Runner, path string, sizeMiB, owner int) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
 		return err
+	}
+	if owner >= 0 {
+		if err := f.Chown(owner, owner); err != nil {
+			_ = f.Close()
+			return fmt.Errorf("chown scratch disk: %w", err)
+		}
 	}
 	if err := f.Truncate(int64(sizeMiB) << 20); err != nil {
 		_ = f.Close()

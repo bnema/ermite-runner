@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/bnema/zerowrap"
@@ -17,32 +19,43 @@ import (
 )
 
 // Reap implements sandbox.Driver. It removes what a previous run of the runner
-// left: Firecracker processes (by state record and by scanning /proc for our
-// "--id erXXXXXXXX"), TAP devices named ertap<N>, the nftables table, and VM
-// directories. It relies on the state-directory lock taken in New: no other
-// runner instance can own what it removes.
+// left: VMM processes (Firecracker and jailer: matched by "--id <our id>" in
+// their command line, never by program name), TAP devices named ertap<N>, the
+// nftables table, VM directories and jailer cgroups. It also finishes the
+// cleanup of sandboxes that reported ErrLeaked and frees their slots. It relies
+// on the host-wide lock taken in New: no other runner can own what it removes.
+// It returns ErrBusy while a sandbox is running.
 func (d *Driver) Reap(ctx context.Context) error {
 	log := zerowrap.FromCtx(ctx)
+	d.mu.Lock()
+	busy := d.slots.Busy()
+	d.mu.Unlock()
+	if busy > 0 {
+		return fmt.Errorf("%w (%d running)", sandbox.ErrBusy, busy)
+	}
 	var errs []error
 
 	recs, err := d.store.list()
 	if err != nil {
 		errs = append(errs, err)
 	}
-	procs := firecrackerProcs(d.opt.ProcDir)
+	procs := vmmProcs(d.opt.ProcDir)
 	killed := map[int]bool{}
 	killProc := func(pid int, id string) {
 		if killed[pid] {
 			return
 		}
 		killed[pid] = true
-		log.Warn().Int("pid", pid).Str("vm", id).Msg("reaping leftover firecracker process")
-		killAndWait(pid, 5*time.Second)
+		log.Warn().Int("pid", pid).Str("vm", id).Msg("reaping leftover VMM process")
+		if !d.opt.kill(pid, 5*time.Second) {
+			errs = append(errs, fmt.Errorf("vmm process %d (%s) did not exit", pid, id))
+		}
 	}
-	// 1. Processes: by record, but only if the pid is still one of ours (pids
-	// are reused), then any other orphan found in /proc.
+	// 1. Processes. A recorded pid is only trusted when /proc/<pid>/cmdline still
+	// carries this record's id (pids are reused); then every other process of
+	// ours found in /proc, which also covers a lost state directory.
 	for _, r := range recs {
-		if r.PID > 0 && procs[r.PID] == r.ID {
+		if r.PID > 0 && cmdlineID(d.opt.ProcDir, r.PID) == r.ID {
 			killProc(r.PID, r.ID)
 		}
 	}
@@ -65,10 +78,8 @@ func (d *Driver) Reap(ctx context.Context) error {
 		}
 	}
 
-	// 3. Files: directories of recorded VMs, then any directory with one of our
-	// ids that has no record (crash before the record was written is
-	// impossible, but a deleted state dir is not).
-	// The jailer's chroot base has one directory per exec-file name.
+	// 3. Files and cgroups. The jailer's chroot base has one directory per
+	// exec-file name.
 	parents := []string{filepath.Join(d.cfg.StateDir, "vm")}
 	jails, _ := os.ReadDir(filepath.Join(d.cfg.StateDir, "jail"))
 	for _, j := range jails {
@@ -87,6 +98,15 @@ func (d *Driver) Reap(ctx context.Context) error {
 			}
 		}
 	}
+	cg := filepath.Join(d.opt.CgroupRoot, filepath.Base(d.fcPath))
+	cents, _ := os.ReadDir(cg)
+	for _, e := range cents {
+		if e.IsDir() && sandbox.ValidID(e.Name()) {
+			if err := removeCgroup(d.opt.CgroupRoot, filepath.Base(d.fcPath), e.Name()); err != nil {
+				errs = append(errs, err)
+			}
+		}
+	}
 	if len(errs) == 0 {
 		for _, r := range recs {
 			if err := d.store.remove(r.ID); err != nil {
@@ -94,5 +114,20 @@ func (d *Driver) Reap(ctx context.Context) error {
 			}
 		}
 	}
+	if len(errs) == 0 {
+		d.mu.Lock()
+		d.slots.ReleaseLeaked()
+		d.mu.Unlock()
+	}
 	return errors.Join(errs...)
+}
+
+// cmdlineID returns the VM id in the command line of pid, or "" (not running,
+// not ours, or recycled for another program).
+func cmdlineID(procDir string, pid int) string {
+	b, err := os.ReadFile(filepath.Join(procDir, strconv.Itoa(pid), "cmdline"))
+	if err != nil || len(b) == 0 {
+		return ""
+	}
+	return vmIDFromCmdline(strings.Split(strings.TrimRight(string(b), "\x00"), "\x00"))
 }

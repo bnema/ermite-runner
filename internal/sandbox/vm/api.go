@@ -32,16 +32,59 @@ type bootSource struct {
 }
 
 type drive struct {
-	DriveID      string `json:"drive_id"`
-	PathOnHost   string `json:"path_on_host"`
-	IsRootDevice bool   `json:"is_root_device"`
-	IsReadOnly   bool   `json:"is_read_only"`
+	DriveID      string       `json:"drive_id"`
+	PathOnHost   string       `json:"path_on_host"`
+	IsRootDevice bool         `json:"is_root_device"`
+	IsReadOnly   bool         `json:"is_read_only"`
+	RateLimiter  *rateLimiter `json:"rate_limiter,omitempty"`
 }
 
 type networkInterface struct {
-	IfaceID     string `json:"iface_id"`
-	HostDevName string `json:"host_dev_name"`
-	GuestMAC    string `json:"guest_mac"`
+	IfaceID       string       `json:"iface_id"`
+	HostDevName   string       `json:"host_dev_name"`
+	GuestMAC      string       `json:"guest_mac"`
+	RxRateLimiter *rateLimiter `json:"rx_rate_limiter,omitempty"`
+	TxRateLimiter *rateLimiter `json:"tx_rate_limiter,omitempty"`
+}
+
+// tokenBucket is Firecracker's rate limiter bucket: Size tokens (bytes or
+// operations) are refilled every RefillTime milliseconds.
+type tokenBucket struct {
+	Size         int64 `json:"size"`
+	OneTimeBurst int64 `json:"one_time_burst,omitempty"`
+	RefillTime   int64 `json:"refill_time"`
+}
+
+type rateLimiter struct {
+	Bandwidth *tokenBucket `json:"bandwidth,omitempty"`
+	Ops       *tokenBucket `json:"ops,omitempty"`
+}
+
+// diskLimiter limits a disk to bandwidthMiB MiB/s and iops operations/s (zero
+// disables a limit; both zero means no limiter). A one-second burst is allowed
+// at the start so that short bursts (a git checkout) are not slowed down.
+func diskLimiter(bandwidthMiB, iops int) *rateLimiter {
+	var rl rateLimiter
+	if bandwidthMiB > 0 {
+		b := int64(bandwidthMiB) << 20
+		rl.Bandwidth = &tokenBucket{Size: b, OneTimeBurst: b, RefillTime: 1000}
+	}
+	if iops > 0 {
+		rl.Ops = &tokenBucket{Size: int64(iops), OneTimeBurst: int64(iops), RefillTime: 1000}
+	}
+	if rl.Bandwidth == nil && rl.Ops == nil {
+		return nil
+	}
+	return &rl
+}
+
+// netLimiter limits one direction of a network interface to mbit Mbit/s.
+func netLimiter(mbit int) *rateLimiter {
+	if mbit <= 0 {
+		return nil
+	}
+	b := int64(mbit) * 1_000_000 / 8
+	return &rateLimiter{Bandwidth: &tokenBucket{Size: b, OneTimeBurst: b, RefillTime: 1000}}
 }
 
 type vsockDevice struct {

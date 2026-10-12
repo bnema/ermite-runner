@@ -3,6 +3,7 @@
 package vm
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -19,6 +20,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/bnema/zerowrap"
 
 	"bnema.dev/ermite-runner/internal/cmdrun"
 	"bnema.dev/ermite-runner/internal/execstream"
@@ -108,7 +111,10 @@ type env struct {
 }
 
 // newEnv prepares a state dir, fake binaries, kernel and images.
-func newEnv(t *testing.T, mode string) *env {
+func newEnv(t *testing.T, mode string) *env { return newEnvNamed(t, mode, "firecracker") }
+
+// newEnvNamed runs the fake VMM under another program name (argv[0]).
+func newEnvNamed(t *testing.T, mode, argv0 string) *env {
 	t.Helper()
 	bash, err := exec.LookPath("bash")
 	if err != nil {
@@ -118,7 +124,7 @@ func newEnv(t *testing.T, mode string) *env {
 	e := &env{taps: map[string]bool{}, plumb: sandboxtest.NewPlumbing(), log: filepath.Join(dir, "fc.log")}
 	self, _ := os.Executable()
 	fc := filepath.Join(dir, "firecracker")
-	script := fmt.Sprintf("#!%s\nexport FC_HELPER=1 FC_MODE=%q FC_LOG=%q\nexec -a firecracker %q \"$@\"\n", bash, mode, e.log, self)
+	script := fmt.Sprintf("#!%s\nexport FC_HELPER=1 FC_MODE=%q FC_LOG=%q\nexec -a %q %q \"$@\"\n", bash, mode, e.log, argv0, self)
 	if err := os.WriteFile(fc, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -133,6 +139,7 @@ func newEnv(t *testing.T, mode string) *env {
 		Isolation: sandbox.VM, StateDir: filepath.Join(dir, "state"), Capacity: 2, Image: img,
 		JobCPUs: 1, JobMemoryMiB: 512, JobDiskMiB: 1024, UIDBase: 900000, KVMPath: "/dev/null",
 		Network: mustPrefix("10.200.0.0/16"), Firecracker: fc, JailerOff: true, Executable: exe, DNSPort: 0,
+		LockFile: filepath.Join(dir, "host.lock"), JobPids: 1000, DiskBandwidthMiB: 400, DiskIOPS: 20000, NetMbit: 1000,
 	}
 	e.run = &cmdrun.Fake{Handle: func(c cmdrun.Call) ([]byte, error) {
 		e.mu.Lock()
@@ -437,8 +444,7 @@ func TestReapAfterRunnerCrash(t *testing.T) {
 		t.Fatal("fake VM not running")
 	}
 	// The runner dies: its lock goes away, nothing else is cleaned.
-	_ = d1.lock.Close()
-	d1.lock = nil
+	_ = d1.lock.Release()
 	_ = conn.Close()
 	if e.tapCount() != 1 {
 		t.Fatal("setup: no TAP")
@@ -506,7 +512,7 @@ func TestSecondRunnerOnSameStateDirRefused(t *testing.T) {
 	e := newEnv(t, "")
 	_ = e.driver(t)
 	_, err := New(context.Background(), e.cfg, Options{Run: e.run, Net: e.plumb})
-	if err == nil || !strings.Contains(err.Error(), "another ermite-runner") {
+	if err == nil || !strings.Contains(err.Error(), "another ermite-runner is running on this host") {
 		t.Fatalf("got %v", err)
 	}
 }
@@ -646,7 +652,7 @@ func TestFirecrackerProcsScan(t *testing.T) {
 	mk("103", "bash\x00--id\x00er00112233\x00")           // not firecracker
 	mk("1", "firecracker\x00--id\x00er99999999\x00")      // pid 1 is never touched
 	mk("abc", "")
-	got := firecrackerProcs(proc)
+	got := vmmProcs(proc)
 	if len(got) != 2 || got[100] != "er00112233" || got[101] != "er44556677" {
 		t.Fatalf("%v", got)
 	}
@@ -682,3 +688,334 @@ func TestAPIErrorsSurfaceFirecrackerFault(t *testing.T) {
 
 func mustPrefix(s string) netip.Prefix { return netip.MustParsePrefix(s) }
 func mustAddr(s string) netip.Addr     { return netip.MustParseAddr(s) }
+
+// C3: processes are matched by "--id <our id>" in their command line, not by the
+// program name: a renamed or versioned Firecracker binary is still found and
+// reaped, and a recycled pid is never killed on the strength of a record alone.
+func TestReapFindsRenamedVMMByID(t *testing.T) {
+	e := newEnvNamed(t, "", "fc-renamed-1.17")
+	d1 := e.driver(t)
+	sb, _ := d1.New()
+	conn, err := sb.Start(context.Background(), sandbox.JobSpec{JobID: "j"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runStub(t, conn)
+	pid := sb.(*vmSandbox).rec.PID
+	if got := cmdlineID("/proc", pid); got != sb.ID() {
+		t.Fatalf("cmdlineID=%q want %q (argv[0] is %q)", got, sb.ID(), "fc-renamed-1.17")
+	}
+	_ = d1.lock.Release()
+	_ = conn.Close()
+	d2 := e.driver(t)
+	if err := d2.Reap(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if pidAlive(pid) {
+		t.Fatalf("a VMM with a renamed binary survived Reap (pid %d)", pid)
+	}
+}
+
+func TestVMIDFromCmdline(t *testing.T) {
+	for name, tc := range map[string]struct {
+		args []string
+		want string
+	}{
+		"firecracker":      {[]string{"firecracker", "--id", "er00112233", "--api-sock", "/x"}, "er00112233"},
+		"jailer":           {[]string{"jailer", "--id", "er00112233", "--exec-file", "/fc", "--uid", "1"}, "er00112233"},
+		"renamed":          {[]string{"anything", "--api-sock", "/x", "--id", "er44556677"}, "er44556677"},
+		"foreign id":       {[]string{"firecracker", "--id", "my-vm", "--api-sock", "/x"}, ""},
+		"no marker":        {[]string{"python", "--id", "er00112233"}, ""},
+		"id without value": {[]string{"firecracker", "--api-sock", "/x", "--id"}, ""},
+		"path-like id":     {[]string{"firecracker", "--id", "er../../../x", "--api-sock", "/x"}, ""},
+	} {
+		if got := vmIDFromCmdline(tc.args); got != tc.want {
+			t.Errorf("%s: got %q want %q", name, got, tc.want)
+		}
+	}
+}
+
+func TestReapDoesNotTrustARecycledPid(t *testing.T) {
+	e := newEnv(t, "")
+	d := e.driver(t)
+	// A record pointing at this very test process: its command line carries no
+	// VM id, so it must not be killed.
+	_ = d.store.save(record{ID: "er00112233", Slot: 0, PID: os.Getpid()})
+	if err := d.Reap(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !pidAlive(os.Getpid()) {
+		t.Fatal("Reap killed a process on the strength of a stale record")
+	}
+}
+
+// C5 + C8: when the VMM cannot be killed, the TAP, the firewall policy and the
+// files are left alone (the VM may still be running), the error wraps ErrLeaked,
+// the slot stays taken, and Reap (with a working kill) finishes the cleanup and
+// frees the slot.
+func TestStopKeepsNetworkWhenTheVMMSurvives(t *testing.T) {
+	e := newEnv(t, "")
+	stubborn := true
+	d, err := New(context.Background(), e.cfg, Options{Run: e.run, Net: e.plumb, BootTimeout: 5 * time.Second,
+		kill: func(pid int, to time.Duration) bool {
+			if stubborn {
+				return false
+			}
+			return killAndWait(pid, to)
+		}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = d.Close() }()
+	sb, _ := d.New()
+	conn, err := sb.Start(context.Background(), sandbox.JobSpec{JobID: "j"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runStub(t, conn)
+
+	err = sb.Stop(context.Background())
+	if !errors.Is(err, sandbox.ErrLeaked) {
+		t.Fatalf("Stop must report ErrLeaked, got %v", err)
+	}
+	if e.tapCount() != 1 || e.plumb.Live() != 1 {
+		t.Fatalf("the TAP and the policy must stay while the VMM may run: taps=%d attached=%d", e.tapCount(), e.plumb.Live())
+	}
+	if recs, _ := d.store.list(); len(recs) != 1 {
+		t.Fatalf("the state record must stay for Reap: %v", recs)
+	}
+	if err := sb.Stop(context.Background()); !errors.Is(err, sandbox.ErrLeaked) {
+		t.Fatalf("a second Stop must keep reporting the leak, got %v", err)
+	}
+	if d.slots.InUse() != 1 {
+		t.Fatal("the slot of a leaked sandbox stays taken")
+	}
+	// Other jobs keep running on the free slot; the leaked one is never reused.
+	other, err := d.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if other.(*vmSandbox).slot == sb.(*vmSandbox).slot {
+		t.Fatal("a leaked slot was handed out again")
+	}
+	// Reap refuses while a sandbox is running...
+	if err := d.Reap(context.Background()); !errors.Is(err, sandbox.ErrBusy) {
+		t.Fatalf("Reap with a handed-out sandbox: %v", err)
+	}
+	_ = other.Stop(context.Background())
+	// ...and finishes the job once idle.
+	stubborn = false
+	if err := d.Reap(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if left := e.leftovers(t); len(left) != 0 {
+		t.Fatalf("leftovers after Reap: %v", left)
+	}
+	if d.slots.InUse() != 0 {
+		t.Fatal("Reap must free the slot of the leaked sandbox")
+	}
+}
+
+// C7: Stop from another goroutine aborts a boot in progress at once, instead of
+// waiting for the boot timeout, and leaves nothing behind.
+func TestStopAbortsABootInProgress(t *testing.T) {
+	e := newEnv(t, "hang")
+	d, err := New(context.Background(), e.cfg, Options{Run: e.run, Net: e.plumb, BootTimeout: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = d.Close() }()
+	sb, _ := d.New()
+	started := make(chan error, 1)
+	go func() {
+		_, err := sb.Start(context.Background(), sandbox.JobSpec{JobID: "j"})
+		started <- err
+	}()
+	time.Sleep(700 * time.Millisecond) // the fake is now waiting for the executor
+	t0 := time.Now()
+	if err := sb.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-started:
+		if !errors.Is(err, sandbox.ErrAborted) {
+			t.Fatalf("Start must report that Stop aborted it, got %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Start was not aborted by Stop")
+	}
+	if time.Since(t0) > 8*time.Second {
+		t.Fatalf("Stop took %v", time.Since(t0))
+	}
+	if left := e.leftovers(t); len(left) != 0 {
+		t.Fatalf("leftovers: %v", left)
+	}
+	// Stop before Start: Start must refuse.
+	sb2, _ := d.New()
+	_ = sb2.Stop(context.Background())
+	if _, err := sb2.Start(context.Background(), sandbox.JobSpec{}); err == nil {
+		t.Fatal("Start after Stop accepted")
+	}
+}
+
+// C16: the sandbox exposes its id, which names its files.
+func TestSandboxIDNamesItsFiles(t *testing.T) {
+	e := newEnv(t, "")
+	d := e.driver(t)
+	sb, _ := d.New()
+	if !sandbox.ValidID(sb.ID()) {
+		t.Fatalf("id %q", sb.ID())
+	}
+	conn, err := sb.Start(context.Background(), sandbox.JobSpec{JobID: "j"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runStub(t, conn)
+	defer func() { _ = sb.Stop(context.Background()) }()
+	if _, err := os.Stat(filepath.Join(e.cfg.StateDir, "vm", sb.ID())); err != nil {
+		t.Fatalf("the VM directory must be named after the sandbox id: %v", err)
+	}
+	if d.Isolation() != sandbox.IsolationVM || d.Mode() != sandbox.VM {
+		t.Fatal("isolation")
+	}
+}
+
+// S7: cgroup v2 limits, a new PID namespace, and the jailer's own options.
+func TestJailerArgs(t *testing.T) {
+	args := jailerArgs("/usr/bin/jailer", "/usr/bin/firecracker", "er00112233", 900003, "/var/lib/er/jail",
+		sandbox.JobSpec{CPUs: 4, MemoryMiB: 2048}, nil)
+	line := " " + strings.Join(args, " ") + " "
+	for _, want := range []string{
+		" --id er00112233 ", " --exec-file /usr/bin/firecracker ", " --uid 900003 ", " --gid 900003 ",
+		" --chroot-base-dir /var/lib/er/jail ", " --cgroup-version 2 ", " --new-pid-ns ",
+		" --cgroup memory.max=" + fmt.Sprint((2048+vmmOverheadMiB)<<20) + " ",
+		" --cgroup pids.max=64 ", " --resource-limit no-file=4096 ", " -- ",
+	} {
+		if !strings.Contains(line, want) {
+			t.Errorf("jailer args lack %q: %s", want, line)
+		}
+	}
+	if args[len(args)-1] != "--" {
+		t.Errorf("the jailer separator must come last when there are no extra args: %v", args)
+	}
+	more := jailerArgs("j", "f", "er00112233", 1, "/b", sandbox.JobSpec{CPUs: 1, MemoryMiB: 512}, []string{"--x"})
+	if more[len(more)-2] != "--" || more[len(more)-1] != "--x" {
+		t.Errorf("extra args follow the separator: %v", more)
+	}
+}
+
+// S7: sane rate limiters on the scratch disk and both directions of eth0, off
+// when configured to zero, and only on the writable disk.
+func TestRateLimitersInTheVMConfig(t *testing.T) {
+	e := newEnv(t, "")
+	d := e.driver(t)
+	sb, _ := d.New()
+	conn, err := sb.Start(context.Background(), sandbox.JobSpec{JobID: "j"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runStub(t, conn)
+	defer func() { _ = sb.Stop(context.Background()) }()
+	b, _ := os.ReadFile(e.log)
+	log := string(b)
+	for _, want := range []string{
+		`"rate_limiter":{"bandwidth":{"size":419430400,"one_time_burst":419430400,"refill_time":1000},"ops":{"size":20000,"one_time_burst":20000,"refill_time":1000}}`,
+		`"rx_rate_limiter":{"bandwidth":{"size":125000000,"one_time_burst":125000000,"refill_time":1000}}`,
+		`"tx_rate_limiter":{"bandwidth":{"size":125000000,"one_time_burst":125000000,"refill_time":1000}}`,
+	} {
+		if !strings.Contains(log, want) {
+			t.Errorf("API log lacks %s\n%s", want, log)
+		}
+	}
+	if n := strings.Count(log, `"rate_limiter"`); n != 1 {
+		t.Errorf("only the scratch drive is rate limited, got %d rate_limiter fields", n)
+	}
+	if diskLimiter(0, 0) != nil || netLimiter(0) != nil {
+		t.Error("zero must disable the limiters")
+	}
+	if l := diskLimiter(0, 100); l.Bandwidth != nil || l.Ops == nil {
+		t.Errorf("%+v", l)
+	}
+}
+
+// S8: the free-space check warns, and only warns.
+func TestNewWarnsOnLowFreeSpace(t *testing.T) {
+	e := newEnv(t, "")
+	var buf bytes.Buffer
+	ctx := zerowrap.WithCtx(context.Background(), zerowrap.New(zerowrap.Config{Level: "debug", Format: "json", Output: &buf}))
+	d, err := New(ctx, e.cfg, Options{Run: e.run, Net: e.plumb, FreeSpace: func(string) (int64, error) { return 1, nil }})
+	if err != nil {
+		t.Fatalf("low space must not fail New: %v", err)
+	}
+	defer func() { _ = d.Close() }()
+	if !strings.Contains(buf.String(), "less free space") {
+		t.Fatalf("no warning: %s", buf.String())
+	}
+}
+
+// S11: the scratch disk is created without following symlinks and chowned
+// through its descriptor.
+func TestMakeScratchRefusesSymlinksAndExistingFiles(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "victim")
+	_ = os.WriteFile(target, []byte("precious"), 0o600)
+	link := filepath.Join(dir, "scratch.ext4")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	run := &cmdrun.Fake{}
+	if err := makeScratch(context.Background(), run, link, 8, -1); err == nil {
+		t.Fatal("a planted symlink must be refused")
+	}
+	if b, _ := os.ReadFile(target); string(b) != "precious" {
+		t.Fatalf("the symlink target was modified: %q", b)
+	}
+	if len(run.Calls) != 0 {
+		t.Fatalf("mkfs must not run: %v", run.Lines())
+	}
+	ok := filepath.Join(dir, "fresh.ext4")
+	if err := makeScratch(context.Background(), run, ok, 8, os.Getuid()); err != nil {
+		t.Fatal(err)
+	}
+	if st, err := os.Stat(ok); err != nil || st.Size() != 8<<20 || st.Mode().Perm() != 0o600 {
+		t.Fatalf("%v %v", st, err)
+	}
+	if err := makeScratch(context.Background(), run, ok, 8, -1); err == nil {
+		t.Fatal("an existing file must be refused (O_EXCL)")
+	}
+}
+
+func TestOwnUsesLchown(t *testing.T) {
+	dir := t.TempDir()
+	l := newLayout(dir, "firecracker", "er00112233", true, os.Getuid())
+	_ = os.MkdirAll(l.root, 0o700)
+	target := filepath.Join(dir, "victim")
+	_ = os.WriteFile(target, nil, 0o600)
+	if err := os.Symlink(target, l.host("link")); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.own("link"); err != nil {
+		t.Fatalf("Lchown on a link must act on the link itself: %v", err)
+	}
+	if err := l.own("missing"); err == nil {
+		t.Fatal("a missing file is an error")
+	}
+	if u := newLayout(dir, "f", "er00112233", false, 1); u.own("anything") != nil {
+		t.Fatal("no-op without jailer")
+	}
+}
+
+func TestRemoveCgroup(t *testing.T) {
+	root := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(root, "firecracker", "er00112233"), 0o755)
+	if err := removeCgroup(root, "firecracker", "er00112233"); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeCgroup(root, "firecracker", "er00112233"); err != nil {
+		t.Fatalf("a missing cgroup is fine: %v", err)
+	}
+	_ = os.MkdirAll(filepath.Join(root, "firecracker", "er44556677", "child"), 0o755)
+	if err := removeCgroup(root, "firecracker", "er44556677"); err == nil {
+		t.Fatal("a non-empty cgroup cannot be removed and must be reported")
+	}
+}
