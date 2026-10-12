@@ -135,9 +135,8 @@ func (j *job) printHeader(s *stepRun, in scriptIn) (ShellPlan, error) {
 func (j *job) scriptCommand(plan ShellPlan, in scriptIn) (dir string, argv []string, err error) {
 	j.mu.Lock()
 	workspace := j.state.GitHub("workspace")
-	temp := j.state.Layout().Temp
 	j.mu.Unlock()
-	sc, err := WriteScript(temp, plan, in.script)
+	sc, err := WriteScript(j.tempRoot, plan, in.script)
 	if err != nil {
 		return "", nil, err
 	}

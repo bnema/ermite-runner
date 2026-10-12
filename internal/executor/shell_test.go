@@ -182,6 +182,11 @@ func TestParseArguments(t *testing.T) {
 
 func TestWriteScript(t *testing.T) {
 	dir := t.TempDir()
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
 	bin := fakeBin(t, "bash", "sh", "python")
 	l := Lookup{Path: bin}
 	for _, tc := range []struct {
@@ -196,7 +201,7 @@ func TestWriteScript(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		s, err := WriteScript(dir, plan, "echo hi\n")
+		s, err := WriteScript(root, plan, "echo hi\n")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -214,12 +219,12 @@ func TestWriteScript(t *testing.T) {
 	}
 	// A custom shell without an extension in the table: no extension.
 	plan, _ := PlanShell("python {0}", l)
-	if s, _ := WriteScript(dir, plan, "x"); filepath.Ext(s.Path) != ".py" {
+	if s, _ := WriteScript(root, plan, "x"); filepath.Ext(s.Path) != ".py" {
 		t.Fatalf("python {0}: %s", s.Path)
 	}
 	bin2 := fakeBin(t, "perl")
 	plan, _ = PlanShell("perl {0}", Lookup{Path: bin2})
-	if s, _ := WriteScript(dir, plan, "x"); filepath.Ext(s.Path) != "" {
+	if s, _ := WriteScript(root, plan, "x"); filepath.Ext(s.Path) != "" {
 		t.Fatalf("perl: %s", s.Path)
 	}
 }
@@ -235,5 +240,42 @@ func TestResolveWorkingDirectory(t *testing.T) {
 		if got := ResolveWorkingDirectory(tc[0], tc[1]); got != tc[2] {
 			t.Errorf("%v: %q", tc, got)
 		}
+	}
+}
+
+// The script goes through the os.Root of RUNNER_TEMP: a directory swapped for a
+// link to elsewhere after the root was opened does not redirect it (GO-002).
+func TestWriteScriptStaysInTheOpenedDirectory(t *testing.T) {
+	parent := t.TempDir()
+	dir := filepath.Join(parent, "tmp")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+	outside := filepath.Join(parent, "outside")
+	if err := os.Mkdir(outside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// The step swaps the directory for a link to another one.
+	if err := os.Rename(dir, dir+".moved"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, dir); err != nil {
+		t.Fatal(err)
+	}
+	bin := fakeBin(t, "bash", "sh")
+	plan, _ := PlanShell("", Lookup{Path: bin})
+	if _, err := WriteScript(root, plan, "echo hi\n"); err != nil {
+		t.Fatal(err)
+	}
+	if ents, _ := os.ReadDir(outside); len(ents) != 0 {
+		t.Fatalf("the script was written through the swapped link: %v", ents)
+	}
+	if ents, _ := os.ReadDir(dir + ".moved"); len(ents) != 1 {
+		t.Fatalf("the script is not in the directory that root was opened on: %v", ents)
 	}
 }

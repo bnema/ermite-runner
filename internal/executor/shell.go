@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 
 	"github.com/google/uuid"
 )
@@ -285,27 +284,21 @@ type Script struct {
 	Argv []string
 }
 
-// WriteScript writes the script of a step to tempDir under a random name with
-// the extension of the shell, and builds the command line
-// (ScriptHandler.RunAsync :247-285). The file has no BOM and is not
-// executable: the shell reads it.
-func WriteScript(tempDir string, p ShellPlan, contents string) (Script, error) {
-	path := filepath.Join(tempDir, uuid.NewString()+p.Extension())
+// WriteScript writes the script of a step to the directory of root (RUNNER_TEMP)
+// under a random name with the extension of the shell, and builds the command
+// line (ScriptHandler.RunAsync :247-285). The file has no BOM and is not
+// executable: the shell reads it. The directory belongs to the user of the steps,
+// so the file is created through root, exclusively and without following links
+// (see createExcl).
+func WriteScript(root *os.Root, p ShellPlan, contents string) (Script, error) {
+	name := uuid.NewString() + p.Extension()
+	path := filepath.Join(root.Name(), name)
 	args, err := FormatArguments(p.ArgFormat, path)
 	if err != nil {
 		return Script{}, err
 	}
 	contents = FixUpScriptContents(p.Command, contents)
-	// The name is random and the file is created exclusively without following
-	// links: the directory belongs to the user of the steps.
-	fh, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o644)
-	if err == nil {
-		_, err = fh.WriteString(contents)
-		if cerr := fh.Close(); err == nil {
-			err = cerr
-		}
-	}
-	if err != nil {
+	if err := createExcl(root, name, []byte(contents), 0o644, nil); err != nil {
 		return Script{}, fmt.Errorf("write script: %w", err)
 	}
 	return Script{Path: path, Argv: append([]string{p.CommandPath}, ParseArguments(args)...)}, nil
