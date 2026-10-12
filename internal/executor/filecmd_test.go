@@ -353,3 +353,26 @@ func TestCreateExclReplacesAndNeverFollows(t *testing.T) {
 		t.Fatal("still a link")
 	}
 }
+
+// The owner is applied to the open file (GO-003): chown by name after the close
+// would follow a name that the user of the steps could have swapped. Own uid and
+// gid are accepted by an unprivileged process, so the path runs here.
+func TestCreateExclChownsTheOpenFile(t *testing.T) {
+	dir := t.TempDir()
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+	owner := &[2]int{os.Getuid(), os.Getgid()}
+	if err := createExcl(root, "f", []byte("x"), 0o644, owner); err != nil {
+		t.Fatal(err)
+	}
+	// A uid that this process may not give files to makes the creation fail, and
+	// the half-made file is not reported as success.
+	if os.Getuid() != 0 {
+		if err := createExcl(root, "g", []byte("x"), 0o644, &[2]int{0, 0}); err == nil {
+			t.Fatal("chown to root by an unprivileged process succeeded")
+		}
+	}
+}

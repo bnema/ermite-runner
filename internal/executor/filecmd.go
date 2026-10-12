@@ -230,7 +230,10 @@ func readText(root *os.Root, name string) (text string, ok bool, err error) {
 // createExcl creates name in root with the content, failing if it exists (an
 // existing entry, a symbolic link included, is removed first, never followed),
 // and gives it to owner when set. The creation uses O_EXCL|O_NOFOLLOW, so
-// something planted between the removal and the creation makes it fail.
+// something planted between the removal and the creation makes it fail. The
+// owner is set on the open file, not by name: the user of the steps owns the
+// directory and could swap the name for something else between the close and a
+// chown by name.
 func createExcl(root *os.Root, name string, content []byte, perm os.FileMode, owner *[2]int) error {
 	if err := root.Remove(name); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
@@ -243,13 +246,13 @@ func createExcl(root *os.Root, name string, content []byte, perm os.FileMode, ow
 		_ = fh.Close()
 		return err
 	}
-	if err := fh.Close(); err != nil {
-		return err
-	}
 	if owner != nil {
-		return root.Lchown(name, owner[0], owner[1])
+		if err := fh.Chown(owner[0], owner[1]); err != nil {
+			_ = fh.Close()
+			return err
+		}
 	}
-	return nil
+	return fh.Close()
 }
 
 // processAddPath is AddPathFileCommand.ProcessCommand (FileCommandManager.cs:134).
