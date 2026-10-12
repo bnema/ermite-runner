@@ -3,6 +3,8 @@
 package executor
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
@@ -495,5 +497,30 @@ jobs:
 	last := rec.steps[len(rec.steps)-1]
 	if last.Name != CompleteJobName || last.Conclusion != ConclusionFailure || !strings.Contains(logOf(last), "##[error]The job outputs are larger than 1 MiB in total.") {
 		t.Fatalf("%s %s", last.Conclusion, logOf(last))
+	}
+}
+
+// A step that plants a link where the executor writes event.json (before the
+// directory exists, or between two steps) must not make it write elsewhere.
+func TestEventJSONIsNeverWrittenThroughALink(t *testing.T) {
+	needTools(t, "bash")
+	victim := filepath.Join(t.TempDir(), "victim")
+	if err := os.WriteFile(victim, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rec, res := runLocal(t, wfHead+`    steps:
+      - run: |
+          rm -f "$RUNNER_TEMP/_github_workflow/event.json"
+          ln -s "`+victim+`" "$RUNNER_TEMP/_github_workflow/event.json"
+      - run: cat "$GITHUB_EVENT_PATH"
+`, "j", nil)
+	if res.Conclusion != ConclusionSuccess {
+		t.Fatalf("%+v %s", res, logOf(rec.steps[2]))
+	}
+	if b, _ := os.ReadFile(victim); string(b) != "keep" {
+		t.Fatalf("the target of the link was overwritten: %q", b)
+	}
+	if got := logOf(rec.steps[2]); !strings.Contains(got, `"ref": "refs/heads/scn/x/r1"`) {
+		t.Fatalf("the second step does not see a fresh event.json:\n%s", got)
 	}
 }

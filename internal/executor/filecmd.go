@@ -9,11 +9,14 @@ package executor
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"unicode/utf8"
 
 	"github.com/google/uuid"
@@ -90,23 +93,43 @@ type Sink interface {
 }
 
 // FileCommands manages the per-step files, like FileCommandManager.
+//
+// The directory belongs to the user of the steps, and the executor reads the
+// files as root after each step, so every access goes through an os.Root opened
+// before the first step ran: replacing the directory or a file by a symbolic
+// link cannot make the executor read or write anything outside it. Files are
+// opened with O_NOFOLLOW and must be regular files.
 type FileCommands struct {
 	dir    string
+	root   *os.Root
 	suffix string
-	// Own, when set, gives a file or directory to the user of the steps.
-	Own func(path string)
+	// owner, when set, is the user the files are given to.
+	owner *[2]int
 }
 
 // NewFileCommands uses dir (RUNNER_TEMP/_runner_file_commands), creating it.
+// Call Close when the job is over.
 func NewFileCommands(dir string) (*FileCommands, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
-	return &FileCommands{dir: dir}, nil
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, err
+	}
+	return &FileCommands{dir: dir, root: root}, nil
 }
 
+// Close releases the directory.
+func (f *FileCommands) Close() error { return f.root.Close() }
+
+// SetOwner gives the files of the next steps to uid:gid.
+func (f *FileCommands) SetOwner(uid, gid int) { f.owner = &[2]int{uid, gid} }
+
+func (f *FileCommands) name(c fileCommand, suffix string) string { return c.FilePrefix + suffix }
+
 func (f *FileCommands) path(c fileCommand, suffix string) string {
-	return filepath.Join(f.dir, c.FilePrefix+suffix)
+	return filepath.Join(f.dir, f.name(c, suffix))
 }
 
 // Init creates fresh, empty files for the next step (after deleting the ones
@@ -118,19 +141,12 @@ func (f *FileCommands) Init() (map[string]string, error) {
 	env := make(map[string]string, len(fileCommands))
 	for _, c := range fileCommands {
 		if old != "" {
-			_ = os.Remove(f.path(c, old))
+			_ = f.root.Remove(f.name(c, old))
 		}
-		p := f.path(c, f.suffix)
-		_ = os.Remove(p)
-		fh, err := os.Create(p)
-		if err != nil {
+		if err := createExcl(f.root, f.name(c, f.suffix), nil, 0o644, f.owner); err != nil {
 			return nil, err
 		}
-		_ = fh.Close()
-		if f.Own != nil {
-			f.Own(p)
-		}
-		env[envVarName(c.ContextName)] = p
+		env[envVarName(c.ContextName)] = f.path(c, f.suffix)
 	}
 	return env, nil
 }
@@ -139,19 +155,19 @@ func (f *FileCommands) Init() (map[string]string, error) {
 // A command that fails does not stop the others (ProcessFiles, :75).
 func (f *FileCommands) Process(sink Sink) {
 	for _, c := range fileCommands {
-		p := f.path(c, f.suffix)
+		p := f.name(c, f.suffix)
 		var err error
 		switch c.ContextName {
 		case cmdPath:
-			err = processAddPath(sink, p)
+			err = processAddPath(sink, f.root, p)
 		case cmdEnv:
-			err = processSetEnv(sink, p)
+			err = processSetEnv(sink, f.root, p)
 		case cmdStepSummary:
-			err = processStepSummary(sink, p)
+			err = processStepSummary(sink, f.root, p)
 		case cmdState:
-			err = processPairs(sink, p, sink.SaveState, func(k, v string) { sink.Debug(fmt.Sprintf("Save intra-action state %s = %s", k, v)) })
+			err = processPairs(sink, f.root, p, sink.SaveState, func(k, v string) { sink.Debug(fmt.Sprintf("Save intra-action state %s = %s", k, v)) })
 		case cmdOutput:
-			err = processPairs(sink, p, sink.SetOutput, func(k, v string) { sink.Debug(fmt.Sprintf("Set output %s = %s", k, v)) })
+			err = processPairs(sink, f.root, p, sink.SetOutput, func(k, v string) { sink.Debug(fmt.Sprintf("Set output %s = %s", k, v)) })
 		}
 		if err != nil {
 			sink.Error(fmt.Sprintf("Unable to process file command '%s' successfully.", c.ContextName))
@@ -161,26 +177,86 @@ func (f *FileCommands) Process(sink Sink) {
 	}
 }
 
-// readText is File.ReadAllText: a UTF-8 BOM is dropped and invalid bytes
-// become U+FFFD. A missing file is reported as ok=false (the callers debug-log
-// it; AddPath and StepSummary skip silently).
-func readText(path string) (text string, ok bool) {
-	b, err := os.ReadFile(path)
+// errNotRegular is the error of a file command file that was replaced by
+// something else (a symbolic link, a FIFO, a directory).
+var errNotRegular = ghErrorf("The file is not a regular file")
+
+// openRegular opens name in root for reading without following a symbolic link
+// and without blocking on a FIFO, and checks that it is a regular file.
+func openRegular(root *os.Root, name string) (*os.File, error) {
+	fh, err := root.OpenFile(name, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
-		return "", false
+		if errors.Is(err, syscall.ELOOP) || errors.Is(err, syscall.EMLINK) {
+			return nil, errNotRegular
+		}
+		return nil, err
+	}
+	st, err := fh.Stat()
+	if err != nil {
+		_ = fh.Close()
+		return nil, err
+	}
+	if !st.Mode().IsRegular() {
+		_ = fh.Close()
+		return nil, errNotRegular
+	}
+	return fh, nil
+}
+
+// readText is File.ReadAllText: a UTF-8 BOM is dropped and invalid bytes
+// become U+FFFD. A missing file gives ok=false and no error (the callers
+// debug-log it; AddPath and StepSummary skip silently); a file that is not a
+// regular file is an error.
+func readText(root *os.Root, name string) (text string, ok bool, err error) {
+	fh, err := openRegular(root, name)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	defer func() { _ = fh.Close() }()
+	b, err := io.ReadAll(fh)
+	if err != nil {
+		return "", false, err
 	}
 	b = bytes.TrimPrefix(b, []byte("\xef\xbb\xbf"))
 	if !utf8.Valid(b) {
 		b = bytes.ToValidUTF8(b, []byte("\ufffd"))
 	}
-	return string(b), true
+	return string(b), true, nil
+}
+
+// createExcl creates name in root with the content, failing if it exists (an
+// existing entry, a symbolic link included, is removed first, never followed),
+// and gives it to owner when set. The creation uses O_EXCL|O_NOFOLLOW, so
+// something planted between the removal and the creation makes it fail.
+func createExcl(root *os.Root, name string, content []byte, perm os.FileMode, owner *[2]int) error {
+	if err := root.Remove(name); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	fh, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, perm)
+	if err != nil {
+		return err
+	}
+	if _, err := fh.Write(content); err != nil {
+		_ = fh.Close()
+		return err
+	}
+	if err := fh.Close(); err != nil {
+		return err
+	}
+	if owner != nil {
+		return root.Lchown(name, owner[0], owner[1])
+	}
+	return nil
 }
 
 // processAddPath is AddPathFileCommand.ProcessCommand (FileCommandManager.cs:134).
-func processAddPath(sink Sink, path string) error {
-	text, ok := readText(path)
-	if !ok {
-		return nil
+func processAddPath(sink Sink, root *os.Root, name string) error {
+	text, ok, err := readText(root, name)
+	if err != nil || !ok {
+		return err
 	}
 	// File.ReadAllLines splits on \r\n, \n and \r.
 	for _, line := range splitLines(text) {
@@ -213,8 +289,8 @@ func splitLines(s string) []string {
 
 // processSetEnv is SetEnvFileCommand.ProcessCommand (:167). Pairs read before
 // a format error are applied, like the lazy enumeration of the original.
-func processSetEnv(sink Sink, path string) error {
-	pairs, err := readEnvFile(sink, path)
+func processSetEnv(sink Sink, root *os.Root, name string) error {
+	pairs, err := readEnvFile(sink, root, name)
 	for _, p := range pairs {
 		if blocked := blockedEnvName(p.Key); blocked != "" {
 			sink.Error(fmt.Sprintf("Can't store %s output parameter using '$GITHUB_ENV' command.", blocked))
@@ -236,8 +312,8 @@ func blockedEnvName(name string) string {
 }
 
 // processPairs serves GITHUB_STATE and GITHUB_OUTPUT.
-func processPairs(sink Sink, path string, apply func(k, v string), debug func(k, v string)) error {
-	pairs, err := readEnvFile(sink, path)
+func processPairs(sink Sink, root *os.Root, name string, apply func(k, v string), debug func(k, v string)) error {
+	pairs, err := readEnvFile(sink, root, name)
 	for _, p := range pairs {
 		apply(p.Key, p.Value)
 		debug(p.Key, p.Value)
@@ -245,10 +321,13 @@ func processPairs(sink Sink, path string, apply func(k, v string), debug func(k,
 	return err
 }
 
-func readEnvFile(sink Sink, path string) ([]Pair, error) {
-	text, ok := readText(path)
+func readEnvFile(sink Sink, root *os.Root, name string) ([]Pair, error) {
+	text, ok, err := readText(root, name)
+	if err != nil {
+		return nil, err
+	}
 	if !ok {
-		sink.Debug(fmt.Sprintf("File does not exist '%s'", path))
+		sink.Debug(fmt.Sprintf("File does not exist '%s'", filepath.Join(root.Name(), name)))
 		return nil, nil
 	}
 	return ParseEnvFile(text)
@@ -257,8 +336,16 @@ func readEnvFile(sink Sink, path string) ([]Pair, error) {
 // processStepSummary is CreateStepSummaryCommand.ProcessCommand (:230) for
 // CI-1: the file is only checked (an empty file is ignored, a file above 1 MiB
 // is an error); ermite does not store summaries yet.
-func processStepSummary(sink Sink, path string) error {
-	st, err := os.Stat(path)
+func processStepSummary(sink Sink, root *os.Root, name string) error {
+	fh, err := openRegular(root, name)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	st, err := fh.Stat()
+	_ = fh.Close()
 	if err != nil || st.Size() == 0 {
 		return nil
 	}

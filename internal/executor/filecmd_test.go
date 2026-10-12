@@ -7,7 +7,9 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 // Cases ported from SetEnvFileCommandL0, SetOutputFileCommandL0 and
@@ -227,5 +229,127 @@ func TestPrependedPath(t *testing.T) {
 	}
 	if got := PrependedPath(nil, "/usr/bin"); got != "/usr/bin" {
 		t.Fatal(got)
+	}
+}
+
+// ---- the directory belongs to the user of the steps: nothing may be followed
+
+func TestFileCommandSymlinkIsNotFollowed(t *testing.T) {
+	for _, name := range []string{"GITHUB_ENV", "GITHUB_OUTPUT", "GITHUB_PATH", "GITHUB_STATE", "GITHUB_STEP_SUMMARY"} {
+		t.Run(name, func(t *testing.T) {
+			secret := filepath.Join(t.TempDir(), "secret")
+			if err := os.WriteFile(secret, []byte("STOLEN=1\n/stolen/bin\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			fc, err := NewFileCommands(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = fc.Close() }()
+			env, _ := fc.Init()
+			// The step replaces its file by a link to a file only root may read.
+			p := env[name]
+			if err := os.Remove(p); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(secret, p); err != nil {
+				t.Fatal(err)
+			}
+			s := newSink()
+			fc.Process(s)
+			if len(s.env)+len(s.outputs)+len(s.state)+len(s.path) != 0 {
+				t.Fatalf("the content of the target was read: %+v", s)
+			}
+			if !s.failed || len(s.errors) == 0 {
+				t.Fatalf("a replaced file must fail the step: %+v", s)
+			}
+		})
+	}
+}
+
+func TestFileCommandFifoDoesNotBlock(t *testing.T) {
+	fc, _ := NewFileCommands(t.TempDir())
+	defer func() { _ = fc.Close() }()
+	env, _ := fc.Init()
+	p := env["GITHUB_OUTPUT"]
+	_ = os.Remove(p)
+	if err := syscall.Mkfifo(p, 0o644); err != nil {
+		t.Skip(err)
+	}
+	done := make(chan *fakeSink, 1)
+	go func() { s := newSink(); fc.Process(s); done <- s }()
+	select {
+	case s := <-done:
+		if !s.failed {
+			t.Fatalf("%+v", s)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("reading a FIFO blocked the executor")
+	}
+}
+
+func TestFileCommandDirectoryReplacedByASymlink(t *testing.T) {
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "set_env_x"), []byte("LEAK=1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	parent := t.TempDir()
+	dir := filepath.Join(parent, "cmds")
+	fc, err := NewFileCommands(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = fc.Close() }()
+	if _, err := fc.Init(); err != nil {
+		t.Fatal(err)
+	}
+	// The step swaps the directory for a link to another one.
+	if err := os.Rename(dir, dir+".old"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, dir); err != nil {
+		t.Fatal(err)
+	}
+	fc.suffix = "x"
+	s := newSink()
+	fc.Process(s)
+	if len(s.env) != 0 {
+		t.Fatalf("a file of the swapped directory was read: %v", s.env)
+	}
+	// Init keeps working on the original directory, not on the link's target.
+	env, err := fc.Init()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(outside, filepath.Base(env["GITHUB_ENV"]))); err == nil {
+		t.Fatal("a file was created through the swapped directory")
+	}
+}
+
+func TestCreateExclReplacesAndNeverFollows(t *testing.T) {
+	dir := t.TempDir()
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+	victim := filepath.Join(t.TempDir(), "victim")
+	if err := os.WriteFile(victim, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, filepath.Join(dir, "f")); err != nil {
+		t.Fatal(err)
+	}
+	if err := createExcl(root, "f", []byte("new"), 0o644, nil); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(victim); string(b) != "keep" {
+		t.Fatalf("the target of the link was written: %q", b)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, "f")); string(b) != "new" {
+		t.Fatalf("%q", b)
+	}
+	if fi, _ := os.Lstat(filepath.Join(dir, "f")); fi.Mode()&os.ModeSymlink != 0 {
+		t.Fatal("still a link")
 	}
 }

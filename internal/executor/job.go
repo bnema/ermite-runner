@@ -118,12 +118,14 @@ func merge(cur *stepResult, coming stepResult) stepResult {
 }
 
 type job struct {
-	cfg     Config
-	cancel  *Canceller
-	wf      *workflow.Workflow
-	jb      *workflow.Job
-	fc      *FileCommands
-	trackID string
+	cfg    Config
+	cancel *Canceller
+	wf     *workflow.Workflow
+	jb     *workflow.Job
+	fc     *FileCommands
+	// tempRoot is RUNNER_TEMP, opened before the first step (see FileCommands).
+	tempRoot *os.Root
+	trackID  string
 
 	mu          sync.Mutex // serialises the Reporter and guards state and result
 	state       *State
@@ -149,6 +151,14 @@ func Run(cancel *Canceller, cfg Config) Result {
 		cancel = NewCanceller()
 	}
 	j := &job{cfg: cfg, cancel: cancel, trackID: "github_" + uuid.NewString()}
+	defer func() {
+		if j.fc != nil {
+			_ = j.fc.Close()
+		}
+		if j.tempRoot != nil {
+			_ = j.tempRoot.Close()
+		}
+	}()
 	res := j.run()
 	cfg.Reporter.JobCompleted(res)
 	return res
@@ -373,8 +383,15 @@ func (j *job) setUp() ([]*workflow.Step, error) {
 	if err != nil {
 		return nil, err
 	}
-	fc.Own = j.own
+	if c := cfg.Credential; c != nil {
+		fc.SetOwner(int(c.Uid), int(c.Gid))
+	}
 	j.fc = fc
+	// Everything the executor writes below the temp directory later goes through
+	// this root (see FileCommands): the user of the steps owns the directory.
+	if j.tempRoot, err = os.OpenRoot(layout.Temp); err != nil {
+		return nil, err
+	}
 	for _, d := range []string{layout.WorkRoot, layout.RunnerWorkspace, layout.Workspace, layout.Temp, fc.dir} {
 		j.own(d)
 	}

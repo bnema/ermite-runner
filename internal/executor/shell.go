@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/google/uuid"
 )
@@ -295,7 +296,16 @@ func WriteScript(tempDir string, p ShellPlan, contents string) (Script, error) {
 		return Script{}, err
 	}
 	contents = FixUpScriptContents(p.Command, contents)
-	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+	// The name is random and the file is created exclusively without following
+	// links: the directory belongs to the user of the steps.
+	fh, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o644)
+	if err == nil {
+		_, err = fh.WriteString(contents)
+		if cerr := fh.Close(); err == nil {
+			err = cerr
+		}
+	}
+	if err != nil {
 		return Script{}, fmt.Errorf("write script: %w", err)
 	}
 	return Script{Path: path, Argv: append([]string{p.CommandPath}, ParseArguments(args)...)}, nil

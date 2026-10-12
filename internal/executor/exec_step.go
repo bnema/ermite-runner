@@ -5,7 +5,6 @@ package executor
 import (
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 )
@@ -36,14 +35,8 @@ func (j *job) execute(s *stepRun, stepCancel <-chan struct{}) (result stepResult
 		j.state.SetGitHub("action_repository", "")
 		j.state.SetGitHub("action_ref", "")
 		if ev := j.state.EventJSON(); ev != "" {
-			dir := filepath.Join(j.state.Layout().Temp, "_github_workflow")
-			if err := os.MkdirAll(dir, 0o755); err == nil {
-				j.own(dir)
-				p := filepath.Join(dir, "event.json")
-				if err := os.WriteFile(p, []byte(ev), 0o644); err == nil {
-					j.own(p)
-					j.state.SetGitHub("event_path", p)
-				}
+			if p, err := j.writeEvent(ev); err == nil {
+				j.state.SetGitHub("event_path", p)
 			}
 		}
 	}
@@ -182,4 +175,30 @@ func (j *job) execute(s *stepRun, stepCancel <-chan struct{}) (result stepResult
 		return resFailed
 	}
 	return resSucceeded
+}
+
+// writeEvent writes the webhook payload to RUNNER_TEMP/_github_workflow/event.json
+// (ExecutionContext.WriteWebhookPayload) and returns its path. The directory
+// is the user's: the file is replaced, never followed (see FileCommands).
+func (j *job) writeEvent(payload string) (string, error) {
+	const dir, name = "_github_workflow", "event.json"
+	if err := j.tempRoot.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	if c := j.cfg.Credential; c != nil {
+		_ = j.tempRoot.Lchown(dir, int(c.Uid), int(c.Gid))
+	}
+	sub, err := j.tempRoot.OpenRoot(dir)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = sub.Close() }()
+	var owner *[2]int
+	if c := j.cfg.Credential; c != nil {
+		owner = &[2]int{int(c.Uid), int(c.Gid)}
+	}
+	if err := createExcl(sub, name, []byte(payload), 0o644, owner); err != nil {
+		return "", err
+	}
+	return filepath.Join(j.state.Layout().Temp, dir, name), nil
 }
