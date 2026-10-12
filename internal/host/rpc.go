@@ -103,8 +103,12 @@ func newClient(baseURL, token string, base http.RoundTripper, insecure bool) erm
 		Transport:     bearer{token: token, base: base, allowInsecure: insecure},
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
-	return ermiteconnect.NewRunnerServiceClient(hc, strings.TrimRight(baseURL, "/"))
+	return ermiteconnect.NewRunnerServiceClient(hc, strings.TrimRight(baseURL, "/")+APIPath)
 }
+
+// APIPath is where ermite serves its API under the base URL, as in ermite's own
+// client (internal/adapters/client.APIPath there).
+const APIPath = "/-/api"
 
 // ClientFactory builds a client for a token; tests replace it.
 type ClientFactory func(token string) ermiteconnect.RunnerServiceClient

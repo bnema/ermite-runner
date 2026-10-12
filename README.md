@@ -91,7 +91,7 @@ the host process; the sandbox receives the workflow and its contexts only.
 
 | Variable | Meaning |
 | --- | --- |
-| `ERMITE_RUNNER_URL` | base URL of ermite |
+| `ERMITE_RUNNER_URL` | base URL of ermite, as in a browser (the runner adds `/-/api` itself) |
 | `ERMITE_RUNNER_NAME` | runner name (default: the host name) |
 | `ERMITE_RUNNER_LABELS` | extra labels, comma separated (`ubuntu-latest,ubuntu-24.04`) |
 | `ERMITE_RUNNER_REGISTER_TOKEN` | token for `register` (see above) |
