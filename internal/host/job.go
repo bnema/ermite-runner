@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"connectrpc.com/connect"
 	"google.golang.org/protobuf/proto"
@@ -57,8 +58,16 @@ type jobRun struct {
 	cancelKind execpb.CancelKind // kind of the first cancel request
 	stopping   bool              // the runner is shutting down
 
-	mu      sync.Mutex
-	steps   map[int32]*ermite.StepUpdate
+	mu    sync.Mutex
+	steps map[int32]*ermite.StepUpdate
+	// What the guest has told us, for the validation of the next frame: the
+	// guest is untrusted code, its step numbers and lines are checked before
+	// they reach the server (see violate).
+	maxStarted  int32
+	lastLogStep int32
+	violation   string
+	// hard stops the sandbox at once; set before the session starts.
+	hard    func()
 	result  *execpb.JobResult
 	outbox  *outbox
 	endedBy error // the server ended the job, or the assignment is gone
@@ -216,9 +225,57 @@ func kindOf(r ermite.CancelReason) execpb.CancelKind {
 
 // ---- steps
 
-func (j *jobRun) stepStarted(s *execpb.StepStarted) {
-	u := &ermite.StepUpdate{Number: s.Number, Name: s.Name, State: ermite.StepState_STEP_STATE_IN_PROGRESS, StartedAt: tsOf(s.UnixNano)}
+// Limits on what the guest may send, which keep the memory of the host bounded
+// whatever the guest does: runner.proto allows 1,000 steps per job, names of
+// 1,024 characters, and lines of 64 KiB.
+const (
+	maxSteps    = 1000
+	maxNameLen  = 1024
+	maxLineText = 64 * 1024
+)
+
+// violate fails the job because the guest broke the protocol: it writes the
+// reason in the log, asks the executor to stop and destroys the sandbox. Only
+// the first violation counts; the frames that follow are dropped.
+func (j *jobRun) violate(format string, a ...any) {
 	j.mu.Lock()
+	if j.violation != "" {
+		j.mu.Unlock()
+		return
+	}
+	j.violation = fmt.Sprintf(format, a...)
+	msg := j.violation
+	j.mu.Unlock()
+	j.logf("the executor broke the protocol: %s", msg)
+	j.sandboxError("The runner stopped the job: the executor broke the protocol: " + msg)
+	if j.hard != nil {
+		j.hard()
+	}
+}
+
+func (j *jobRun) violated() bool {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.violation != ""
+}
+
+func (j *jobRun) stepStarted(s *execpb.StepStarted) {
+	j.mu.Lock()
+	switch {
+	case j.violation != "":
+		j.mu.Unlock()
+		return
+	case s.Number < 1 || s.Number > maxSteps:
+		j.mu.Unlock()
+		j.violate("step number %d is outside 1..%d", s.Number, maxSteps)
+		return
+	case s.Number <= j.maxStarted:
+		j.mu.Unlock()
+		j.violate("step %d started after step %d", s.Number, j.maxStarted)
+		return
+	}
+	j.maxStarted = s.Number
+	u := &ermite.StepUpdate{Number: s.Number, Name: cutName(s.Name), State: ermite.StepState_STEP_STATE_IN_PROGRESS, StartedAt: tsOf(s.UnixNano)}
 	j.steps[s.Number] = u
 	j.mu.Unlock()
 	j.outbox.Step(u)
@@ -226,14 +283,24 @@ func (j *jobRun) stepStarted(s *execpb.StepStarted) {
 
 func (j *jobRun) stepCompleted(s *execpb.StepCompleted) {
 	j.mu.Lock()
-	u := j.steps[s.Number]
-	if u == nil {
-		u = &ermite.StepUpdate{Number: s.Number, StartedAt: tsOf(s.UnixNano)}
-	} else {
-		u = cloneStep(u)
+	if j.violation != "" {
+		j.mu.Unlock()
+		return
 	}
+	old := j.steps[s.Number]
+	switch {
+	case old == nil:
+		j.mu.Unlock()
+		j.violate("step %d completed without having started", s.Number)
+		return
+	case old.State == ermite.StepState_STEP_STATE_COMPLETED:
+		j.mu.Unlock()
+		j.violate("step %d completed twice", s.Number)
+		return
+	}
+	u := cloneStep(old)
 	if s.Name != "" {
-		u.Name = s.Name
+		u.Name = cutName(s.Name)
 	}
 	u.State = ermite.StepState_STEP_STATE_COMPLETED
 	u.Conclusion = conclusionOf(s.Conclusion)
@@ -244,6 +311,58 @@ func (j *jobRun) stepCompleted(s *execpb.StepCompleted) {
 	j.steps[s.Number] = u
 	j.mu.Unlock()
 	j.outbox.Step(u)
+}
+
+// logLine checks and queues a line of the log. The step must be one that was
+// started and not completed, and not lower than the step of the previous line
+// (the server refuses a log that goes back); the text is made valid for the
+// server: UTF-8, no line feed (a line feed in a line makes more lines).
+func (j *jobRun) logLine(l *execpb.Log) {
+	j.mu.Lock()
+	if j.violation != "" {
+		j.mu.Unlock()
+		return
+	}
+	st := j.steps[l.Step]
+	switch {
+	case l.Step < 1 || l.Step > maxSteps || st == nil:
+		j.mu.Unlock()
+		j.violate("a log line for step %d, which has not started", l.Step)
+		return
+	case st.State == ermite.StepState_STEP_STATE_COMPLETED:
+		j.mu.Unlock()
+		j.violate("a log line for step %d, which is completed", l.Step)
+		return
+	case l.Step < j.lastLogStep:
+		j.mu.Unlock()
+		j.violate("a log line for step %d after one for step %d", l.Step, j.lastLogStep)
+		return
+	case len(l.Text) > maxLineText:
+		j.mu.Unlock()
+		j.violate("a log line of %d bytes (the limit is %d)", len(l.Text), maxLineText)
+		return
+	}
+	j.lastLogStep = l.Step
+	j.mu.Unlock()
+	text := l.Text
+	if !utf8.ValidString(text) {
+		text = strings.ToValidUTF8(text, "\ufffd")
+	}
+	for i, part := range strings.Split(text, "\n") {
+		j.outbox.Log(logLine{step: l.Step, unixNano: l.UnixNano, text: part, continued: l.Continued && i == 0})
+	}
+}
+
+// cutName bounds a step name to what the server keeps, on a character boundary.
+func cutName(s string) string {
+	if len(s) <= maxNameLen {
+		return strings.ToValidUTF8(s, "\ufffd")
+	}
+	s = s[:maxNameLen]
+	for !utf8.ValidString(s) && len(s) > 0 {
+		s = s[:len(s)-1]
+	}
+	return s
 }
 
 func cloneStep(u *ermite.StepUpdate) *ermite.StepUpdate {
@@ -325,6 +444,7 @@ func (j *jobRun) run(rt *Runner, shutdown <-chan struct{}) {
 	stopHard := make(chan struct{})
 	var hardOnce sync.Once
 	hard := func() { hardOnce.Do(func() { close(stopHard) }) }
+	j.hard = hard
 	go func() {
 		select {
 		case <-shutdown:
@@ -442,9 +562,7 @@ func (j *jobRun) execute(ctx context.Context, rt *Runner, stopHard <-chan struct
 	}}
 	_, exit, err := execstream.DriveJob(conn, run, j.cancelCh, execstream.JobHandler{
 		StepStarted: j.stepStarted, StepCompleted: j.stepCompleted,
-		Log: func(l *execpb.Log) {
-			j.outbox.Log(logLine{step: l.Step, unixNano: l.UnixNano, text: l.Text, continued: l.Continued})
-		},
+		Log:       j.logLine,
 		JobResult: func(r *execpb.JobResult) { j.mu.Lock(); j.result = r; j.mu.Unlock() },
 	})
 	j.mu.Lock()
@@ -452,6 +570,10 @@ func (j *jobRun) execute(ctx context.Context, rt *Runner, stopHard <-chan struct
 	j.mu.Unlock()
 
 	switch {
+	case j.violated():
+		// The step numbers or lines of the executor were wrong: whatever it
+		// reported is not trusted, the job fails (the reason is in the log).
+		return ermite.CiConclusion_CI_CONCLUSION_FAILURE, nil, false
 	case res != nil:
 		c := conclusionOf(res.Conclusion)
 		if c == ermite.CiConclusion_CI_CONCLUSION_UNSPECIFIED || c == ermite.CiConclusion_CI_CONCLUSION_SKIPPED {

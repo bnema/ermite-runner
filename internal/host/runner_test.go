@@ -11,6 +11,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
+
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"connectrpc.com/connect"
 
@@ -845,5 +848,199 @@ func TestRunCarriesTheRemainingDeadline(t *testing.T) {
 	eventually(t, "CompleteJob", func() bool { return h.srv.completeCount() == 1 })
 	if spec == nil || spec.TimeoutMinutes != 5 || spec.DeadlineMs < 110_000 || spec.DeadlineMs > 120_000 {
 		t.Fatalf("%v", spec)
+	}
+}
+
+// ---- the guest is untrusted: step numbers and lines are checked (M3)
+
+// hostile runs a job whose executor sends the frames of body, and checks that
+// the job fails, the sandbox is destroyed, the server never saw a violation of
+// its contract, and a line in the log names the reason.
+func hostile(t *testing.T, wantReason string, body script) *harness {
+	t.Helper()
+	h := newHarness(t, func(t *testing.T, c *execstream.Conn, run *execpb.Run, cn <-chan *execpb.Cancel) {
+		body(t, c, run, cn)
+		// A real executor would go on; this one waits for the host to cut it.
+		<-cn
+	})
+	h.srv.jobs = []*ermite.Job{testJob("j1")}
+	h.run(t)
+	eventually(t, "CompleteJob", func() bool { return h.srv.completeCount() == 1 })
+	h.srv.mu.Lock()
+	defer h.srv.mu.Unlock()
+	c := h.srv.completes[0]
+	if c.Conclusion != ermite.CiConclusion_CI_CONCLUSION_FAILURE || len(c.Outputs) != 0 {
+		t.Fatalf("conclusion %v outputs %v", c.Conclusion, c.Outputs)
+	}
+	found := false
+	for _, l := range h.srv.lines {
+		if strings.Contains(l, "broke the protocol") && strings.Contains(l, wantReason) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no error line mentioning %q in %q", wantReason, h.srv.lines)
+	}
+	for _, u := range c.Steps {
+		if u.State != ermite.StepState_STEP_STATE_COMPLETED || u.Number < 1 || u.Number > 1000 {
+			t.Errorf("invalid final step %v", u)
+		}
+	}
+	if h.driver.stops != 1 {
+		t.Errorf("the sandbox was not destroyed: stops=%d", h.driver.stops)
+	}
+	return h
+}
+
+func TestGuestStepNumberZeroFailsTheJob(t *testing.T) {
+	hostile(t, "outside 1..1000", func(_ *testing.T, c *execstream.Conn, _ *execpb.Run, _ <-chan *execpb.Cancel) {
+		stepStart(c, 1, "Set up job")
+		stepStart(c, 0, "zero")
+	})
+}
+
+func TestGuestStepNumberOverTheLimitFailsTheJob(t *testing.T) {
+	hostile(t, "outside 1..1000", func(_ *testing.T, c *execstream.Conn, _ *execpb.Run, _ <-chan *execpb.Cancel) {
+		stepStart(c, 1, "Set up job")
+		stepStart(c, 1001, "far")
+	})
+}
+
+func TestGuestStepGoingBackFailsTheJob(t *testing.T) {
+	hostile(t, "started after step 3", func(_ *testing.T, c *execstream.Conn, _ *execpb.Run, _ <-chan *execpb.Cancel) {
+		stepStart(c, 1, "a")
+		stepStart(c, 3, "c")
+		stepStart(c, 2, "b")
+	})
+}
+
+func TestGuestStepRestartedFailsTheJob(t *testing.T) {
+	hostile(t, "started after step 1", func(_ *testing.T, c *execstream.Conn, _ *execpb.Run, _ <-chan *execpb.Cancel) {
+		stepStart(c, 1, "a")
+		stepDone(c, 1, "a", cOK)
+		stepStart(c, 1, "again")
+	})
+}
+
+func TestGuestCompletedStepIsNeverTouchedAgain(t *testing.T) {
+	h := hostile(t, "completed twice", func(_ *testing.T, c *execstream.Conn, _ *execpb.Run, _ <-chan *execpb.Cancel) {
+		stepStart(c, 1, "a")
+		stepDone(c, 1, "a", cOK)
+		stepDone(c, 1, "a", cFail)
+	})
+	if u := h.srv.Result("j1").Steps[1]; u == nil || u.Conclusion != ermite.CiConclusion_CI_CONCLUSION_SUCCESS {
+		t.Errorf("a completed step was changed: %v", u.Conclusion)
+	}
+}
+
+func TestGuestCompletingAnUnknownStepFailsTheJob(t *testing.T) {
+	hostile(t, "without having started", func(_ *testing.T, c *execstream.Conn, _ *execpb.Run, _ <-chan *execpb.Cancel) {
+		stepStart(c, 1, "a")
+		stepDone(c, 7, "ghost", cOK)
+	})
+}
+
+func TestGuestLogForAnUnstartedOrCompletedStepFailsTheJob(t *testing.T) {
+	hostile(t, "has not started", func(_ *testing.T, c *execstream.Conn, _ *execpb.Run, _ <-chan *execpb.Cancel) {
+		stepStart(c, 1, "a")
+		logLineFrame(c, 5, "x", false)
+	})
+	hostile(t, "which is completed", func(_ *testing.T, c *execstream.Conn, _ *execpb.Run, _ <-chan *execpb.Cancel) {
+		stepStart(c, 1, "a")
+		stepDone(c, 1, "a", cOK)
+		logLineFrame(c, 1, "late", false)
+	})
+}
+
+func TestGuestLogGoingBackAStepFailsTheJob(t *testing.T) {
+	hostile(t, "after one for step 2", func(_ *testing.T, c *execstream.Conn, _ *execpb.Run, _ <-chan *execpb.Cancel) {
+		stepStart(c, 1, "a")
+		stepStart(c, 2, "b")
+		logLineFrame(c, 2, "x", false)
+		logLineFrame(c, 1, "y", false)
+	})
+}
+
+func TestGuestOversizedLineFailsTheJob(t *testing.T) {
+	hostile(t, "bytes (the limit is 65536)", func(_ *testing.T, c *execstream.Conn, _ *execpb.Run, _ <-chan *execpb.Cancel) {
+		stepStart(c, 1, "a")
+		logLineFrame(c, 1, strings.Repeat("x", 64*1024+1), false)
+	})
+}
+
+// Text that the server would refuse is repaired, not forwarded: a line feed
+// makes more lines and long names are cut. (Invalid UTF-8 cannot reach the host:
+// proto3 strings are validated when the frame is decoded, which fails the
+// session; the executor replaces invalid bytes before it sends.)
+func TestGuestTextIsMadeValidForTheServer(t *testing.T) {
+	h := newHarness(t, func(_ *testing.T, c *execstream.Conn, _ *execpb.Run, _ <-chan *execpb.Cancel) {
+		stepStart(c, 1, strings.Repeat("é", 800)) // 1,600 bytes
+		logLineFrame(c, 1, "two\nlines", false)
+		stepDone(c, 1, "", cOK)
+		jobDone(c, cOK, nil, false)
+	})
+	h.srv.jobs = []*ermite.Job{testJob("j1")}
+	h.run(t)
+	eventually(t, "CompleteJob", func() bool { return h.srv.completeCount() == 1 })
+	h.srv.mu.Lock()
+	defer h.srv.mu.Unlock()
+	if strings.Join(h.srv.lines, "|") != "two|lines" {
+		t.Fatalf("%q", h.srv.lines)
+	}
+	if n := h.srv.steps[1].Name; len(n) > 1024 || !utf8.ValidString(n) {
+		t.Fatalf("name of %d bytes", len(n))
+	}
+}
+
+// A guest that sends steps without end cannot grow the memory of the host.
+func TestGuestFloodIsBounded(t *testing.T) {
+	h := hostile(t, "outside 1..1000", func(_ *testing.T, c *execstream.Conn, _ *execpb.Run, _ <-chan *execpb.Cancel) {
+		for n := 1; n <= 1100; n++ {
+			stepStart(c, n, "s")
+			stepDone(c, n, "s", cOK)
+		}
+	})
+	_ = h
+}
+
+// The server's line count is the truth (m6): when the answer to an AppendLog
+// says the server holds more lines than the request accounts for, the next
+// offset starts from the server's count and no gap or repeat is created.
+func TestAppendLogResyncsToTheServersCount(t *testing.T) {
+	h := newHarness(t, func(_ *testing.T, c *execstream.Conn, _ *execpb.Run, _ <-chan *execpb.Cancel) {
+		stepStart(c, 1, "a")
+		logLineFrame(c, 1, "l1", false)
+		time.Sleep(150 * time.Millisecond) // a first request of its own
+		logLineFrame(c, 1, "l2", false)
+		logLineFrame(c, 1, "l3", false)
+		stepDone(c, 1, "a", cOK)
+		jobDone(c, cOK, nil, false)
+	})
+	h.runner.Timing.LogFlush = 30 * time.Millisecond
+	h.srv.jobs = []*ermite.Job{testJob("j1")}
+	// A line the runner never sent appears in the server's log (a retry whose
+	// answer was lost, in a real server): the runner must continue after it.
+	h.srv.mu.Lock()
+	h.srv.appendHook = func(n int, r *ermite.AppendLogRequest) (bool, error) {
+		if n == 1 {
+			_, _ = h.srv.store.Apply(&ermite.AppendLogRequest{JobId: r.JobId, Step: 1, Offset: 0, Lines: []*ermite.LogLine{
+				{Time: timestamppb.Now(), Text: "planted"}, {Time: timestamppb.Now(), Text: "planted2"}}})
+			return false, nil
+		}
+		return false, nil
+	}
+	h.srv.mu.Unlock()
+	h.run(t)
+	eventually(t, "CompleteJob", func() bool { return h.srv.completeCount() == 1 })
+	h.srv.mu.Lock()
+	defer h.srv.mu.Unlock()
+	// The first request (offset 0, "l1") was skipped by the server because the
+	// planted lines already took offsets 0 and 1; the runner learns it holds 2
+	// lines (it expected 1), and goes on at offset 2: no gap, no repeat.
+	if len(h.srv.lines) < 3 || h.srv.lines[0] != "planted" || h.srv.lines[len(h.srv.lines)-1] != "l3" {
+		t.Fatalf("%q", h.srv.lines)
+	}
+	if !strings.Contains(h.logs.String(), "continuing from") {
+		t.Fatalf("no warning about the resync:\n%s", h.logs.String())
 	}
 }

@@ -264,20 +264,27 @@ func (o *outbox) sendLines(ctx context.Context, batch []event) {
 	// The offset is fixed before the first attempt: every retry sends the same
 	// lines at the same offset.
 	req.Offset = o.offset
+	var next int64
 	err := o.retry(ctx, "AppendLog", func(c context.Context) error {
 		resp, err := o.client.AppendLog(c, connect.NewRequest(req))
 		if err != nil {
 			return err
 		}
-		if want := req.Offset + int64(len(req.Lines)); resp.Msg.NextOffset != want {
-			o.logf("AppendLog: the server holds %d lines, expected %d", resp.Msg.NextOffset, want)
-		}
+		next = resp.Msg.NextOffset
 		return nil
 	})
 	switch {
 	case err == nil:
 		o.mu.Lock()
-		o.offset += int64(len(req.Lines))
+		// The server says how many lines it holds: that is the truth. A
+		// difference means lines were stored that we did not count (a retry
+		// whose answer we lost) or dropped; continue from the server's count,
+		// so that the next offset is never a gap (out_of_range) and never a
+		// repeat of lines that would be skipped.
+		if want := req.Offset + int64(len(req.Lines)); next != want {
+			o.logf("AppendLog: the server holds %d lines, expected %d: continuing from %d", next, want, next)
+		}
+		o.offset = next
 		o.mu.Unlock()
 	case ctx.Err() == nil && classify(err) == kindPermanent:
 		// The server refused these lines; they are dropped and the offset stays

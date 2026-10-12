@@ -55,7 +55,7 @@ type Server struct {
 }
 
 type jobState struct {
-	lines    []Line
+	log      *LogStore
 	steps    map[int32]*ermite.StepUpdate
 	complete *ermite.CompleteJobRequest
 }
@@ -101,10 +101,10 @@ func (s *Server) Result(jobID string) Result {
 	for k, v := range st.steps {
 		steps[k] = v
 	}
-	return Result{Complete: st.complete, Lines: append([]Line(nil), st.lines...), Steps: steps}
+	return Result{Complete: st.complete, Lines: st.log.Lines(), Steps: steps}
 }
 
-func (s *Server) violation(msg string) { s.Errors = append(s.Errors, msg) }
+func (s *Server) violation(msg string) { s.Errors = append(s.Errors, msg) } // called with s.mu held
 
 func unauth() error { return connect.NewError(connect.CodeUnauthenticated, io.EOF) }
 
@@ -140,7 +140,7 @@ func (s *Server) FetchJob(_ context.Context, r *connect.Request[ermite.FetchJobR
 	j := s.queue[0]
 	s.queue = s.queue[1:]
 	s.assigned[j.JobToken] = j
-	s.jobs[j.JobId] = &jobState{steps: map[int32]*ermite.StepUpdate{}}
+	s.jobs[j.JobId] = &jobState{log: &LogStore{OnViolation: s.violation}, steps: map[int32]*ermite.StepUpdate{}}
 	return connect.NewResponse(&ermite.FetchJobResponse{Job: j}), nil
 }
 
@@ -178,7 +178,7 @@ func (s *Server) UpdateJob(_ context.Context, r *connect.Request[ermite.UpdateJo
 	return connect.NewResponse(&ermite.UpdateJobResponse{}), nil
 }
 
-// AppendLog applies the offset rules of runner.proto.
+// AppendLog applies the rules of runner.proto through a LogStore.
 func (s *Server) AppendLog(_ context.Context, r *connect.Request[ermite.AppendLogRequest]) (*connect.Response[ermite.AppendLogResponse], error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -190,38 +190,11 @@ func (s *Server) AppendLog(_ context.Context, r *connect.Request[ermite.AppendLo
 		s.violation("AppendLog after CompleteJob")
 		return nil, ended(st.complete.Conclusion)
 	}
-	n, bytes := len(r.Msg.Lines), 0
-	if n == 0 || n > 1000 {
-		s.violation("AppendLog: bad number of lines")
-		return nil, connect.NewError(connect.CodeInvalidArgument, io.EOF)
+	next, err := st.log.Apply(r.Msg)
+	if err != nil {
+		return nil, err
 	}
-	for i, l := range r.Msg.Lines {
-		bytes += len(l.Text)
-		if strings.Contains(l.Text, "\n") || l.Time == nil || (l.Continued && i == 0 && len(st.lines) == 0 && r.Msg.Offset == 0) {
-			s.violation("AppendLog: invalid line")
-			return nil, connect.NewError(connect.CodeInvalidArgument, io.EOF)
-		}
-	}
-	if bytes > 64*1024 {
-		s.violation("AppendLog: more than 64 KiB")
-		return nil, connect.NewError(connect.CodeInvalidArgument, io.EOF)
-	}
-	have := int64(len(st.lines))
-	if r.Msg.Offset > have {
-		s.violation("AppendLog: a gap in the offsets")
-		return nil, connect.NewError(connect.CodeOutOfRange, io.EOF)
-	}
-	if have > 0 && r.Msg.Offset == have && r.Msg.Step < st.lines[have-1].Step {
-		s.violation("AppendLog: a step went back")
-		return nil, connect.NewError(connect.CodeFailedPrecondition, io.EOF)
-	}
-	for i, l := range r.Msg.Lines {
-		if int64(i) < have-r.Msg.Offset {
-			continue
-		}
-		st.lines = append(st.lines, Line{Step: r.Msg.Step, Text: l.Text, Continued: l.Continued})
-	}
-	return connect.NewResponse(&ermite.AppendLogResponse{NextOffset: int64(len(st.lines))}), nil
+	return connect.NewResponse(&ermite.AppendLogResponse{NextOffset: next}), nil
 }
 
 // CompleteJob ends a job, idempotently.

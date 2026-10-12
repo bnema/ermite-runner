@@ -20,6 +20,7 @@ import (
 
 	"bnema.dev/ermite-runner/internal/execstream"
 	"bnema.dev/ermite-runner/internal/execstream/execpb"
+	"bnema.dev/ermite-runner/internal/host/hosttest"
 	"bnema.dev/ermite-runner/internal/sandbox"
 )
 
@@ -42,7 +43,9 @@ type fakeServer struct {
 	beatHook  func(n int) error
 	registers []*ermite.RegisterRunnerRequest
 
-	lines      []string // log text, joined pieces are not merged: one per line
+	store      *hosttest.LogStore
+	violations []string
+	lines      []string // log text, one per line (mirror of store)
 	cont       []bool
 	steps      map[int32]*ermite.StepUpdate
 	appendReq  []*ermite.AppendLogRequest
@@ -60,10 +63,12 @@ type fakeServer struct {
 }
 
 func newFakeServer() *fakeServer {
-	return &fakeServer{
+	s := &fakeServer{
 		runnerTok: "ermiterun_tok", assigned: map[string]*ermite.Job{}, completed: map[string]bool{}, steps: map[int32]*ermite.StepUpdate{},
 		watchMsgs: make(chan *ermite.WatchJobResponse, 16),
 	}
+	s.store = &hosttest.LogStore{OnViolation: func(m string) { s.violations = append(s.violations, m) }}
+	return s
 }
 
 func endedErr(je *ermite.JobEnded) error {
@@ -185,44 +190,28 @@ func (s *fakeServer) AppendLog(_ context.Context, r *connect.Request[ermite.Appe
 	}
 	s.appendN++
 	s.appendReq = append(s.appendReq, r.Msg)
-	if len(r.Msg.Lines) == 0 || len(r.Msg.Lines) > 1000 {
-		return nil, connect.NewError(connect.CodeInvalidArgument, io.EOF)
-	}
-	bytes := 0
-	for _, l := range r.Msg.Lines {
-		bytes += len(l.Text)
-		if strings.Contains(l.Text, "\n") || l.Time == nil {
-			return nil, connect.NewError(connect.CodeInvalidArgument, io.EOF)
-		}
-	}
-	if bytes > 64*1024 {
-		return nil, connect.NewError(connect.CodeInvalidArgument, io.EOF)
-	}
-	have := int64(len(s.lines))
-	if r.Msg.Offset > have {
-		return nil, connect.NewError(connect.CodeOutOfRange, io.EOF)
-	}
-	skip := have - r.Msg.Offset
-	apply := func() {
-		for i, l := range r.Msg.Lines {
-			if int64(i) < skip {
-				continue
-			}
-			s.lines = append(s.lines, l.Text)
-			s.cont = append(s.cont, l.Continued)
-		}
-	}
+	// The rules of runner.proto are written once, in hosttest.LogStore.
+	var failAfter error
 	if s.appendHook != nil {
 		thenFail, err := s.appendHook(s.appendN, r.Msg)
-		if err != nil {
-			if thenFail {
-				apply()
-			}
+		if err != nil && !thenFail {
 			return nil, err
 		}
+		failAfter = err
 	}
-	apply()
-	return connect.NewResponse(&ermite.AppendLogResponse{NextOffset: int64(len(s.lines))}), nil
+	next, err := s.store.Apply(r.Msg)
+	if err != nil {
+		return nil, err
+	}
+	s.lines, s.cont = s.lines[:0], s.cont[:0]
+	for _, l := range s.store.Lines() {
+		s.lines = append(s.lines, l.Text)
+		s.cont = append(s.cont, l.Continued)
+	}
+	if failAfter != nil {
+		return nil, failAfter
+	}
+	return connect.NewResponse(&ermite.AppendLogResponse{NextOffset: next}), nil
 }
 
 func (s *fakeServer) CompleteJob(_ context.Context, r *connect.Request[ermite.CompleteJobRequest]) (*connect.Response[ermite.CompleteJobResponse], error) {
@@ -497,6 +486,13 @@ func newHarness(t *testing.T, sc script) *harness {
 	drv := &fakeDriver{script: sc, t: t, iso: sandbox.IsolationVM}
 	lb := &logBuf{}
 	h := &harness{srv: srv, url: url, driver: drv, logs: lb}
+	t.Cleanup(func() {
+		srv.mu.Lock()
+		defer srv.mu.Unlock()
+		if len(srv.violations) > 0 {
+			t.Errorf("the host broke the contract of AppendLog: %q", srv.violations)
+		}
+	})
 	h.runner = &Runner{
 		Cfg:    Config{URL: url, Name: "r1", Capacity: 1, Version: "test"},
 		Driver: drv,
@@ -543,3 +539,10 @@ func eventually(t *testing.T, what string, cond func() bool) {
 }
 
 func (s *fakeServer) completeCount() int { s.mu.Lock(); defer s.mu.Unlock(); return len(s.completes) }
+
+// Result returns what a job reported, like hosttest.Server.Result.
+func (s *fakeServer) Result(jobID string) hosttest.Result {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return hosttest.Result{Steps: s.steps}
+}
