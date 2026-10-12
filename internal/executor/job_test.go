@@ -703,6 +703,8 @@ func TestSetUpJobWithPermissionsPrintsNoDefaultGroup(t *testing.T) {
 	for name, yaml := range map[string]string{
 		"workflow": "permissions:\n  contents: write\n" + wfHead + "    steps:\n      - run: echo hi\n",
 		"job":      wfHead + "    permissions: read-all\n    steps:\n      - run: echo hi\n",
+		"empty":    "permissions: {}\n" + wfHead + "    steps:\n      - run: echo hi\n",
+		"write":    "permissions: write-all\n" + wfHead + "    steps:\n      - run: echo hi\n",
 	} {
 		got := setupLog(t, yaml, "j", nil)
 		if strings.Contains(got, "GITHUB_TOKEN Permissions") || !strings.Contains(got, "Secret source: Actions\nCache mode: write") {
