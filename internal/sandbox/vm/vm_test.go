@@ -652,8 +652,8 @@ func TestFirecrackerProcsScan(t *testing.T) {
 		_ = os.MkdirAll(filepath.Join(proc, pid), 0o755)
 		_ = os.WriteFile(filepath.Join(proc, pid, "cmdline"), []byte(cmdline), 0o644)
 	}
-	mk("100", "firecracker\x00--id\x00er00112233\x00--api-sock\x00/x\x00")
-	mk("101", "/usr/bin/firecracker\x00--api-sock\x00/x\x00--id\x00er44556677\x00")
+	mk("100", "firecracker\x00--id\x00er00112233\x00--api-sock\x00/var/lib/er/vm/er00112233/api.sock\x00")
+	mk("101", "/usr/bin/firecracker\x00--api-sock\x00/var/lib/er/vm/er44556677/api.sock\x00--id\x00er44556677\x00")
 	mk("102", "firecracker\x00--id\x00other-tool-vm\x00") // someone else's VM
 	mk("103", "bash\x00--id\x00er00112233\x00")           // not firecracker
 	mk("1", "firecracker\x00--id\x00er99999999\x00")      // pid 1 is never touched
@@ -1210,7 +1210,14 @@ func TestScanIsScopedToOurJailBase(t *testing.T) {
 	mk("105", "/", "jailer", "--id", "er22222222", "--exec-file", "/fc", "--chroot-base-dir", filepath.Join(foreign, "jail"))
 	mk("106", "/", "jailer", "--id", "er33333333", "--exec-file", "/fc")
 	mk("107", ours+"/../../../../x", "/firecracker", "--id", "er55555555", "--start-time-us", "1") // lexical escape
-	mk("108", "/", "firecracker", "--id", "er66666666", "--api-sock", "/x")                        // unjailed: by id
+	vmDir := filepath.Join(state, "vm", "er66666666")
+	mk("108", "/", "firecracker", "--id", "er66666666", "--api-sock", filepath.Join(vmDir, "api.sock")) // unjailed, in our dir
+	mk("111", "/", "firecracker", "--id", "er99999999", "--api-sock", "/x")                             // socket elsewhere
+	mk("112", "/", "firecracker", "--id", "erabababab", "--api-sock", filepath.Join(vmDir, "api.sock")) // our dir, another id
+	mk("113", "/", "firecracker", "--id", "er66666666", "--api-sock", vmDir+"/../../x/api.sock")        // escapes by ..
+	mk("114", "/", "firecracker", "--id", "er66666666", "--api-sock", "vm/er66666666/api.sock")         // relative
+	mk("115", "/", "firecracker", "--id", "er66666666", "--api-sock")                                   // no value
+	mk("116", "/", "firecracker", "--id", "er66666666", "--api-sock", vmDir+"x/api.sock")               // prefix sibling
 	got := vmmProcs(proc, sc)
 	want := map[int]string{100: "er00112233", 104: "er11111111", 108: "er66666666", 109: "er00112233"}
 	if len(got) != len(want) {

@@ -37,6 +37,7 @@ type vmmArgs struct {
 	id         string
 	markers    map[string]bool
 	chrootBase string // the jailer's --chroot-base-dir
+	apiSock    string // Firecracker's --api-sock value
 }
 
 func parseVMMArgs(args []string) vmmArgs {
@@ -53,6 +54,9 @@ func parseVMMArgs(args []string) vmmArgs {
 			}
 		case slices.Contains(VMMMarkers, args[i]):
 			a.markers[args[i]] = true
+			if args[i] == MarkerAPISock && i+1 < len(args) {
+				a.apiSock = args[i+1]
+			}
 		}
 	}
 	return a
@@ -73,15 +77,38 @@ func IDFromCmdline(args []string) string {
 // (or have been started for) its own jailer chroot base, <state dir>/jail.
 type scope struct {
 	jailBases []string // the base as configured, and with symlinks resolved
+	vmBases   []string // <state dir>/vm (unjailed VMs), likewise
 }
 
 func newScope(stateDir string) scope {
-	base := jailBase(stateDir)
-	sc := scope{jailBases: []string{base}}
-	if r, err := filepath.EvalSymlinks(base); err == nil && r != base {
-		sc.jailBases = append(sc.jailBases, r)
+	sc := scope{}
+	for _, b := range []struct {
+		dir string
+		to  *[]string
+	}{{jailBase(stateDir), &sc.jailBases}, {filepath.Join(stateDir, "vm"), &sc.vmBases}} {
+		*b.to = []string{b.dir}
+		if r, err := filepath.EvalSymlinks(b.dir); err == nil && r != b.dir {
+			*b.to = append(*b.to, r)
+		}
 	}
 	return sc
+}
+
+// apiSockIsOurs: an unjailed Firecracker's --api-sock must be a path below
+// <state dir>/vm/<id>/ (compared lexically, after cleaning), the directory the
+// driver puts it in. Another Firecracker with an id of our shape and a socket
+// elsewhere is someone else's.
+func (sc scope) apiSockIsOurs(sock, id string) bool {
+	if sock == "" || !filepath.IsAbs(sock) {
+		return false
+	}
+	sock = filepath.Clean(sock)
+	for _, b := range sc.vmBases {
+		if strings.HasPrefix(sock, filepath.Join(b, id)+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 func (sc scope) isBase(p string) bool {
@@ -105,7 +132,8 @@ func (sc scope) under(p string) bool {
 //     below our jail base (rootIsOurs). Anything else with that flag and an id
 //     of our shape belongs to someone else's jailer and is never touched.
 //
-// A Firecracker started with --api-sock (no jailer) is ours by its id alone.
+// A Firecracker started with --api-sock (no jailer) is ours when the socket is
+// in <state dir>/vm/<id>/ (apiSockIsOurs).
 func (sc scope) match(dir string, args []string) string {
 	a := parseVMMArgs(args)
 	if a.id == "" || len(a.markers) == 0 {
@@ -113,7 +141,9 @@ func (sc scope) match(dir string, args []string) string {
 	}
 	switch {
 	case a.markers[MarkerAPISock]:
-		return a.id
+		if sc.apiSockIsOurs(a.apiSock, a.id) {
+			return a.id
+		}
 	case a.markers[MarkerExecFile]:
 		if sc.isBase(a.chrootBase) {
 			return a.id
