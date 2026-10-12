@@ -93,6 +93,27 @@ func TestClientRefusesToSendTheTokenInClear(t *testing.T) {
 	}
 }
 
+// The API lives under /-/api of the base URL, which may carry a path prefix
+// and a trailing slash.
+func TestClientCallsTheAPIPath(t *testing.T) {
+	for base, want := range map[string]string{
+		"https://h":         "/-/api/ermite.RunnerService/FetchJob",
+		"https://h/":        "/-/api/ermite.RunnerService/FetchJob",
+		"https://h/ermite":  "/ermite/-/api/ermite.RunnerService/FetchJob",
+		"https://h/ermite/": "/ermite/-/api/ermite.RunnerService/FetchJob",
+	} {
+		var got string
+		rt := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			got = r.URL.Path
+			return nil, context.Canceled
+		})
+		_, _ = NewClient(base, "ermiterun_secret", rt).FetchJob(context.Background(), connect.NewRequest(&ermite.FetchJobRequest{}))
+		if got != want {
+			t.Errorf("%s: called %q, want %q", base, got, want)
+		}
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
