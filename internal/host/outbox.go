@@ -62,6 +62,10 @@ type outbox struct {
 	done    chan struct{}
 
 	offset int64 // lines the server holds, as far as we know
+	// offsetMaybeStale is set when a send was cut short by its context while
+	// the call may have been applied by the server with the response lost: the
+	// offset is then possibly behind the server's count.
+	offsetMaybeStale bool
 }
 
 // callClient is the part of the RunnerService client the job uses.
@@ -277,6 +281,7 @@ func (o *outbox) sendLines(ctx context.Context, batch []event) {
 	switch {
 	case err == nil:
 		o.mu.Lock()
+		o.offsetMaybeStale = false
 		// The server says how many lines it holds: that is the truth. A
 		// difference means lines were stored that we did not count (a retry
 		// whose answer we lost) or dropped; continue from the server's count,
@@ -287,7 +292,13 @@ func (o *outbox) sendLines(ctx context.Context, batch []event) {
 		}
 		o.offset = next
 		o.mu.Unlock()
-	case ctx.Err() == nil && classify(err) == kindPermanent:
+	case ctx.Err() != nil:
+		// Cut short in the middle of a call or of its retries: the server may
+		// hold these lines without our having seen the answer.
+		o.mu.Lock()
+		o.offsetMaybeStale = true
+		o.mu.Unlock()
+	case classify(err) == kindPermanent:
 		// The server refused these lines; they are dropped and the offset stays
 		// where the server is.
 		o.log.Error().Err(err).Int("lines", len(req.Lines)).Int32("step", req.Step).Msg("AppendLog refused, the lines are dropped")
@@ -297,6 +308,18 @@ func (o *outbox) sendLines(ctx context.Context, batch []event) {
 // AppendNow sends one line synchronously, after Close: the sender has stopped,
 // so nothing else uses the offset. It is for the last words of a job (an error
 // that explains why the result could not be reported).
+//
+// If Close gave up in the middle of a send, the offset may be behind the
+// server's: the line is sent anyway (the server answers with its own count, and
+// an offset that is too low makes it skip the line as a repeat or refuse it),
+// and the warning says why it may be missing.
 func (o *outbox) AppendNow(ctx context.Context, l logLine) {
+	o.mu.Lock()
+	stale := o.offsetMaybeStale
+	offset := o.offset
+	o.mu.Unlock()
+	if stale {
+		o.log.Warn().Int64("offset", offset).Msg("the log offset may be stale: Close was cut short in the middle of a send, so the last line may be skipped or refused by the server")
+	}
 	o.sendLines(ctx, []event{{line: &l}})
 }
