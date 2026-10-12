@@ -1,0 +1,40 @@
+# SPDX-License-Identifier: MIT
+#
+# systemd unit of the ermite runner. Install the static binary as
+# /usr/local/bin/ermite-runner, write the settings to
+# /etc/ermite-runner/env (mode 0600) and register the runner once:
+#
+#   sudo systemd-run --pipe --wait -p EnvironmentFile=/etc/ermite-runner/env \
+#     /usr/local/bin/ermite-runner register --token <runner:register token>
+#
+# The runner runs as root: it creates TAP devices and firewall rules (vm), loop
+# mounts (container), and starts the jailer or containers. Jobs never run as
+# root on the host; they run in a micro-VM or a container as user "runner".
+[Unit]
+Description=ermite CI runner
+Documentation=https://git.bnema.dev/bnema/ermite-runner
+Wants=network-online.target
+After=network-online.target docker.service
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/ermite-runner/env
+ExecStart=/usr/local/bin/ermite-runner run
+Restart=on-failure
+RestartSec=5
+# SIGTERM cancels the running jobs with runner_shutdown, reports them and
+# removes their sandboxes; give that time before systemd sends SIGKILL.
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=120
+# The state directory holds the runner token (0600) and the VM images.
+StateDirectory=ermite-runner
+StateDirectoryMode=0700
+RuntimeDirectory=ermite-runner
+# Jobs are many processes: do not let systemd's default task limit stop them.
+TasksMax=infinity
+LimitNOFILE=1048576
+Delegate=yes
+
+[Install]
+WantedBy=multi-user.target
