@@ -52,8 +52,15 @@ type Config struct {
 
 	Runner        RunnerInfo
 	RunnerVersion string
-	// Layout overrides the directory layout (tests); nil means the hosted layout.
+	// Layout overrides the directory layout (tests); nil means the hosted layout
+	// under Home.
 	Layout *Layout
+	// Home is the home directory of the user of the steps; empty means
+	// /home/runner.
+	Home string
+	// ToolCache is RUNNER_TOOL_CACHE; empty means DefaultToolCache. The official
+	// runner reads it from its own environment (HostContext.cs:411).
+	ToolCache string
 	// BaseEnv is the environment steps inherit; nil means os.Environ().
 	BaseEnv []string
 	// Debug turns ##[debug] lines on (ACTIONS_STEP_DEBUG).
@@ -324,9 +331,17 @@ func (j *job) setUp() ([]*workflow.Step, error) {
 	if err != nil {
 		return nil, err
 	}
-	if cfg.Layout != nil {
+	switch {
+	case cfg.Layout != nil:
 		state.WithLayout(*cfg.Layout)
 		layout = *cfg.Layout
+	case (cfg.Home != "" && cfg.Home != layout.Home) || cfg.ToolCache != "":
+		home := cfg.Home
+		if home == "" {
+			home = layout.Home
+		}
+		layout = NewLayout(home, filepath.Base(layout.Workspace), cfg.ToolCache)
+		state.WithLayout(layout)
 	}
 	j.state = state
 
@@ -355,7 +370,11 @@ func (j *job) setUp() ([]*workflow.Step, error) {
 	if err != nil {
 		return nil, err
 	}
+	fc.Own = j.own
 	j.fc = fc
+	for _, d := range []string{layout.WorkRoot, layout.RunnerWorkspace, layout.Workspace, layout.Temp, fc.dir} {
+		j.own(d)
+	}
 
 	j.baseEnv = cfg.BaseEnv
 	if j.baseEnv == nil {
@@ -409,6 +428,15 @@ func (j *job) setUp() ([]*workflow.Step, error) {
 		j.before[p.key()] = true
 	}
 	return jb.Steps, nil
+}
+
+// own gives a file or directory created by the executor to the user the steps
+// run as, so that scripts can write to RUNNER_TEMP, the workspace and the file
+// command files. Best effort: without Credential nothing is done.
+func (j *job) own(path string) {
+	if c := j.cfg.Credential; c != nil {
+		_ = os.Lchown(path, int(c.Uid), int(c.Gid))
+	}
 }
 
 func clearDir(dir string) {
@@ -730,8 +758,10 @@ func (j *job) execute(s *stepRun, stepCancel <-chan struct{}) (result stepResult
 		if ev := j.state.EventJSON(); ev != "" {
 			dir := filepath.Join(j.state.Layout().Temp, "_github_workflow")
 			if err := os.MkdirAll(dir, 0o755); err == nil {
+				j.own(dir)
 				p := filepath.Join(dir, "event.json")
 				if err := os.WriteFile(p, []byte(ev), 0o644); err == nil {
+					j.own(p)
 					j.state.SetGitHub("event_path", p)
 				}
 			}

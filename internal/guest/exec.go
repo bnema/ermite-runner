@@ -38,6 +38,9 @@ type ExecConfig struct {
 	Version string
 	// Shell runs the script as `Shell -c script`; default /bin/sh.
 	Shell string
+	// StepUser is the account the steps of a job run as when the executor is
+	// root; default "runner".
+	StepUser string
 	// ConnectTimeout bounds the connection attempts (default 30 s).
 	ConnectTimeout time.Duration
 	// RunTimeout bounds the wait for the host's Run frame (default 60 s).
@@ -56,6 +59,9 @@ type ExecConfig struct {
 func (c *ExecConfig) defaults() {
 	if c.Shell == "" {
 		c.Shell = "/bin/sh"
+	}
+	if c.StepUser == "" {
+		c.StepUser = "runner"
 	}
 	if c.ConnectTimeout == 0 {
 		c.ConnectTimeout = 30 * time.Second
@@ -77,8 +83,9 @@ func (c *ExecConfig) defaults() {
 	}
 }
 
-// Exec is `ermite-runner exec`, the CI-1 stub executor: it connects back to the
-// host, receives one Run, runs the script with the shell, streams stdout and
+// Exec is `ermite-runner exec`: it connects back to the host and receives one
+// Run. A Run with a job is executed by package executor (see runJob); a Run
+// without one is the stub of sandbox-check, which runs the script with the shell, streams stdout and
 // stderr as Output frames, and ends with an Exit frame. It returns the exit code
 // it reported. A Cancel frame, or the end of ctx, stops the script's process
 // group with escalating signals (see ExecConfig).
@@ -202,6 +209,12 @@ func serve(ctx context.Context, rw io.ReadWriteCloser, cfg ExecConfig) (int, err
 		return 1, ctx.Err()
 	}
 
+	if run.GetJob() != nil {
+		code := runJob(ctx, conn, cfg, run.GetJob())
+		return sendExit(conn, code, nil)
+	}
+
+	// Without a job this is the stub executor of sandbox-check.
 	script := run.GetScript()
 	if script == "" {
 		script = DefaultScript

@@ -93,6 +93,8 @@ type Sink interface {
 type FileCommands struct {
 	dir    string
 	suffix string
+	// Own, when set, gives a file or directory to the user of the steps.
+	Own func(path string)
 }
 
 // NewFileCommands uses dir (RUNNER_TEMP/_runner_file_commands), creating it.
@@ -125,6 +127,9 @@ func (f *FileCommands) Init() (map[string]string, error) {
 			return nil, err
 		}
 		_ = fh.Close()
+		if f.Own != nil {
+			f.Own(p)
+		}
 		env[envVarName(c.ContextName)] = p
 	}
 	return env, nil
