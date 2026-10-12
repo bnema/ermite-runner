@@ -19,6 +19,7 @@ import (
 	"github.com/google/uuid"
 )
 
+// Names of the implicit steps (JobExtension.cs:70 and :15).
 const (
 	SetUpJobName    = "Set up job"
 	CompleteJobName = "Complete job"
