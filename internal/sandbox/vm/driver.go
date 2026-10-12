@@ -15,6 +15,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"net/netip"
 	"os"
@@ -128,8 +129,8 @@ func New(ctx context.Context, cfg sandbox.Config, opt Options) (*Driver, error) 
 	if !cfg.JailerOff {
 		// Jailer 1.17 canonicalizes --chroot-base-dir and fails when it does not
 		// exist ("Failed to canonicalize path"); older releases created it.
-		if err := os.MkdirAll(jailBase(cfg.StateDir), 0o700); err != nil {
-			return fail(fmt.Errorf("jailer chroot base: %w", err))
+		if err := ensureJailBase(jailBase(cfg.StateDir)); err != nil {
+			return fail(err)
 		}
 		for _, p := range []string{cfg.KernelPath(), cfg.BaseImagePath()} {
 			if err := checkWorldReadable(p); err != nil {
@@ -425,6 +426,40 @@ func checkSocketPaths(stateDir, execName string, jailed bool) error {
 		if len(p) > maxSockPath {
 			return fmt.Errorf("socket path %q is %d bytes, over the %d-byte limit of a Unix socket: use a shorter %s", p, len(p), maxSockPath, sandbox.EnvStateDir)
 		}
+	}
+	return nil
+}
+
+// ensureJailBase creates the jailer's chroot base and refuses one that others
+// could use to redirect the jailer: anything but a real directory (a symlink is
+// not followed), owned by neither root nor the runner's own user, or writable by
+// group or others. An existing directory is checked, never chmod-ed.
+func ensureJailBase(dir string) error {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("jailer chroot base: %w", err)
+	}
+	fi, err := os.Lstat(dir)
+	if err != nil {
+		return fmt.Errorf("jailer chroot base: %w", err)
+	}
+	return checkJailBaseInfo(dir, fi, os.Geteuid())
+}
+
+func checkJailBaseInfo(dir string, fi fs.FileInfo, euid int) error {
+	if !fi.IsDir() {
+		return fmt.Errorf("jailer chroot base %s is not a directory (%v): remove it", dir, fi.Mode().Type())
+	}
+	if fi.Mode().Perm()&0o022 != 0 {
+		return fmt.Errorf("jailer chroot base %s is writable by group or others (mode %04o): chmod go-w it", dir, fi.Mode().Perm())
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return fmt.Errorf("jailer chroot base %s: cannot read its owner", dir)
+	}
+	// The jailer needs root, so the runner is root in production; accepting its own
+	// user as well keeps the driver testable without root.
+	if int(st.Uid) != 0 && int(st.Uid) != euid {
+		return fmt.Errorf("jailer chroot base %s is owned by uid %d, not root: chown it", dir, st.Uid)
 	}
 	return nil
 }

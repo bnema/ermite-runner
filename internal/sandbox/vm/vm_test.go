@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"net/netip"
@@ -1093,6 +1094,75 @@ func TestNewRejectsAStateDirThatMakesASocketPathTooLong(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "limit of a Unix socket") {
 			t.Fatalf("jailerOff=%v: want a clear socket path error, got %v", jailerOff, err)
 		}
+	}
+}
+
+// GO-003: the chroot base must be a real directory, owned by root (or the
+// runner's own user), not writable by group or others; an existing one is never
+// chmod-ed into compliance.
+func TestEnsureJailBase(t *testing.T) {
+	root := t.TempDir()
+	good := filepath.Join(root, "good")
+	if err := ensureJailBase(good); err != nil {
+		t.Fatal(err)
+	}
+	if fi, _ := os.Stat(good); fi.Mode().Perm() != 0o700 {
+		t.Fatalf("created with %v", fi.Mode().Perm())
+	}
+	if err := ensureJailBase(good); err != nil { // idempotent
+		t.Fatal(err)
+	}
+	for name, mode := range map[string]os.FileMode{"group-writable": 0o770, "other-writable": 0o707, "sticky-world": 0o777} {
+		d := filepath.Join(root, name)
+		_ = os.Mkdir(d, 0o700)
+		_ = os.Chmod(d, mode)
+		if err := ensureJailBase(d); err == nil || !strings.Contains(err.Error(), "writable by group or others") {
+			t.Errorf("%s: %v", name, err)
+		}
+		if fi, _ := os.Stat(d); fi.Mode().Perm() != mode {
+			t.Errorf("%s: mode was changed to %v", name, fi.Mode().Perm())
+		}
+	}
+	rx := filepath.Join(root, "rx")
+	_ = os.Mkdir(rx, 0o755) // readable by others is fine
+	_ = os.Chmod(rx, 0o755)
+	if err := ensureJailBase(rx); err != nil {
+		t.Errorf("0755 refused: %v", err)
+	}
+	file := filepath.Join(root, "file")
+	_ = os.WriteFile(file, nil, 0o600)
+	if err := ensureJailBase(file); err == nil {
+		t.Error("a file accepted")
+	}
+	link := filepath.Join(root, "link")
+	_ = os.Symlink(good, link)
+	if err := ensureJailBase(link); err == nil || !strings.Contains(err.Error(), "not a directory") {
+		t.Errorf("a symlink accepted: %v", err)
+	}
+}
+
+type fakeInfo struct {
+	fs.FileInfo
+	uid uint32
+}
+
+func (f fakeInfo) Sys() any { return &syscall.Stat_t{Uid: f.uid} }
+
+func TestJailBaseOwner(t *testing.T) {
+	fi, err := os.Stat(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := "/x/jail"
+	mine := os.Geteuid()
+	if err := checkJailBaseInfo(d, fakeInfo{fi, 0}, mine); err != nil {
+		t.Errorf("root-owned refused: %v", err)
+	}
+	if err := checkJailBaseInfo(d, fakeInfo{fi, uint32(mine)}, mine); err != nil {
+		t.Errorf("own user refused: %v", err)
+	}
+	if err := checkJailBaseInfo(d, fakeInfo{fi, uint32(mine) + 4242}, mine); err == nil || !strings.Contains(err.Error(), "owned by uid") {
+		t.Errorf("foreign owner accepted: %v", err)
 	}
 }
 
