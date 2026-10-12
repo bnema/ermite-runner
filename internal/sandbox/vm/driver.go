@@ -201,6 +201,9 @@ func (d *Driver) New() (sandbox.Sandbox, error) {
 	return &vmSandbox{d: d, slot: slot, id: id}, nil
 }
 
+// scope narrows the /proc scan to this driver's own jail base.
+func (d *Driver) scope() scope { return newScope(d.cfg.StateDir) }
+
 func (d *Driver) release(slot int) {
 	d.mu.Lock()
 	d.slots.Release(slot)
@@ -508,7 +511,7 @@ func (s *vmSandbox) startVMM(spec sandbox.JobSpec, apiSock string) error {
 func (s *vmSandbox) awaitVMMGone() {
 	for {
 		alive := false
-		for pid, id := range vmmProcs(s.d.opt.ProcDir) {
+		for pid, id := range vmmProcs(s.d.opt.ProcDir, s.d.scope()) {
 			if id == s.id && pidAlive(pid) {
 				alive = true
 			}
@@ -567,7 +570,7 @@ func (s *vmSandbox) vmmPIDs() []int {
 	if s.cmd != nil && s.cmd.Process != nil {
 		set[s.cmd.Process.Pid] = true
 	}
-	for pid, id := range vmmProcs(s.d.opt.ProcDir) {
+	for pid, id := range vmmProcs(s.d.opt.ProcDir, s.d.scope()) {
 		if id == s.id {
 			set[pid] = true
 		}

@@ -169,6 +169,8 @@ func newEnvNamed(t *testing.T, mode, argv0 string) *env {
 	return e
 }
 
+func (e *env) driverScope() scope { return newScope(e.cfg.StateDir) }
+
 func (e *env) tapCount() int { e.mu.Lock(); defer e.mu.Unlock(); return len(e.taps) }
 
 func (e *env) driver(t *testing.T) *Driver {
@@ -655,7 +657,7 @@ func TestFirecrackerProcsScan(t *testing.T) {
 	mk("103", "bash\x00--id\x00er00112233\x00")           // not firecracker
 	mk("1", "firecracker\x00--id\x00er99999999\x00")      // pid 1 is never touched
 	mk("abc", "")
-	got := vmmProcs(proc)
+	got := vmmProcs(proc, newScope("/var/lib/er"))
 	if len(got) != 2 || got[100] != "er00112233" || got[101] != "er44556677" {
 		t.Fatalf("%v", got)
 	}
@@ -705,7 +707,7 @@ func TestReapFindsRenamedVMMByID(t *testing.T) {
 	}
 	runStub(t, conn)
 	pid := sb.(*vmSandbox).rec.PID
-	if got := cmdlineID("/proc", pid); got != sb.ID() {
+	if got := cmdlineID("/proc", pid, e.driverScope()); got != sb.ID() {
 		t.Fatalf("cmdlineID=%q want %q (argv[0] is %q)", got, sb.ID(), "fc-renamed-1.17")
 	}
 	_ = d1.lock.Release()
@@ -719,7 +721,7 @@ func TestReapFindsRenamedVMMByID(t *testing.T) {
 	}
 }
 
-func TestVMIDFromCmdline(t *testing.T) {
+func TestIDFromCmdline(t *testing.T) {
 	for name, tc := range map[string]struct {
 		args []string
 		want string
@@ -734,7 +736,7 @@ func TestVMIDFromCmdline(t *testing.T) {
 		"id without value":   {[]string{"firecracker", "--api-sock", "/x", "--id"}, ""},
 		"path-like id":       {[]string{"firecracker", "--id", "er../../../x", "--api-sock", "/x"}, ""},
 	} {
-		if got := vmIDFromCmdline(tc.args); got != tc.want {
+		if got := IDFromCmdline(tc.args); got != tc.want {
 			t.Errorf("%s: got %q want %q", name, got, tc.want)
 		}
 	}
@@ -1056,5 +1058,47 @@ func TestNewRejectsAStateDirThatMakesTheAPISocketPathTooLong(t *testing.T) {
 	_, err := New(context.Background(), e.cfg, Options{Run: e.run, Net: e.plumb, BootTimeout: 5 * time.Second})
 	if err == nil || !strings.Contains(err.Error(), "limit of a Unix socket") {
 		t.Fatalf("want a clear socket path error, got %v", err)
+	}
+}
+
+// GO-001: a Firecracker with only the jailer's --start-time-us is ours only when
+// it lives in our jail base; a jailer only when it was given our chroot base.
+func TestScanIsScopedToOurJailBase(t *testing.T) {
+	state := t.TempDir()
+	sc := newScope(state)
+	foreign := t.TempDir()
+	proc := t.TempDir()
+	mk := func(pid, root string, args ...string) {
+		dir := filepath.Join(proc, pid)
+		_ = os.MkdirAll(dir, 0o755)
+		_ = os.WriteFile(filepath.Join(dir, "cmdline"), []byte(strings.Join(args, "\x00")+"\x00"), 0o644)
+		if root != "" {
+			if err := os.Symlink(root, filepath.Join(dir, "root")); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	ours := filepath.Join(jailBase(state), "firecracker", "er00112233", "root")
+	mk("100", ours, "/firecracker", "--id", "er00112233", "--start-time-us", "1", "--start-time-cpu-us", "2")
+	mk("101", filepath.Join(foreign, "jail", "firecracker", "er44556677", "root"), "/firecracker", "--id", "er44556677", "--start-time-us", "1")
+	mk("102", "/", "/firecracker", "--id", "er8899aabb", "--start-time-us", "1") // not chrooted at all
+	mk("103", "", "/firecracker", "--id", "er0000cccc", "--start-time-us", "1")  // root unreadable
+	mk("104", "/", "jailer", "--id", "er11111111", "--exec-file", "/fc", "--chroot-base-dir", jailBase(state))
+	mk("105", "/", "jailer", "--id", "er22222222", "--exec-file", "/fc", "--chroot-base-dir", filepath.Join(foreign, "jail"))
+	mk("106", "/", "jailer", "--id", "er33333333", "--exec-file", "/fc")
+	mk("107", ours+"/../../../../x", "/firecracker", "--id", "er55555555", "--start-time-us", "1") // lexical escape
+	mk("108", "/", "firecracker", "--id", "er66666666", "--api-sock", "/x")                        // unjailed: by id
+	got := vmmProcs(proc, sc)
+	want := map[int]string{100: "er00112233", 104: "er11111111", 108: "er66666666"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v want %v", got, want)
+	}
+	for pid, id := range want {
+		if got[pid] != id {
+			t.Fatalf("got %v want %v", got, want)
+		}
+	}
+	if cmdlineID(proc, 101, sc) != "" || cmdlineID(proc, 100, sc) != "er00112233" {
+		t.Fatal("cmdlineID must apply the same scope")
 	}
 }
