@@ -251,3 +251,21 @@ func TestWithLayout(t *testing.T) {
 		}
 	}
 }
+
+func TestGitHubKeysAddedByTheRunnerKeepTheSortedOrder(t *testing.T) {
+	// A server that lists its keys sorted, as the recordings do: the keys the
+	// runner adds land at their sorted place, replaced keys stay, token is first.
+	s, _, err := NewState(`{"github":{"actor":"a","event_name":"push","job":"j","repository":"o/r","sha":"s","zzz":"1"}}`, "", "j", RunnerInfo{}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"secret_source", "artifacts", "action", "event_path"} {
+		s.SetGitHub(k, "x")
+	}
+	s.SetGitHub("sha", "t")
+	got := strings.Join(s.Values(nil)["github"].(*expr.Dictionary).Keys(), ",")
+	want := "token,action,actor,artifacts,event_name,event_path,job,repository,secret_source,sha,workspace,zzz"
+	if got != want {
+		t.Errorf("keys\n got %s\nwant %s", got, want)
+	}
+}

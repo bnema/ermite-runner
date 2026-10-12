@@ -77,6 +77,35 @@ func setKey(d *expr.Dictionary, key string, v expr.Value) *expr.Dictionary {
 	return out
 }
 
+// setKeySorted is setKey for the github context: a key that is not there yet
+// goes before the first key that sorts after it (bytewise; "token" stays first)
+// instead of at the end, so that the keys the runner adds (workspace,
+// secret_source, the file commands...) sit where the ermite-conformance
+// recordings list them. Note that the recordings are normalised with sorted
+// keys, so they show the sorted order, not necessarily the insertion order of
+// GitHub's runner (SetGitHubContext appends). Keys that exist are replaced in
+// place.
+func setKeySorted(d *expr.Dictionary, key string, v expr.Value) *expr.Dictionary {
+	for _, p := range d.Pairs() {
+		if strings.EqualFold(p.Key, key) {
+			return setKey(d, key, v)
+		}
+	}
+	out := expr.NewDictionary()
+	done := false
+	for _, p := range d.Pairs() {
+		if !done && p.Key > key && !strings.EqualFold(p.Key, "token") {
+			out.Add(key, v)
+			done = true
+		}
+		out.Add(p.Key, p.Value)
+	}
+	if !done {
+		out.Add(key, v)
+	}
+	return out
+}
+
 func str(d *expr.Dictionary, key string) string {
 	if v, ok := d.Get(key); ok {
 		if s, ok := v.(expr.String); ok {
@@ -222,7 +251,7 @@ func NewState(contextsJSON, matrixJSON, jobKey string, r RunnerInfo, repoFallbac
 		}
 	}
 	if str(gh, "job") == "" && jobKey != "" {
-		gh = setKey(gh, "job", expr.String(jobKey))
+		gh = setKeySorted(gh, "job", expr.String(jobKey))
 	}
 	repo := repoName(str(gh, "repository"))
 	if repo == "" {
@@ -233,7 +262,7 @@ func NewState(contextsJSON, matrixJSON, jobKey string, r RunnerInfo, repoFallbac
 	}
 	home := "/home/runner"
 	s.layout = NewLayout(home, repo, "")
-	s.github = setKey(gh, "workspace", expr.String(s.layout.Workspace))
+	s.github = setKeySorted(gh, "workspace", expr.String(s.layout.Workspace))
 	return s, s.layout, s.initRest(root, matrixJSON, r)
 }
 
@@ -241,7 +270,7 @@ func NewState(contextsJSON, matrixJSON, jobKey string, r RunnerInfo, repoFallbac
 // must be called before the first step.
 func (s *State) WithLayout(l Layout) {
 	s.layout = l
-	s.github = setKey(s.github, "workspace", expr.String(l.Workspace))
+	s.github = setKeySorted(s.github, "workspace", expr.String(l.Workspace))
 	s.runner = setKey(s.runner, "temp", expr.String(l.Temp))
 	s.runner = setKey(s.runner, "tool_cache", expr.String(l.ToolCache))
 	s.runner = setKey(s.runner, "workspace", expr.String(l.RunnerWorkspace))
@@ -315,7 +344,7 @@ func (s *State) initRest(root *expr.Dictionary, matrixJSON string, r RunnerInfo)
 func (s *State) Layout() Layout { return s.layout }
 
 // SetGitHub sets a key of the github context (SetGitHubContext).
-func (s *State) SetGitHub(k, v string) { s.github = setKey(s.github, k, expr.String(v)) }
+func (s *State) SetGitHub(k, v string) { s.github = setKeySorted(s.github, k, expr.String(v)) }
 
 // GitHub returns a string key of the github context ("" when absent).
 func (s *State) GitHub(k string) string { return str(s.github, k) }
