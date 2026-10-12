@@ -3,14 +3,15 @@
 package executor
 
 import (
-	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
+
+	"bnema.dev/ermite-actions/workflow"
 )
 
 // execute is ActionRunner.RunAsync plus ScriptHandler for one run step.
-func (j *job) execute(s *stepRun, stepCancel <-chan struct{}) (result stepResult) {
+func (j *job) execute(s *stepRun, stepCancel <-chan struct{}) stepResult {
 	num, st := s.num, s.st
 	if msg := notSupported(st); msg != "" {
 		if st.Uses != nil {
@@ -22,66 +23,100 @@ func (j *job) execute(s *stepRun, stepCancel <-chan struct{}) (result stepResult
 	}
 	fail := func(err error) stepResult { j.errorf(num, "%s", err.Error()); return resFailed }
 
-	// File commands for this step: the github context carries the paths
-	// (FileCommandManager.InitializeFiles), event.json is written
-	// (ExecutionContext.WriteWebhookPayload).
-	j.mu.Lock()
-	files, ferr := j.fc.Init()
-	if ferr == nil {
-		for _, c := range fileCommands {
-			j.state.SetGitHub(c.ContextName, files[envVarName(c.ContextName)])
-		}
-		j.state.SetGitHub("action", st.ID)
-		j.state.SetGitHub("action_repository", "")
-		j.state.SetGitHub("action_ref", "")
-		if ev := j.state.EventJSON(); ev != "" {
-			if p, err := j.writeEvent(ev); err == nil {
-				j.state.SetGitHub("event_path", p)
-			}
-		}
+	if err := j.prepareFileCommands(st); err != nil {
+		return fail(err)
 	}
-	j.mu.Unlock()
-	if ferr != nil {
-		return fail(ferr)
-	}
-	defer func() {
-		// ProcessFiles runs after the handler, even when it failed (finally).
-		j.fc.Process(s)
-	}()
+	// ProcessFiles runs after the handler, even when it failed (a finally block).
+	defer j.fc.Process(s)
 
-	// Inputs (ActionRunner.cs:174-185).
-	script, err := j.evalString(st.Run, s.env)
+	in, err := j.scriptInputs(s)
 	if err != nil {
 		return fail(err)
 	}
-	shellInput, err := j.evalString(st.Shell, s.env)
+	plan, err := j.printHeader(s, in)
+	if err != nil {
+		return fail(err) // the group stays open, like the original
+	}
+	dir, argv, err := j.scriptCommand(plan, in)
 	if err != nil {
 		return fail(err)
 	}
-	var wdInput string
-	var hasWD bool
+	return j.startProcess(s, plan, dir, argv, stepCancel)
+}
+
+// scriptIn is what a run step evaluates before it prints its header.
+type scriptIn struct {
+	script, shell, workingDirectory string
+	hasWorkingDirectory             bool
+}
+
+// scriptInputs evaluates the run, shell and working-directory keys of the step
+// (ActionRunner.cs:174-185). The shell and the directory fall back to
+// defaults.run (ScriptHandler.cs:155-180).
+func (j *job) scriptInputs(s *stepRun) (scriptIn, error) {
+	st := s.st
+	var in scriptIn
+	var err error
+	if in.script, err = j.evalString(st.Run, s.env); err != nil {
+		return in, err
+	}
+	if in.shell, err = j.evalString(st.Shell, s.env); err != nil {
+		return in, err
+	}
+	if in.shell == "" {
+		in.shell = j.runDefaults.shell
+	}
 	if st.WorkingDirectory != nil {
-		hasWD = true
-		if wdInput, err = j.evalString(st.WorkingDirectory, s.env); err != nil {
-			return fail(err)
+		in.hasWorkingDirectory = true
+		if in.workingDirectory, err = j.evalString(st.WorkingDirectory, s.env); err != nil {
+			return in, err
 		}
 	}
-
-	// Header (ScriptHandler.PrintActionDetails, ScriptHandler.cs:27-137).
-	j.out(num, "##[group]Run "+firstLine(script))
-	for _, l := range strings.Split(strings.TrimRight(strings.ReplaceAll(script, "\r\n", "\n"), "\n"), "\n") {
-		j.write(num, "\x1b[36;1m"+l+"\x1b[0m") // bright cyan
+	if !in.hasWorkingDirectory {
+		in.workingDirectory = j.runDefaults.workingDirectory
 	}
-	shell := shellInput
-	if shell == "" {
-		shell = j.runDefaults.shell
+	return in, nil
+}
+
+// prepareFileCommands creates the files of the step, puts their paths in the
+// github context (FileCommandManager.InitializeFiles) and writes event.json
+// (ExecutionContext.WriteWebhookPayload).
+func (j *job) prepareFileCommands(st *workflow.Step) error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	files, err := j.fc.Init()
+	if err != nil {
+		return err
+	}
+	for _, c := range fileCommands {
+		j.state.SetGitHub(c.ContextName, files[envVarName(c.ContextName)])
+	}
+	j.state.SetGitHub("action", st.ID)
+	j.state.SetGitHub("action_repository", "")
+	j.state.SetGitHub("action_ref", "")
+	if ev := j.state.EventJSON(); ev != "" {
+		if p, err := j.writeEvent(ev); err == nil {
+			j.state.SetGitHub("event_path", p)
+		}
+	}
+	return nil
+}
+
+// printHeader prints the group of the step as ScriptHandler.PrintActionDetails
+// does (ScriptHandler.cs:27-137): the first line of the script, the script in
+// bright cyan, the shell, the env block of the step, and the end of the group.
+func (j *job) printHeader(s *stepRun, in scriptIn) (ShellPlan, error) {
+	num := s.num
+	j.out(num, "##[group]Run "+firstLine(in.script))
+	for _, l := range strings.Split(strings.TrimRight(strings.ReplaceAll(in.script, "\r\n", "\n"), "\n"), "\n") {
+		j.write(num, "\x1b[36;1m"+l+"\x1b[0m")
 	}
 	j.mu.Lock()
 	lookup := Lookup{Path: j.lookupPath, Prepend: j.state.Prepend()}
 	j.mu.Unlock()
-	plan, err := PlanShell(shell, lookup)
+	plan, err := PlanShell(in.shell, lookup)
 	if err != nil {
-		return fail(err) // the group stays open, like the original
+		return plan, err
 	}
 	j.out(num, "shell: "+plan.ShellLine())
 	if s.env.Len() > 0 {
@@ -92,24 +127,27 @@ func (j *job) execute(s *stepRun, stepCancel <-chan struct{}) (result stepResult
 		}
 	}
 	j.write(num, "##[endgroup]")
+	return plan, nil
+}
 
-	// Run (ScriptHandler.RunAsync, :140-358).
-	wd := wdInput
-	if !hasWD {
-		wd = j.runDefaults.workingDirectory
-	}
+// scriptCommand writes the script file and returns the working directory and
+// the command line (ScriptHandler.RunAsync, :140-285).
+func (j *job) scriptCommand(plan ShellPlan, in scriptIn) (dir string, argv []string, err error) {
 	j.mu.Lock()
 	workspace := j.state.GitHub("workspace")
 	temp := j.state.Layout().Temp
 	j.mu.Unlock()
-	dir := ResolveWorkingDirectory(workspace, wd)
-	sc, err := WriteScript(temp, plan, script)
+	sc, err := WriteScript(temp, plan, in.script)
 	if err != nil {
-		return fail(err)
+		return "", nil, err
 	}
+	return ResolveWorkingDirectory(workspace, in.workingDirectory), sc.Argv, nil
+}
 
-	// Process environment: the inherited one, the step's environment, PATH with
-	// GITHUB_PATH in front, then the runtime variables of the contexts.
+// processEnv builds the environment of the process: the inherited one, the
+// step's environment, PATH with GITHUB_PATH in front, then the runtime variables
+// of the contexts, GITHUB_ACTIONS, CI and the tracking id.
+func (j *job) processEnv(stepEnv *ordered) []string {
 	j.mu.Lock()
 	runtime := j.state.RuntimeEnv()
 	prepend := j.state.Prepend()
@@ -120,12 +158,12 @@ func (j *job) execute(s *stepRun, stepCancel <-chan struct{}) (result stepResult
 			penv.Set(k, v)
 		}
 	}
-	for _, k := range s.env.Keys() {
-		v, _ := s.env.Get(k)
+	for _, k := range stepEnv.Keys() {
+		v, _ := stepEnv.Get(k)
 		penv.Set(k, v)
 	}
 	if len(prepend) > 0 {
-		orig, ok := s.env.Get("PATH")
+		orig, ok := stepEnv.Get("PATH")
 		if !ok {
 			orig = j.lookupPath
 		}
@@ -140,14 +178,20 @@ func (j *job) execute(s *stepRun, stepCancel <-chan struct{}) (result stepResult
 		penv.Set("CI", "true")
 	}
 	penv.Set(ProcessTrackingID, j.trackID)
-	var envList []string
+	var list []string
 	for _, k := range penv.Keys() {
 		v, _ := penv.Get(k)
-		envList = append(envList, k+"="+v)
+		list = append(list, k+"="+v)
 	}
+	return list
+}
 
+// startProcess runs the script and turns how it ended into the result of the
+// step.
+func (j *job) startProcess(s *stepRun, plan ShellPlan, dir string, argv []string, stepCancel <-chan struct{}) stepResult {
+	num := s.num
 	res, err := runProcess(procSpec{
-		Argv: sc.Argv, Dir: dir, Env: envList, Credential: j.cfg.Credential,
+		Argv: argv, Dir: dir, Env: j.processEnv(s.env), Credential: j.cfg.Credential,
 		OnLine: func(line string) {
 			if strings.Contains(line, "##[start-action") || strings.Contains(line, "##[end-action") {
 				line = strings.ReplaceAll(strings.ReplaceAll(line, "##[start-action", `##[\start-action`), "##[end-action", `##[\end-action`)
@@ -161,7 +205,8 @@ func (j *job) execute(s *stepRun, stepCancel <-chan struct{}) (result stepResult
 		WaitDelay: j.cfg.WaitDelay, Signal: j.cfg.Signal,
 	})
 	if err != nil {
-		return fail(errors.New(startError(plan.CommandPath, dir, err)))
+		j.errorf(num, "%s", startError(plan.CommandPath, dir, err))
+		return resFailed
 	}
 	if res.Cancelled {
 		// The process was stopped on cancellation: ExecuteAsync throws
