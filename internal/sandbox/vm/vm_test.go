@@ -540,7 +540,7 @@ func TestExecDiskIsKeyedByExecutableHash(t *testing.T) {
 		t.Fatal("exec disk rebuilt for the same executable")
 	}
 	for _, c := range e.run.Calls[n:] {
-		if c.Name == "mkfs.ext4" && !(len(c.Args) == 1 && c.Args[0] == "-V") {
+		if c.Name == "mkfs.ext4" && (len(c.Args) != 1 || c.Args[0] != "-V") {
 			t.Fatal("mkfs run again for an unchanged executable")
 		}
 	}

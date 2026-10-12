@@ -41,10 +41,10 @@ if [ ! -f "$work/$tarball" ]; then
   curl -fsSL -o "$work/$tarball.part" "$base/$tarball"
   mv "$work/$tarball.part" "$work/$tarball"
 fi
-if [ ! -f "$work/sha256sums.asc" ] || ! grep -q " $tarball\$" "$work/sha256sums.asc"; then
+if [ ! -f "$work/sha256sums.asc" ] || ! grep -qF " $tarball" "$work/sha256sums.asc"; then
   curl -fsSL -o "$work/sha256sums.asc" "$base/sha256sums.asc"
 fi
-want=$(grep " $tarball\$" "$work/sha256sums.asc" | awk '{print $1}' | head -n1)
+want=$(awk -v f="$tarball" '$2 == f {print $1; exit}' "$work/sha256sums.asc")
 have=$(sha256sum "$work/$tarball" | awk '{print $1}')
 if [ -z "$want" ] || [ "$want" != "$have" ]; then
   echo "checksum mismatch for $tarball (want '$want', have '$have')" >&2
@@ -64,8 +64,10 @@ make olddefconfig >/dev/null
 # Fail if an option of the fragments was dropped by a missing dependency.
 missing=0
 while IFS== read -r key val; do
-  if grep -q "^$key=$val\$" .config; then continue; fi
-  if [ "$val" = n ] && ! grep -q "^$key=" .config; then continue; fi
+  # Whole-line, fixed-string matches: option names contain no regex, but
+  # CONFIG_FOO must never match CONFIG_FOO_BAR=y.
+  if grep -qxF "$key=$val" .config; then continue; fi
+  if [ "$val" = n ] && ! grep -q "^${key}=" .config; then continue; fi
   echo "kernel option not applied: $key=$val" >&2
   missing=1
 done < <(cat "$root/images/kernel/config-6.18" "$root/images/kernel/config-6.18.$arch_frag" | grep -E '^CONFIG_[A-Z0-9_]+=')

@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -48,6 +49,9 @@ func sandboxCheck(ctx context.Context, args []string) int {
 		defer cancel()
 		if err := sb.Stop(sctx); err != nil {
 			fmt.Fprintln(os.Stderr, "ermite-runner: cleanup:", err)
+			if errors.Is(err, sandbox.ErrLeaked) {
+				fmt.Fprintln(os.Stderr, "ermite-runner: something leaked: run again (the start reaps) or check the state directory")
+			}
 		}
 	}()
 	conn, err := sb.Start(ctx, sandbox.JobSpec{JobID: "sandbox-check"})

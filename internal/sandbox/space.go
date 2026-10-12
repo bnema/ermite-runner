@@ -16,7 +16,7 @@ func FreeMiB(path string) (int64, error) {
 	if err := unix.Statfs(path, &st); err != nil {
 		return 0, err
 	}
-	return int64(st.Bavail) * int64(st.Bsize) >> 20, nil
+	return int64(st.Bavail) * st.Bsize >> 20, nil
 }
 
 // WarnIfLowSpace logs a warning when the filesystem of dir has less free space

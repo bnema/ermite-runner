@@ -28,7 +28,7 @@ func TestVMStubExecutor(t *testing.T) {
 
 	scenario(t, ctx, cfg, sandbox.VM, func(t *testing.T, sb sandbox.Sandbox) {
 		// Kill the VMM process of the only running VM.
-		out, err := exec.Command("pgrep", "-f", "firecracker.* --id er").Output()
+		out, err := exec.Command("pgrep", "-f", "--api-sock .*--id er|--id er[0-9a-f]{8} .*--api-sock|--id er[0-9a-f]{8} --api-sock").Output()
 		if err != nil {
 			t.Fatalf("no firecracker to kill: %v", err)
 		}

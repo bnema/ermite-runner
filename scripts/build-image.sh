@@ -10,7 +10,8 @@
 #
 # Environment:
 #   ENGINE      docker or podman (default: first found)
-#   IMAGE_TAG   OCI tag (default ermite-runner-ubuntu-24.04:dev)
+#   IMAGE_TAG   OCI tag (default ermite-runner-ubuntu-24.04:latest, the
+#               default of ERMITE_RUNNER_IMAGE in container mode)
 #   EXT4_SLACK  free space added to the base image in MiB (default 512)
 #
 # Output: OUT_DIR/base.ext4 (read-only shared base disk; its UUID and size are
@@ -19,7 +20,7 @@ set -euo pipefail
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 out=${1:-$root/tmp/image}
-tag=${IMAGE_TAG:-ermite-runner-ubuntu-24.04:dev}
+tag=${IMAGE_TAG:-ermite-runner-ubuntu-24.04:latest}
 slack=${EXT4_SLACK:-512}
 engine=${ENGINE:-}
 
@@ -30,6 +31,15 @@ if [ -z "$engine" ]; then
 fi
 [ -n "$engine" ] || { echo "need docker or podman" >&2; exit 1; }
 command -v mkfs.ext4 >/dev/null || { echo "need mkfs.ext4 (e2fsprogs >= 1.47.1 for tarball input)" >&2; exit 1; }
+
+# mkfs.ext4 -d with a tarball needs e2fsprogs 1.47.1; older releases only take a
+# directory. mke2fs prints its version on stderr and may exit non-zero on -V.
+ver=$(mkfs.ext4 -V 2>&1 | sed -n 's/^mke2fs \([0-9]*\.[0-9]*\.[0-9]*\).*/\1/p' | head -n1)
+[ -n "$ver" ] || ver=$(mkfs.ext4 -V 2>&1 | sed -n 's/^mke2fs \([0-9]*\.[0-9]*\).*/\1.0/p' | head -n1)
+if [ -z "$ver" ] || [ "$(printf '%s\n1.47.1\n' "$ver" | sort -V | head -n1)" != "1.47.1" ]; then
+  echo "mkfs.ext4 is e2fsprogs ${ver:-of unknown version}, need >= 1.47.1 (mkfs.ext4 -d with a tarball)" >&2
+  exit 1
+fi
 
 mkdir -p "$out"
 out=$(cd "$out" && pwd)

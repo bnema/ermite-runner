@@ -78,6 +78,14 @@ func loadConfig(t *testing.T, mode sandbox.Mode) sandbox.Config {
 			return stateDir(t)
 		case sandbox.EnvCapacity:
 			return "2"
+		case sandbox.EnvLockFile:
+			// A lock of the test's own unless the caller chose one: the default
+			// (/run) is not writable without root, and each test must be able to
+			// take it after the previous one released it.
+			if v := os.Getenv(k); v != "" {
+				return v
+			}
+			return filepath.Join(stateDir(t), "host.lock")
 		case sandbox.EnvJobDisk:
 			if v := os.Getenv(k); v != "" {
 				return v
@@ -199,6 +207,8 @@ func leftovers(stateDir string) []string {
 			return nil
 		})
 	}
+	// Any process whose command line carries one of our VM ids, whatever the
+	// program is called (the same rule the driver's Reap uses).
 	procs, _ := filepath.Glob("/proc/[0-9]*/cmdline")
 	for _, p := range procs {
 		b, err := os.ReadFile(p)
@@ -206,12 +216,20 @@ func leftovers(stateDir string) []string {
 			continue
 		}
 		args := strings.Split(strings.TrimRight(string(b), "\x00"), "\x00")
-		if len(args) > 0 && filepath.Base(args[0]) == "firecracker" {
-			for i, a := range args {
-				if a == "--id" && i+1 < len(args) && sandbox.ValidID(args[i+1]) {
-					left = append(left, "process "+p+" "+args[i+1])
+		var id string
+		var marker bool
+		for i, a := range args {
+			switch a {
+			case "--id":
+				if i+1 < len(args) && sandbox.ValidID(args[i+1]) {
+					id = args[i+1]
 				}
+			case "--api-sock", "--exec-file":
+				marker = true
 			}
+		}
+		if id != "" && marker {
+			left = append(left, "process "+p+" "+id)
 		}
 	}
 	return left

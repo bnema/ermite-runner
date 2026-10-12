@@ -65,19 +65,6 @@ func vmIDFromCmdline(args []string) string {
 	return ""
 }
 
-// readPidFile returns the pid the jailer wrote for a VM run in a PID namespace.
-func readPidFile(path string) int {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return 0
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
-	if err != nil || pid <= 1 {
-		return 0
-	}
-	return pid
-}
-
 // pidAlive reports whether pid exists and is not a zombie.
 func pidAlive(pid int) bool {
 	if err := syscall.Kill(pid, 0); err != nil {
