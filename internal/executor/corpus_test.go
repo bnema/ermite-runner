@@ -181,6 +181,7 @@ var (
 	shellPathRe = regexp.MustCompile(`^shell: \S*/(\w+) `)
 	startPathRe = regexp.MustCompile(`process '\S*/(\w+)'`)
 	uuidRe      = regexp.MustCompile(`[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`)
+	versionRe   = regexp.MustCompile(`(Current runner version: ')[^']*(')`)
 )
 
 // normalizeLine maps the machine-dependent parts of a line to the form of the
@@ -190,6 +191,7 @@ var (
 func normalizeLine(l, home string) string {
 	l = shellPathRe.ReplaceAllString(l, "shell: /usr/bin/$1 ")
 	l = startPathRe.ReplaceAllString(l, "process '/usr/bin/$1'")
+	l = versionRe.ReplaceAllString(l, "${1}<runner-version>${2}")
 	l = strings.ReplaceAll(l, home, "/home/runner")
 	l = strings.ReplaceAll(l, "/work/hello/hello", "/work/<repo>/<repo>")
 	return uuidRe.ReplaceAllString(l, "<uuid>")
@@ -204,9 +206,9 @@ func shIsBash() bool {
 }
 
 // compareWithRecording runs every job without needs of a scenario and checks
-// that the steps, conclusions and logs equal the recording of github.com. Set
-// up job (runner and image details) and the dump step the harness appends are
-// not compared.
+// that the steps, conclusions and logs equal the recording of github.com. The
+// dump step the harness appends is not compared (the recordings have no fleet
+// and image groups in Set up job, rule infra-groups of ermite-conformance).
 func compareWithRecording(t *testing.T, scenario string, skipJobs ...string) {
 	t.Helper()
 	needTools(t, "bash", "sh")
@@ -243,16 +245,13 @@ func compareWithRecording(t *testing.T, scenario string, skipJobs ...string) {
 			}
 			var want []es
 			for _, s := range jr.Steps {
-				if s.Name == SetUpJobName || s.Name == "ermite-dump" {
+				if s.Name == "ermite-dump" {
 					continue
 				}
 				want = append(want, es{s.Name, s.Conclusion, s.Log})
 			}
 			var have []es
 			for _, s := range got.steps {
-				if s.Name == SetUpJobName {
-					continue
-				}
 				var log []string
 				for _, l := range s.Log {
 					log = append(log, normalizeLine(l, home))

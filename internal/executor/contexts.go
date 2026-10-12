@@ -127,6 +127,11 @@ type RunnerInfo struct {
 	Arch string
 }
 
+// githubHosted reports whether the runner.environment is "github-hosted". An
+// empty Environment is "self-hosted", the default of the official runner's
+// runner context.
+func (r RunnerInfo) githubHosted() bool { return r.Environment == "github-hosted" }
+
 func (r RunnerInfo) arch() string {
 	if r.Arch != "" {
 		return r.Arch

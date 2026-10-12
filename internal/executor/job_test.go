@@ -31,7 +31,7 @@ func TestImplicitStepsAndNumbering(t *testing.T) {
 		}
 	}
 	setup := logOf(rec.steps[0])
-	for _, w := range []string{"Current runner version: 'test'", "Runner name: 'test-runner'", "Prepare workflow directory", "Prepare all required actions", "Complete job name: j"} {
+	for _, w := range []string{"Current runner version: 'test'", "Prepare workflow directory", "Prepare all required actions", "Complete job name: j"} {
 		if !strings.Contains(setup, w) {
 			t.Errorf("Set up job lacks %q:\n%s", w, setup)
 		}
@@ -662,5 +662,111 @@ func TestMatrixContextWithoutMatrixIsNull(t *testing.T) {
 	}
 	if got := rec.steps[1].Log[len(rec.steps[1].Log)-1]; got != "json=null x=[] eq=true" {
 		t.Errorf("%q", got)
+	}
+}
+
+func setupLog(t *testing.T, yaml, job string, tweak func(*Config)) string {
+	t.Helper()
+	rec, res := runLocal(t, yaml, job, tweak)
+	if res.Conclusion != ConclusionSuccess {
+		t.Fatalf("%+v", res)
+	}
+	return logOf(rec.steps[0])
+}
+
+func TestSetUpJobMatchesGitHubHosted(t *testing.T) {
+	needTools(t, "bash")
+	want := strings.Join([]string{"Current runner version: 'test'", "##[group]GITHUB_TOKEN Permissions", "Contents: read", "Metadata: read",
+		"Packages: read", "##[endgroup]", "Secret source: Actions", "Cache mode: write", "Prepare workflow directory",
+		"Prepare all required actions", "Complete job name: j"}, "\n")
+	if got := setupLog(t, wfHead+"    steps:\n      - run: echo hi\n", "j", nil); got != want {
+		t.Errorf("github-hosted:\n%s", got)
+	}
+}
+
+func TestSetUpJobSelfHostedNamesTheRunner(t *testing.T) {
+	needTools(t, "bash")
+	got := setupLog(t, wfHead+"    steps:\n      - run: echo hi\n", "j", func(c *Config) { c.Runner.Environment = "self-hosted" })
+	host, _ := os.Hostname()
+	if !strings.Contains(got, "Runner name: 'test-runner'\nMachine name: '"+host+"'\n##[group]GITHUB_TOKEN") {
+		t.Errorf("self-hosted:\n%s", got)
+	}
+}
+
+// Permissions the workflow sets are not the default ones: no group is printed
+// rather than a wrong one.
+func TestSetUpJobWithPermissionsPrintsNoDefaultGroup(t *testing.T) {
+	needTools(t, "bash")
+	for name, yaml := range map[string]string{
+		"workflow": "permissions:\n  contents: write\n" + wfHead + "    steps:\n      - run: echo hi\n",
+		"job":      wfHead + "    permissions: read-all\n    steps:\n      - run: echo hi\n",
+	} {
+		got := setupLog(t, yaml, "j", nil)
+		if strings.Contains(got, "GITHUB_TOKEN Permissions") || !strings.Contains(got, "Secret source: Actions\nCache mode: write") {
+			t.Errorf("%s:\n%s", name, got)
+		}
+	}
+}
+
+func TestSetUpJobNamesTheJobLikeGitHub(t *testing.T) {
+	needTools(t, "bash")
+	// recordings/matrix-job-name.json
+	yaml := `on: push
+jobs:
+  default-name:
+    runs-on: x
+    strategy:
+      matrix:
+        os: [a, b]
+        n: [1, 2]
+    steps:
+      - run: echo hi
+  custom-name:
+    name: "custom ${{ matrix.os }} / ${{ matrix.n }} / ${{ github.event_name }}"
+    runs-on: x
+    strategy:
+      matrix:
+        os: [a, b]
+        n: [1]
+    steps:
+      - run: echo hi
+  static-name:
+    name: same name for every leg
+    runs-on: x
+    strategy:
+      matrix:
+        n: [1, 2]
+    steps:
+      - run: echo hi
+  plain:
+    name: "plain ${{ github.event_name }}"
+    runs-on: x
+    steps:
+      - run: echo hi
+`
+	for _, tc := range []struct{ job, matrix, strategy, want string }{
+		{"default-name", `{"os":"b","n":1}`, `{"job-index":2}`, "default-name (b, 1)"},
+		{"default-name", `{"os":"a","n":2}`, `{"job-index":1}`, "default-name (a, 2)"},
+		{"default-name", `{"os":"b","n":2}`, ``, "default-name (b, 2)"},
+		{"custom-name", `{"os":"b","n":1}`, `{"job-index":1}`, "custom b / 1 / push"},
+		{"static-name", `{"n":2}`, `{"job-index":1}`, "same name for every leg (2)"},
+		{"plain", `{}`, ``, "plain push"},
+		{"static-name", `{"n":9}`, ``, "static-name"}, // not one of the combinations: the job key
+	} {
+		t.Run(tc.want, func(t *testing.T) {
+			got := setupLog(t, yaml, tc.job, func(c *Config) {
+				c.MatrixJSON = tc.matrix
+				ctx := testGitHubContext(tc.job)
+				ctx = strings.TrimSuffix(ctx, "}")
+				ctx += `,"matrix":` + tc.matrix
+				if tc.strategy != "" {
+					ctx += `,"strategy":` + tc.strategy
+				}
+				c.ContextsJSON = ctx + "}"
+			})
+			if !strings.HasSuffix(got, "Complete job name: "+tc.want) {
+				t.Errorf("got:\n%s", got)
+			}
+		})
 	}
 }
