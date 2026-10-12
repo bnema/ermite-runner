@@ -38,4 +38,11 @@ jobs:
           go mod tidy
           git diff --exit-code -- go.mod go.sum
       - run: go vet ./...
+      - name: Protobuf lint and drift
+        # buf and protoc-gen-go are pinned as `tool` directives in go.mod: the
+        # generated code is reproducible and must match the committed one.
+        run: |
+          go tool buf lint
+          go generate ./internal/execstream
+          git diff --exit-code -- internal/execstream/execpb
       - run: go test -race ./...

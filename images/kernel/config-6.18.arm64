@@ -1,0 +1,11 @@
+# arm64 specific guest options, merged after config-6.18. Not exercised in CI-1
+# (no arm64 host); kept so that the build is reproducible there.
+CONFIG_ARM64=y
+CONFIG_ARM64_VA_BITS_48=y
+CONFIG_ARM_GIC_V3=y
+CONFIG_ARM_PSCI_FW=y
+CONFIG_ARM_ARCH_TIMER=y
+CONFIG_SERIAL_AMBA_PL011=y
+CONFIG_SERIAL_AMBA_PL011_CONSOLE=y
+CONFIG_RTC_CLASS=y
+CONFIG_RTC_DRV_PL031=y

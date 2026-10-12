@@ -1,0 +1,43 @@
+# SPDX-License-Identifier: MIT
+#
+# ermite-runner-ubuntu-24.04: the minimal CI-1 runner image. The same
+# filesystem is used as an OCI image (container isolation) and exported to an
+# ext4 base image (vm isolation) by scripts/build-image.sh. It holds the OS
+# only: the runner executable is attached by the host at start (never baked
+# in), so a runner upgrade does not need an image rebuild.
+FROM ubuntu:24.04
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      bash build-essential ca-certificates curl e2fsprogs git gnupg iproute2 \
+      iptables jq kmod procps python3 sudo tzdata unzip xz-utils zip \
+ && rm -rf /var/lib/apt/lists/*
+
+# Docker Engine from Docker's apt repository (the job gets its own daemon).
+RUN install -m 0755 -d /etc/apt/keyrings \
+ && curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc \
+ && chmod a+r /etc/apt/keyrings/docker.asc \
+ && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu noble stable" \
+      > /etc/apt/sources.list.d/docker.list \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends \
+      docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin \
+ && rm -rf /var/lib/apt/lists/*
+
+# Like GitHub-hosted runners: user "runner" (uid 1001), passwordless sudo,
+# member of "docker", with the job layout directories.
+RUN useradd --create-home --uid 1001 --shell /bin/bash runner \
+ && usermod -aG docker runner \
+ && echo 'runner ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/runner \
+ && chmod 0440 /etc/sudoers.d/runner \
+ && mkdir -p /home/runner/work /opt/hostedtoolcache /opt/ermite \
+ && chown -R runner:runner /home/runner /opt/hostedtoolcache
+
+ENV RUNNER_TOOL_CACHE=/opt/hostedtoolcache \
+    LANG=C.UTF-8
+
+# The runner executable is bind-mounted (container) or provided by the init
+# disk (vm) here; its init subcommand starts the job's own Docker daemon.
+ENTRYPOINT ["/opt/ermite/ermite-runner", "init"]
