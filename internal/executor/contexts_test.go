@@ -102,15 +102,23 @@ func TestServerContextsAndDefaults(t *testing.T) {
 			t.Errorf("context %s missing", k)
 		}
 	}
-	// Absent contexts: needs/inputs/vars are empty objects, matrix is not set
-	// (null in expressions), as the recordings show.
+	// Absent contexts: needs/inputs/vars are empty objects, matrix is null
+	// (also when the server sends {}), as the recordings show.
 	s2, _, err := NewState(`{"github":{"repository":"o/r"}}`, "{}", "j", RunnerInfo{}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	v2 := s2.Values(nil)
-	if _, ok := v2["matrix"]; ok {
-		t.Error("matrix must be absent without a matrix")
+	if _, ok := v2["matrix"].(expr.Null); !ok {
+		t.Errorf("matrix without a matrix: %v, want null", v2["matrix"])
+	}
+	// The server's "{}" in the contexts is null too.
+	s3, _, err := NewState(`{"github":{"repository":"o/r"},"matrix":{}}`, "{}", "j", RunnerInfo{}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := s3.Values(nil)["matrix"].(expr.Null); !ok {
+		t.Errorf("empty matrix: %v, want null", s3.Values(nil)["matrix"])
 	}
 	if d, ok := v2["needs"].(*expr.Dictionary); !ok || d.Len() != 0 {
 		t.Errorf("needs %v", v2["needs"])

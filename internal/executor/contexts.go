@@ -257,6 +257,14 @@ func (s *State) initRest(root *expr.Dictionary, matrixJSON string, r RunnerInfo)
 			return fmt.Errorf("job matrix: %w", err)
 		}
 	}
+	// A job without a matrix has the matrix context null on github.com, not an
+	// empty object (recordings: "matrix": null in the 176 of 221 jobs that have
+	// none, and toJSON(matrix) prints null). The server sends "{}" for such a
+	// job (runner.proto: Job.matrix), so an empty matrix becomes null here.
+	// matrix.x still works: a property of null is null, as for a missing key.
+	if d, ok := s.other["matrix"].(*expr.Dictionary); !ok || d.Len() == 0 {
+		s.other["matrix"] = expr.Null{}
+	}
 	// A context the job does not have is an empty object, like the server's
 	// ("needs": {}, "inputs": {}, "vars": {}); matrix and strategy are null
 	// when absent (recordings: "matrix": null).

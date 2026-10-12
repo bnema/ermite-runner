@@ -645,3 +645,22 @@ func TestGithubActionInStepEnvIsTheStepsOwnID(t *testing.T) {
 		t.Errorf("third step: %q", got)
 	}
 }
+
+// Without a matrix the matrix context is null, as on github.com (toJSON prints
+// null), and matrix.x is still readable (null, so an empty string).
+func TestMatrixContextWithoutMatrixIsNull(t *testing.T) {
+	needTools(t, "bash")
+	rec, res := runLocal(t, wfHead+`    steps:
+      - run: echo "json=$J x=[$X] eq=$E"
+        env:
+          J: ${{ toJSON(matrix) }}
+          X: ${{ matrix.x }}
+          E: ${{ matrix == null }}
+`, "j", nil)
+	if res.Conclusion != ConclusionSuccess {
+		t.Fatalf("%+v %v", res, logOf(rec.steps[1]))
+	}
+	if got := rec.steps[1].Log[len(rec.steps[1].Log)-1]; got != "json=null x=[] eq=true" {
+		t.Errorf("%q", got)
+	}
+}
