@@ -7,7 +7,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"net/http"
 	"os"
 
 	"github.com/bnema/zerowrap"
@@ -35,32 +34,33 @@ func buildDriver(ctx context.Context, scfg sandbox.Config) (sandbox.Driver, erro
 	return sandbox.Select(ctx, scfg, drivers.Factories(), sandbox.Prober{})
 }
 
-// registerCmd is `ermite-runner register [--token T] [--replace]`: it chooses
-// the isolation mode like `run` will, registers the runner with it, and stores
-// the runner token (mode 0600) in the state directory. The register token comes
-// from --token or ERMITE_RUNNER_REGISTER_TOKEN, so that it need not appear in a
-// process list.
+// registerCmd is `ermite-runner register [--token-stdin] [--token T] [--replace]`:
+// it chooses the isolation mode like `run` will, registers the runner with it,
+// and stores the runner token (mode 0600) in the state directory. The register
+// token is read from standard input (--token-stdin) or from
+// ERMITE_RUNNER_REGISTER_TOKEN; --token is accepted but the arguments of a
+// process are visible to every user of the host.
 func registerCmd(ctx context.Context, args []string) int {
 	fs := flag.NewFlagSet("register", flag.ContinueOnError)
-	token := fs.String("token", "", "token with the runner:register scope (default: $"+host.EnvRegisterToken+")")
+	token := fs.String("token", "", "token with the runner:register scope (visible in the process list: prefer $"+host.EnvRegisterToken+" or --token-stdin)")
+	fromStdin := fs.Bool("token-stdin", false, "read the token from standard input")
 	replace := fs.Bool("replace", false, "replace a runner of the same name")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	if *token == "" {
-		*token = os.Getenv(host.EnvRegisterToken)
+	tok, err := host.ResolveRegisterToken(*token, *fromStdin, os.Stdin, os.Getenv)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "ermite-runner:", err)
+		return 2
 	}
+	*token = tok
 	scfg, hcfg, err := loadHostConfig()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ermite-runner:", err)
 		return 2
 	}
-	switch {
-	case hcfg.URL == "":
+	if hcfg.URL == "" {
 		fmt.Fprintf(os.Stderr, "ermite-runner: %s is not set\n", host.EnvURL)
-		return 2
-	case *token == "":
-		fmt.Fprintf(os.Stderr, "ermite-runner: give a token with --token or %s\n", host.EnvRegisterToken)
 		return 2
 	}
 	drv, err := buildDriver(ctx, scfg)
@@ -71,7 +71,7 @@ func registerCmd(ctx context.Context, args []string) int {
 	iso := drv.Isolation()
 	_ = drv.Close()
 
-	client := host.NewClient(hcfg.URL, *token, http.DefaultTransport)
+	client := hcfg.Client(hcfg.URL, *token)
 	st, err := host.Register(ctx, hcfg, client, iso, *replace)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ermite-runner:", err)
@@ -115,9 +115,9 @@ func runCmd(ctx context.Context) int {
 	r := &host.Runner{
 		Cfg:    hcfg,
 		Driver: drv,
-		Poll:   host.NewClient(url, st.RunnerToken, http.DefaultTransport),
+		Poll:   hcfg.Client(url, st.RunnerToken),
 		Job: func(tok string) ermiteconnect.RunnerServiceClient {
-			return host.NewClient(url, tok, http.DefaultTransport)
+			return hcfg.Client(url, tok)
 		},
 	}
 	r.Cfg.URL = url

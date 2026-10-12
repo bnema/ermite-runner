@@ -9,7 +9,10 @@ package host
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
+	"net/netip"
+	"net/url"
 	"strings"
 	"time"
 
@@ -20,13 +23,52 @@ import (
 )
 
 // bearer adds "Authorization: Bearer <token>" to every request. The token is
-// never logged.
+// never logged. It refuses to send the token over a connection that is not
+// protected: plain http is only for loopback, unless AllowInsecure is set.
 type bearer struct {
-	token string
-	base  http.RoundTripper
+	token         string
+	base          http.RoundTripper
+	allowInsecure bool
+}
+
+// ErrInsecureURL is returned for a server URL that is not https and not
+// loopback: the runner token and the job tokens would travel in clear.
+var ErrInsecureURL = errors.New("the server URL must be https (plain http is only accepted for localhost; ERMITE_RUNNER_INSECURE_HTTP=1 allows it, for tests, and sends every token in clear)")
+
+// CheckURL validates the URL of the server: http or https, a host, no
+// credentials, and https unless the host is loopback or allowInsecure is set.
+func CheckURL(raw string, allowInsecure bool) error {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return fmt.Errorf("%q is not a valid URL", raw)
+	}
+	if u.User != nil {
+		return errors.New("the server URL must not contain credentials")
+	}
+	switch u.Scheme {
+	case "https":
+		return nil
+	case "http":
+		if allowInsecure || isLoopback(u.Hostname()) {
+			return nil
+		}
+		return ErrInsecureURL
+	}
+	return fmt.Errorf("%q: the scheme must be https", raw)
+}
+
+func isLoopback(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	ip, err := netip.ParseAddr(host)
+	return err == nil && ip.IsLoopback()
 }
 
 func (b bearer) RoundTrip(r *http.Request) (*http.Response, error) {
+	if err := CheckURL(r.URL.String(), b.allowInsecure); err != nil {
+		return nil, err
+	}
 	r = r.Clone(r.Context())
 	if b.token != "" {
 		r.Header.Set("Authorization", "Bearer "+b.token)
@@ -40,9 +82,27 @@ func (b bearer) RoundTrip(r *http.Request) (*http.Response, error) {
 
 // NewClient returns a RunnerService client that authenticates with token. The
 // HTTP client has no overall timeout: calls carry their own context deadline
-// (WatchJob is a long stream).
+// (WatchJob is a long stream). It never follows a redirect: a response from the
+// server that points elsewhere is returned as is, so that the token is not
+// carried to another host (Go would keep the Authorization header on a redirect
+// to the same host and drop it for others, but the client has no business
+// following any).
 func NewClient(baseURL, token string, base http.RoundTripper) ermiteconnect.RunnerServiceClient {
-	return ermiteconnect.NewRunnerServiceClient(&http.Client{Transport: bearer{token, base}}, strings.TrimRight(baseURL, "/"))
+	return newClient(baseURL, token, base, false)
+}
+
+// NewInsecureClient is NewClient for a server reached over plain http that is
+// not loopback. Only for tests and trusted networks.
+func NewInsecureClient(baseURL, token string, base http.RoundTripper) ermiteconnect.RunnerServiceClient {
+	return newClient(baseURL, token, base, true)
+}
+
+func newClient(baseURL, token string, base http.RoundTripper, insecure bool) ermiteconnect.RunnerServiceClient {
+	hc := &http.Client{
+		Transport:     bearer{token: token, base: base, allowInsecure: insecure},
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+	return ermiteconnect.NewRunnerServiceClient(hc, strings.TrimRight(baseURL, "/"))
 }
 
 // ClientFactory builds a client for a token; tests replace it.

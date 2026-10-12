@@ -6,10 +6,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"bnema.dev/ermite-api/gen/ermite/ermiteconnect"
 )
 
 // Environment variables of the host process. The sandbox settings
@@ -20,6 +24,9 @@ const (
 	EnvName          = "ERMITE_RUNNER_NAME"
 	EnvLabels        = "ERMITE_RUNNER_LABELS"
 	EnvRegisterToken = "ERMITE_RUNNER_REGISTER_TOKEN"
+	// EnvInsecureHTTP allows a plain http server URL that is not loopback. The
+	// runner token and the job tokens then travel in clear: tests only.
+	EnvInsecureHTTP = "ERMITE_RUNNER_INSECURE_HTTP"
 )
 
 // Config is the host part of the runner configuration.
@@ -36,6 +43,16 @@ type Config struct {
 	Capacity int
 	// Version is the version of the runner binary.
 	Version string
+	// InsecureHTTP allows a non-loopback http URL (ERMITE_RUNNER_INSECURE_HTTP=1).
+	InsecureHTTP bool
+}
+
+// Client returns the client for a token, honouring InsecureHTTP.
+func (c Config) Client(url, token string) ermiteconnect.RunnerServiceClient {
+	if c.InsecureHTTP {
+		return NewInsecureClient(url, token, http.DefaultTransport)
+	}
+	return NewClient(url, token, http.DefaultTransport)
 }
 
 var nameRe = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
@@ -47,6 +64,18 @@ func LoadConfig(getenv func(string) string, hostname, stateDir string, capacity 
 	c := Config{URL: strings.TrimSpace(getenv(EnvURL)), Name: strings.TrimSpace(getenv(EnvName)), StateDir: stateDir, Capacity: capacity, Version: version}
 	if c.Name == "" {
 		c.Name = sanitizeName(hostname)
+	}
+	switch strings.ToLower(strings.TrimSpace(getenv(EnvInsecureHTTP))) {
+	case "", "0", "false", "no":
+	case "1", "true", "yes":
+		c.InsecureHTTP = true
+	default:
+		return c, fmt.Errorf("%s: %q is not 0 or 1", EnvInsecureHTTP, getenv(EnvInsecureHTTP))
+	}
+	if c.URL != "" {
+		if err := CheckURL(c.URL, c.InsecureHTTP); err != nil {
+			return c, fmt.Errorf("%s: %w", EnvURL, err)
+		}
 	}
 	if !nameRe.MatchString(c.Name) {
 		return c, fmt.Errorf("%s: %q is not a valid runner name (1 to 64 letters, digits, '.', '_' and '-')", EnvName, c.Name)
@@ -157,4 +186,29 @@ func LoadState(dir string) (State, error) {
 		return State{}, fmt.Errorf("%s has no runner token", p)
 	}
 	return s, nil
+}
+
+// ResolveRegisterToken returns the token for `register`, from the first source
+// that has one: standard input (--token-stdin, read to the end and trimmed),
+// the environment (ERMITE_RUNNER_REGISTER_TOKEN), then the --token flag. The
+// flag is last because the arguments of a process are visible to every user of
+// the host (ps, /proc/<pid>/cmdline); the other two are not.
+func ResolveRegisterToken(flagValue string, fromStdin bool, stdin io.Reader, getenv func(string) string) (string, error) {
+	if fromStdin {
+		b, err := io.ReadAll(io.LimitReader(stdin, 4096))
+		if err != nil {
+			return "", fmt.Errorf("reading the token from standard input: %w", err)
+		}
+		if t := strings.TrimSpace(string(b)); t != "" {
+			return t, nil
+		}
+		return "", errors.New("standard input has no token")
+	}
+	if t := strings.TrimSpace(getenv(EnvRegisterToken)); t != "" {
+		return t, nil
+	}
+	if t := strings.TrimSpace(flagValue); t != "" {
+		return t, nil
+	}
+	return "", fmt.Errorf("give the token in %s or on standard input (--token-stdin); --token works too but is visible in the process list", EnvRegisterToken)
 }
