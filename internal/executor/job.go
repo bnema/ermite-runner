@@ -50,8 +50,13 @@ type Config struct {
 	MatrixJSON   string
 	// Repo is the repository name used when the github context lacks one.
 	Repo string
-	// TimeoutMinutes is the job timeout; 0 means DefaultTimeoutMinutes.
+	// TimeoutMinutes is the job timeout; 0 means DefaultTimeoutMinutes. It is
+	// used for the message and, without Deadline, for the timer.
 	TimeoutMinutes int
+	// Deadline is the time left of the job timeout when Run is called, when the
+	// timeout started counting earlier (at the receipt of the job by the host);
+	// 0 means TimeoutMinutes from now.
+	Deadline time.Duration
 
 	Runner        RunnerInfo
 	RunnerVersion string
@@ -165,11 +170,11 @@ func Run(cancel *Canceller, cfg Config) Result {
 }
 
 func (j *job) run() Result {
-	minutes := j.cfg.TimeoutMinutes
-	if minutes <= 0 {
-		minutes = DefaultTimeoutMinutes
+	limit := j.cfg.Deadline
+	if limit <= 0 {
+		limit = time.Duration(j.timeoutMinutes()) * time.Minute
 	}
-	timer := time.AfterFunc(time.Duration(minutes)*time.Minute, func() { j.cancel.Cancel(CancelTimeout) })
+	timer := time.AfterFunc(limit, func() { j.cancel.Cancel(CancelTimeout) })
 	defer timer.Stop()
 
 	// ---- Set up job (JobExtension.InitializeJob) ----

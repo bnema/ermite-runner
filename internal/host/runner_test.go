@@ -790,3 +790,60 @@ func TestLoadConfig(t *testing.T) {
 }
 
 var _ = ermiteconnect.RunnerServiceClient(nil)
+
+// The job timeout counts from the receipt of the job, and the host enforces it
+// even when the executor does not: the sandbox is stopped and the job ends
+// timed_out.
+func TestHostEnforcesTheJobTimeout(t *testing.T) {
+	h := newHarness(t, func(_ *testing.T, c *execstream.Conn, _ *execpb.Run, cancels <-chan *execpb.Cancel) {
+		stepStart(c, 1, "Set up job")
+		logLineFrame(c, 1, "stuck", false)
+		cn := <-cancels
+		if cn.Kind != execpb.CancelKind_CANCEL_KIND_TIMEOUT {
+			t.Errorf("kind %v", cn.Kind)
+		}
+		select {} // the executor ignores the cancel
+	})
+	h.runner.Timing.TimeoutGrace = 200 * time.Millisecond
+	job := testJob("j1")
+	job.TimeoutMinutes = 1
+	h.runner.Job = func(tok string) ermiteconnect.RunnerServiceClient {
+		return NewClient(h.url, tok, http.DefaultTransport)
+	}
+	h.runner.now = func() time.Time { return time.Now().Add(-59*time.Second - 700*time.Millisecond) } // received 59.7 s ago
+	h.srv.jobs = []*ermite.Job{job}
+	start := time.Now()
+	h.run(t)
+	eventually(t, "CompleteJob", func() bool { return h.srv.completeCount() == 1 })
+	if d := time.Since(start); d > 5*time.Second {
+		t.Fatalf("took %v", d)
+	}
+	h.srv.mu.Lock()
+	defer h.srv.mu.Unlock()
+	c := h.srv.completes[0]
+	if c.Conclusion != ermite.CiConclusion_CI_CONCLUSION_TIMED_OUT || c.RunnerShutdown {
+		t.Fatalf("%v", c.Conclusion)
+	}
+	for _, u := range c.Steps {
+		if u.State != ermite.StepState_STEP_STATE_COMPLETED {
+			t.Errorf("step %d not completed", u.Number)
+		}
+	}
+}
+
+// The remaining time, not the whole timeout, goes to the executor.
+func TestRunCarriesTheRemainingDeadline(t *testing.T) {
+	var spec *execpb.JobSpec
+	inner := simpleScript("x")
+	h := newHarness(t, func(t *testing.T, c *execstream.Conn, run *execpb.Run, cn <-chan *execpb.Cancel) {
+		spec = run.Job
+		inner(t, c, run, cn)
+	})
+	h.runner.now = func() time.Time { return time.Now().Add(-3 * time.Minute) }
+	h.srv.jobs = []*ermite.Job{testJob("j1")} // 5 minutes
+	h.run(t)
+	eventually(t, "CompleteJob", func() bool { return h.srv.completeCount() == 1 })
+	if spec == nil || spec.TimeoutMinutes != 5 || spec.DeadlineMs < 110_000 || spec.DeadlineMs > 120_000 {
+		t.Fatalf("%v", spec)
+	}
+}

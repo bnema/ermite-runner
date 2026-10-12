@@ -111,6 +111,10 @@ type Timing struct {
 	LogFlush time.Duration
 	// WatchRetry is the delay before WatchJob is reopened.
 	WatchRetry time.Duration
+	// TimeoutGrace is how long the executor gets after the job timeout to stop
+	// its steps (SIGINT, then SIGTERM after 7.5 s, then SIGKILL 2.5 s later) and
+	// report, before the sandbox is destroyed.
+	TimeoutGrace time.Duration
 	// ShutdownGrace is how long jobs get to stop after a shutdown signal before
 	// their sandbox is destroyed.
 	ShutdownGrace time.Duration
@@ -138,6 +142,7 @@ func (t Timing) withDefaults() Timing {
 	def(&t.BackoffMax, 30*time.Second)
 	def(&t.LogFlush, 250*time.Millisecond)
 	def(&t.WatchRetry, time.Second)
+	def(&t.TimeoutGrace, 30*time.Second)
 	def(&t.ShutdownGrace, 30*time.Second)
 	def(&t.CompleteDeadline, 5*time.Minute)
 	def(&t.NoJobPause, 0)

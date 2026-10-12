@@ -601,3 +601,20 @@ func TestCancelSignalsTheShellNotTheGroup(t *testing.T) {
 		t.Fatalf("the foreground child was signalled with the shell: %v", err)
 	}
 }
+
+// Deadline is what is left of the timeout when the host sent the job: the
+// executor must not grant the whole timeout again.
+func TestDeadlineOverridesTheTimeout(t *testing.T) {
+	needTools(t, "bash")
+	start := time.Now()
+	rec, res := runLocal(t, wfHead+"    steps:\n      - run: sleep 30\n", "j", func(c *Config) {
+		c.TimeoutMinutes = 60
+		c.Deadline = 500 * time.Millisecond
+	})
+	if res.Conclusion != ConclusionTimedOut || !strings.Contains(res.Error, "60 minutes") {
+		t.Fatalf("%+v", res)
+	}
+	if time.Since(start) > 10*time.Second || rec.steps[1].Conclusion != ConclusionCancelled {
+		t.Fatalf("took %v: %+v", time.Since(start), rec.steps[1])
+	}
+}

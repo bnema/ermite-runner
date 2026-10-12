@@ -525,8 +525,14 @@ type JobSpec struct {
 	// runner_environment is the runner.environment value ("self-hosted").
 	RunnerEnvironment string `protobuf:"bytes,10,opt,name=runner_environment,json=runnerEnvironment,proto3" json:"runner_environment,omitempty"`
 	Debug             bool   `protobuf:"varint,11,opt,name=debug,proto3" json:"debug,omitempty"` // ACTIONS_STEP_DEBUG
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// deadline_ms is what is left of the job timeout when the host sends this
+	// Run, in milliseconds: the timeout counts from the moment the host received
+	// the job (runner.proto: Job.timeout_minutes), not from the start of the
+	// executor, and booting the sandbox takes time. 0 means "use
+	// timeout_minutes from now".
+	DeadlineMs    int64 `protobuf:"varint,12,opt,name=deadline_ms,json=deadlineMs,proto3" json:"deadline_ms,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *JobSpec) Reset() {
@@ -634,6 +640,13 @@ func (x *JobSpec) GetDebug() bool {
 		return x.Debug
 	}
 	return false
+}
+
+func (x *JobSpec) GetDeadlineMs() int64 {
+	if x != nil {
+		return x.DeadlineMs
+	}
+	return 0
 }
 
 type Output struct {
@@ -1105,7 +1118,7 @@ const file_exec_proto_rawDesc = "" +
 	"\x03job\x18\x03 \x01(\v2\x1e.ermite.runner.exec.v1.JobSpecR\x03job\x1a6\n" +
 	"\bEnvEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xea\x02\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x8b\x03\n" +
 	"\aJobSpec\x12#\n" +
 	"\rworkflow_path\x18\x01 \x01(\tR\fworkflowPath\x12#\n" +
 	"\rworkflow_yaml\x18\x02 \x01(\tR\fworkflowYaml\x12\x17\n" +
@@ -1119,7 +1132,9 @@ const file_exec_proto_rawDesc = "" +
 	"\x0erunner_version\x18\t \x01(\tR\rrunnerVersion\x12-\n" +
 	"\x12runner_environment\x18\n" +
 	" \x01(\tR\x11runnerEnvironment\x12\x14\n" +
-	"\x05debug\x18\v \x01(\bR\x05debug\"t\n" +
+	"\x05debug\x18\v \x01(\bR\x05debug\x12\x1f\n" +
+	"\vdeadline_ms\x18\f \x01(\x03R\n" +
+	"deadlineMs\"t\n" +
 	"\x06Output\x129\n" +
 	"\x06stream\x18\x01 \x01(\x0e2!.ermite.runner.exec.v1.StreamKindR\x06stream\x12\x12\n" +
 	"\x04data\x18\x02 \x01(\fR\x04data\x12\x1b\n" +

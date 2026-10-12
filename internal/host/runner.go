@@ -35,8 +35,18 @@ type Runner struct {
 	// JobSpec sizes the sandbox of a job; the zero value takes the defaults.
 	JobSpec func(*ermite.Job) sandbox.JobSpec
 
+	// now returns the current time; tests replace it.
+	now func() time.Time
+
 	leaked atomic.Bool
 	active sync.WaitGroup
+}
+
+func (r *Runner) clock() time.Time {
+	if r.now != nil {
+		return r.now()
+	}
+	return time.Now()
 }
 
 func (r *Runner) logf(format string, a ...any) {
@@ -175,8 +185,8 @@ func (r *Runner) startJob(ctx context.Context, job *ermite.Job, t Timing, shutdo
 	jctx, cancel := context.WithCancelCause(context.WithoutCancel(ctx))
 	jr := &jobRun{
 		r: r, job: job, client: r.Job(job.JobToken), t: t, ctx: jctx, cancel: cancel,
-		logf:     func(f string, a ...any) { r.logf("job "+job.JobId+": "+f, a...) },
-		cancelCh: make(chan *execpb.Cancel, 1), steps: map[int32]*ermite.StepUpdate{},
+		logf:       func(f string, a ...any) { r.logf("job "+job.JobId+": "+f, a...) },
+		receivedAt: r.clock(), cancelCh: make(chan *execpb.Cancel, 1), steps: map[int32]*ermite.StepUpdate{},
 	}
 	r.logf("job %s (run %d, attempt %d, %s) assigned", job.JobId, job.RunId, job.Attempt, job.JobKey)
 	r.active.Add(1)

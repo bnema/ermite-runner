@@ -60,6 +60,12 @@ message JobSpec {
   // runner_environment is the runner.environment value ("self-hosted").
   string runner_environment = 10;
   bool debug = 11; // ACTIONS_STEP_DEBUG
+  // deadline_ms is what is left of the job timeout when the host sends this
+  // Run, in milliseconds: the timeout counts from the moment the host received
+  // the job (runner.proto: Job.timeout_minutes), not from the start of the
+  // executor, and booting the sandbox takes time. 0 means "use
+  // timeout_minutes from now".
+  int64 deadline_ms = 12;
 }
 
 enum StreamKind {

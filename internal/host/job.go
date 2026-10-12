@@ -47,10 +47,15 @@ type jobRun struct {
 	ctx    context.Context
 	cancel context.CancelCauseFunc
 
-	cancelCh chan *execpb.Cancel // the first value is sent to the executor
-	cancelMu sync.Mutex
-	cancelAt string // reason of the first cancel request, "" if none
-	stopping bool   // the runner is shutting down
+	// receivedAt is when the host got the job: the job timeout counts from it
+	// (runner.proto: Job.timeout_minutes).
+	receivedAt time.Time
+
+	cancelCh   chan *execpb.Cancel // the first value is sent to the executor
+	cancelMu   sync.Mutex
+	cancelAt   string            // reason of the first cancel request, "" if none
+	cancelKind execpb.CancelKind // kind of the first cancel request
+	stopping   bool              // the runner is shutting down
 
 	mu      sync.Mutex
 	steps   map[int32]*ermite.StepUpdate
@@ -84,7 +89,15 @@ func (j *jobRun) requestCancel(reason string, kind execpb.CancelKind) {
 		return
 	}
 	j.cancelAt = reason
+	j.cancelKind = kind
 	j.cancelCh <- &execpb.Cancel{Reason: reason, Kind: kind}
+}
+
+// firstCancelKind is the kind of the first cancel request.
+func (j *jobRun) firstCancelKind() execpb.CancelKind {
+	j.cancelMu.Lock()
+	defer j.cancelMu.Unlock()
+	return j.cancelKind
 }
 
 func (j *jobRun) cancelRequested() bool {
@@ -304,8 +317,14 @@ func (j *jobRun) run(rt *Runner, shutdown <-chan struct{}) {
 	j.outbox = newOutbox(j.client, j.job.JobId, j.t, func(err error) { j.abandon(err) }, j.logf)
 	j.outbox.start(ctx)
 
-	// A shutdown is a cancellation of kind shutdown, then a hard stop.
+	// Two reasons to stop the job from the host, each a cancellation followed
+	// by a hard stop of the sandbox if the executor does not answer: a shutdown
+	// of the runner (ShutdownGrace), and the job timeout, which the executor
+	// enforces itself but a stuck executor would not (TimeoutGrace after the
+	// deadline: the escalation SIGINT, SIGTERM, SIGKILL takes 10 s).
 	stopHard := make(chan struct{})
+	var hardOnce sync.Once
+	hard := func() { hardOnce.Do(func() { close(stopHard) }) }
 	go func() {
 		select {
 		case <-shutdown:
@@ -318,7 +337,21 @@ func (j *jobRun) run(rt *Runner, shutdown <-chan struct{}) {
 		j.requestCancel("the runner is shutting down", execpb.CancelKind_CANCEL_KIND_SHUTDOWN)
 		select {
 		case <-time.After(j.t.ShutdownGrace):
-			close(stopHard)
+			hard()
+		case <-ctx.Done():
+		}
+	}()
+	go func() {
+		select {
+		case <-time.After(time.Until(j.deadline())):
+		case <-ctx.Done():
+			return
+		}
+		j.logf("the job timeout of %d minutes has passed", j.timeoutMinutes())
+		j.requestCancel("the job timeout has passed", execpb.CancelKind_CANCEL_KIND_TIMEOUT)
+		select {
+		case <-time.After(j.t.TimeoutGrace):
+			hard()
 		case <-ctx.Done():
 		}
 	}()
@@ -403,7 +436,8 @@ func (j *jobRun) execute(ctx context.Context, rt *Runner, stopHard <-chan struct
 
 	run := &execpb.Run{Job: &execpb.JobSpec{
 		WorkflowPath: j.job.WorkflowPath, WorkflowYaml: j.job.WorkflowYaml, JobKey: j.job.JobKey,
-		Matrix: j.job.Matrix, Contexts: j.job.Contexts, Repo: j.job.Repo, TimeoutMinutes: j.job.TimeoutMinutes,
+		Matrix: j.job.Matrix, Contexts: j.job.Contexts, Repo: j.job.Repo, TimeoutMinutes: int32(j.timeoutMinutes()),
+		DeadlineMs: max(1, time.Until(j.deadline()).Milliseconds()),
 		RunnerName: rt.Cfg.Name, RunnerVersion: rt.Cfg.Version, RunnerEnvironment: "self-hosted",
 	}}
 	_, exit, err := execstream.DriveJob(conn, run, j.cancelCh, execstream.JobHandler{
@@ -428,8 +462,13 @@ func (j *jobRun) execute(ctx context.Context, rt *Runner, stopHard <-chan struct
 		}
 		return c, res.Outputs, res.RunnerShutdown && c == ermite.CiConclusion_CI_CONCLUSION_CANCELLED
 	case j.cancelRequested() || ctx.Err() != nil:
-		// The executor did not report: it was stopped.
-		if j.isStopping() {
+		// The executor did not report: it was stopped. A timeout wins over a
+		// shutdown or a user cancel that came later, as on the server (the first
+		// reason decides, and the timeout is the first when it fired first).
+		switch {
+		case j.firstCancelKind() == execpb.CancelKind_CANCEL_KIND_TIMEOUT:
+			return ermite.CiConclusion_CI_CONCLUSION_TIMED_OUT, nil, false
+		case j.isStopping():
 			return ermite.CiConclusion_CI_CONCLUSION_CANCELLED, nil, true
 		}
 		return ermite.CiConclusion_CI_CONCLUSION_CANCELLED, nil, false
@@ -442,6 +481,20 @@ func (j *jobRun) execute(ctx context.Context, rt *Runner, stopHard <-chan struct
 	}
 	j.sandboxError(fmt.Sprintf("The job's sandbox ended unexpectedly: %s", why))
 	return ermite.CiConclusion_CI_CONCLUSION_FAILURE, nil, false
+}
+
+// timeoutMinutes is the job timeout: at least 1, 360 when the job has none
+// (runner.proto: Job.timeout_minutes).
+func (j *jobRun) timeoutMinutes() int {
+	if m := int(j.job.TimeoutMinutes); m > 0 {
+		return m
+	}
+	return 360
+}
+
+// deadline is when the job times out, counted from its receipt.
+func (j *jobRun) deadline() time.Time {
+	return j.receivedAt.Add(time.Duration(j.timeoutMinutes()) * time.Minute)
 }
 
 func (j *jobRun) isStopping() bool {

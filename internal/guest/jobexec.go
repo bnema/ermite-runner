@@ -179,10 +179,10 @@ func runJob(ctx context.Context, conn *execstream.Conn, cfg ExecConfig, spec *ex
 	res := executor.Run(canceller, executor.Config{
 		WorkflowPath: spec.GetWorkflowPath(), WorkflowYAML: []byte(spec.GetWorkflowYaml()), JobKey: spec.GetJobKey(),
 		ContextsJSON: spec.GetContexts(), MatrixJSON: spec.GetMatrix(), Repo: spec.GetRepo(),
-		TimeoutMinutes: int(spec.GetTimeoutMinutes()),
-		Runner:         executor.RunnerInfo{Name: spec.GetRunnerName(), Environment: env},
-		RunnerVersion:  spec.GetRunnerVersion(),
-		Home:           su.Home, ToolCache: os.Getenv("RUNNER_TOOL_CACHE"), BaseEnv: stepEnv(os.Environ(), su), Credential: su.Credential,
+		TimeoutMinutes: int(spec.GetTimeoutMinutes()), Deadline: time.Duration(spec.GetDeadlineMs()) * time.Millisecond,
+		Runner:        executor.RunnerInfo{Name: spec.GetRunnerName(), Environment: env},
+		RunnerVersion: spec.GetRunnerVersion(),
+		Home:          su.Home, ToolCache: os.Getenv("RUNNER_TOOL_CACHE"), BaseEnv: stepEnv(os.Environ(), su), Credential: su.Credential,
 		Debug: spec.GetDebug(), Reporter: rep,
 		TermAfter: cfg.TermAfter, KillAfter: cfg.KillAfter, WaitDelay: cfg.WaitDelay,
 	})
