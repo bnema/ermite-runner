@@ -4,7 +4,6 @@ package executor
 
 import (
 	"sort"
-	"strings"
 
 	"bnema.dev/ermite-actions/workflow"
 )
@@ -18,6 +17,8 @@ type tokenScope struct {
 	// writeAll is the level "write-all" grants: GitHub keeps models and
 	// vulnerability-alerts at read, whatever the workflow asks.
 	writeAll string
+	// readAll is the level "read-all" grants, "" when it grants nothing.
+	readAll string
 }
 
 // tokenScopes are the scopes GitHub lists in "GITHUB_TOKEN Permissions" for
@@ -27,25 +28,25 @@ type tokenScope struct {
 // write-all only (read-all grants nothing for it, and "read" is rejected).
 // "metadata" is not a scope a workflow can set (rejected); it is always read.
 var tokenScopes = []tokenScope{
-	{"actions", "Actions", "write"},
-	{"artifact-metadata", "ArtifactMetadata", "write"},
-	{"attestations", "Attestations", "write"},
-	{"checks", "Checks", "write"},
-	{"code-quality", "CodeQuality", "write"},
-	{"contents", "Contents", "write"},
-	{"copilot-requests", "CopilotRequests", "write"},
-	{"deployments", "Deployments", "write"},
-	{"discussions", "Discussions", "write"},
-	{"drives", "Drives", "write"},
-	{"issues", "Issues", "write"},
-	{"models", "Models", "read"},
-	{"packages", "Packages", "write"},
-	{"pages", "Pages", "write"},
-	{"pull-requests", "PullRequests", "write"},
-	{"repository-projects", "RepositoryProjects", "write"},
-	{"security-events", "SecurityEvents", "write"},
-	{"statuses", "Statuses", "write"},
-	{"vulnerability-alerts", "VulnerabilityAlerts", "read"},
+	{"actions", "Actions", "write", "read"},
+	{"artifact-metadata", "ArtifactMetadata", "write", "read"},
+	{"attestations", "Attestations", "write", "read"},
+	{"checks", "Checks", "write", "read"},
+	{"code-quality", "CodeQuality", "write", "read"},
+	{"contents", "Contents", "write", "read"},
+	{"copilot-requests", "CopilotRequests", "write", ""},
+	{"deployments", "Deployments", "write", "read"},
+	{"discussions", "Discussions", "write", "read"},
+	{"drives", "Drives", "write", "read"},
+	{"issues", "Issues", "write", "read"},
+	{"models", "Models", "read", "read"},
+	{"packages", "Packages", "write", "read"},
+	{"pages", "Pages", "write", "read"},
+	{"pull-requests", "PullRequests", "write", "read"},
+	{"repository-projects", "RepositoryProjects", "write", "read"},
+	{"security-events", "SecurityEvents", "write", "read"},
+	{"statuses", "Statuses", "write", "read"},
+	{"vulnerability-alerts", "VulnerabilityAlerts", "read", "read"},
 }
 
 // permissionLine is one line of the group: "<Display>: <level>".
@@ -80,11 +81,11 @@ func tokenPermissionLines(wf *workflow.Workflow, jb *workflow.Job) []permissionL
 		return []permissionLine{{"Contents", "read"}, {"Metadata", "read"}, {"Packages", "read"}}
 	}
 	lines := []permissionLine{{"Metadata", "read"}}
-	switch strings.ToLower(p.All) {
+	switch p.All {
 	case "read-all":
 		for _, s := range tokenScopes {
-			if s.key != "copilot-requests" {
-				lines = append(lines, permissionLine{s.display, "read"})
+			if s.readAll != "" {
+				lines = append(lines, permissionLine{s.display, s.readAll})
 			}
 		}
 	case "write-all":
@@ -94,7 +95,7 @@ func tokenPermissionLines(wf *workflow.Workflow, jb *workflow.Job) []permissionL
 	default:
 		level := map[string]string{}
 		for _, sc := range p.Scopes {
-			level[strings.ToLower(sc.Scope)] = strings.ToLower(sc.Level)
+			level[sc.Scope] = sc.Level
 		}
 		for _, s := range tokenScopes {
 			if l := level[s.key]; l == "read" || l == "write" {

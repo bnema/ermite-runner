@@ -696,6 +696,50 @@ func TestSetUpJobSelfHostedNamesTheRunner(t *testing.T) {
 	}
 }
 
+// The expected groups of the whole-token cases, as recorded on github.com
+// (recordings/permissions-display.json: p-read-all, p-write-all).
+const (
+	recordedReadAll = `Actions: read
+ArtifactMetadata: read
+Attestations: read
+Checks: read
+CodeQuality: read
+Contents: read
+Deployments: read
+Discussions: read
+Drives: read
+Issues: read
+Metadata: read
+Models: read
+Packages: read
+Pages: read
+PullRequests: read
+RepositoryProjects: read
+SecurityEvents: read
+Statuses: read
+VulnerabilityAlerts: read`
+	recordedWriteAll = `Actions: write
+ArtifactMetadata: write
+Attestations: write
+Checks: write
+CodeQuality: write
+Contents: write
+CopilotRequests: write
+Deployments: write
+Discussions: write
+Drives: write
+Issues: write
+Metadata: read
+Models: read
+Packages: write
+Pages: write
+PullRequests: write
+RepositoryProjects: write
+SecurityEvents: write
+Statuses: write
+VulnerabilityAlerts: read`
+)
+
 // The GITHUB_TOKEN Permissions group follows the effective permissions of the
 // job (the job's replace the workflow's), as recorded on github.com
 // (recordings/permissions-display.json).
@@ -714,38 +758,19 @@ func TestSetUpJobPrintsTheTokenPermissionsGitHubGrants(t *testing.T) {
 			"Checks: read\nMetadata: read"},
 		{"job replaces workflow", "permissions:\n  contents: write\n  issues: write\n" + wfHead + "    permissions:\n      pull-requests: read\n" + steps,
 			"Metadata: read\nPullRequests: read"},
-		{"job read-all over workflow map", "permissions:\n  contents: write\n" + wfHead + "    permissions: read-all\n" + steps, "read-all"},
+		{"job read-all over workflow map", "permissions:\n  contents: write\n" + wfHead + "    permissions: read-all\n" + steps, recordedReadAll},
 		{"workflow write-all, job narrows", "permissions: write-all\n" + wfHead + "    permissions:\n      contents: read\n" + steps,
 			"Contents: read\nMetadata: read"},
-		{"write-all", "permissions: write-all\n" + wfHead + steps, "write-all"},
+		{"read-all", "permissions: read-all\n" + wfHead + steps, recordedReadAll},
+		{"write-all", "permissions: write-all\n" + wfHead + steps, recordedWriteAll},
 		{"metadata is not asked for", wfHead + "    permissions:\n      copilot-requests: write\n      security-events: read\n      pull-requests: write\n" + steps,
 			"CopilotRequests: write\nMetadata: read\nPullRequests: write\nSecurityEvents: read"},
 	} {
-		got := setupLog(t, tc.yaml, "j", nil)
-		start := strings.Index(got, "##[group]GITHUB_TOKEN Permissions\n")
-		end := strings.Index(got, "\n##[endgroup]")
-		if start < 0 || end < 0 || !strings.Contains(got, "##[endgroup]\nSecret source: Actions\nCache mode: write") {
-			t.Errorf("%s:\n%s", tc.name, got)
-			continue
-		}
-		have := strings.Split(got[start+len("##[group]GITHUB_TOKEN Permissions\n"):end], "\n")
-		switch tc.want {
-		case "read-all":
-			if len(have) != 19 || have[0] != "Actions: read" || strings.Contains(strings.Join(have, ","), "write") || strings.Contains(strings.Join(have, ","), "CopilotRequests") {
-				t.Errorf("%s: %v", tc.name, have)
-			}
-		case "write-all":
-			// recordings: p-write-all
-			wantAll := "Actions: write,ArtifactMetadata: write,Attestations: write,Checks: write,CodeQuality: write,Contents: write,CopilotRequests: write," +
-				"Deployments: write,Discussions: write,Drives: write,Issues: write,Metadata: read,Models: read,Packages: write,Pages: write,PullRequests: write," +
-				"RepositoryProjects: write,SecurityEvents: write,Statuses: write,VulnerabilityAlerts: read"
-			if strings.Join(have, ",") != wantAll {
-				t.Errorf("%s: %v", tc.name, have)
-			}
-		default:
-			if strings.Join(have, "\n") != tc.want {
-				t.Errorf("%s:\ngot  %v\nwant %q", tc.name, have, tc.want)
-			}
+		want := strings.Join([]string{"Current runner version: 'test'", "##[group]GITHUB_TOKEN Permissions", tc.want,
+			"##[endgroup]", "Secret source: Actions", "Cache mode: write", "Prepare workflow directory",
+			"Prepare all required actions", "Complete job name: j"}, "\n")
+		if got := setupLog(t, tc.yaml, "j", nil); got != want {
+			t.Errorf("%s:\ngot\n%s\nwant\n%s", tc.name, got, want)
 		}
 	}
 }

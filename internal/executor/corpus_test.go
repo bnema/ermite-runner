@@ -20,7 +20,7 @@ import (
 // conclusions and their logs with the recordings made on github.com. They need
 // a checkout of ermite-conformance (the corpus and recordings directories),
 // found through ERMITE_CONFORMANCE_DIR or as a sibling of this repository;
-// they skip without it.
+// they skip without it (and fail when ERMITE_CONFORMANCE_DIR is wrong).
 
 func conformanceDir(t *testing.T) string {
 	t.Helper()
@@ -28,33 +28,40 @@ func conformanceDir(t *testing.T) string {
 }
 
 // conformanceDirFor is conformanceDir for a checkout that has the recording of
-// scenario (any checkout with a corpus when scenario is empty): the scenario
-// may be on a branch that is not merged yet.
+// scenario (any checkout with a corpus when scenario is empty). The checkout is
+// ERMITE_CONFORMANCE_DIR when set (the test fails if it lacks the corpus or the
+// recording: a wrong path must not look like a pass), else the main checkout
+// ermite-conformance next to this repository (skipped when it has none).
 func conformanceDirFor(t *testing.T, scenario string) string {
 	t.Helper()
-	cands := []string{os.Getenv("ERMITE_CONFORMANCE_DIR")}
+	has := func(dir string) (corpus, rec bool) {
+		if st, err := os.Stat(filepath.Join(dir, "corpus")); err == nil && st.IsDir() {
+			corpus = true
+		}
+		if scenario == "" {
+			return corpus, true
+		}
+		_, err := os.Stat(filepath.Join(dir, "recordings", scenario+".json"))
+		return corpus, err == nil
+	}
+	if dir := os.Getenv("ERMITE_CONFORMANCE_DIR"); dir != "" {
+		corpus, rec := has(dir)
+		if !corpus {
+			t.Fatalf("ERMITE_CONFORMANCE_DIR=%s has no corpus directory", dir)
+		}
+		if !rec {
+			t.Fatalf("ERMITE_CONFORMANCE_DIR=%s has no recordings/%s.json", dir, scenario)
+		}
+		return dir
+	}
 	wd, _ := os.Getwd()
 	for d := wd; d != "/" && d != "."; d = filepath.Dir(d) {
-		cands = append(cands,
-			filepath.Join(d, "ermite-conformance", ".worktrees", "permissions"),
-			filepath.Join(d, "ermite-conformance", ".worktrees", "corpus"),
-			filepath.Join(d, "ermite-conformance"))
+		c := filepath.Join(d, "ermite-conformance")
+		if corpus, rec := has(c); corpus && rec {
+			return c
+		}
 	}
-	for _, c := range cands {
-		if c == "" {
-			continue
-		}
-		if st, err := os.Stat(filepath.Join(c, "corpus")); err != nil || !st.IsDir() {
-			continue
-		}
-		if scenario != "" {
-			if _, err := os.Stat(filepath.Join(c, "recordings", scenario+".json")); err != nil {
-				continue
-			}
-		}
-		return c
-	}
-	t.Skip("ermite-conformance checkout not found (set ERMITE_CONFORMANCE_DIR)")
+	t.Skip("ermite-conformance checkout not found next to this repository (set ERMITE_CONFORMANCE_DIR)")
 	return ""
 }
 
@@ -362,11 +369,17 @@ func TestCorpusPermissionsDisplay(t *testing.T) {
 		yaml := readFile(t, filepath.Join(dir, "corpus", "permissions-display", "tree", filepath.FromSlash(file)))
 		for _, jr := range run.Jobs {
 			t.Run(strings.TrimSuffix(filepath.Base(file), ".yml")+"/"+jr.Name, func(t *testing.T) {
+				if len(jr.Steps) == 0 {
+					t.Fatal("no steps in the recording")
+				}
 				want := permissionsGroup(jr.Steps[0].Log)
 				if want == nil {
 					t.Fatalf("no group in the recording: %v", jr.Steps[0].Log)
 				}
-				got, _ := runLocal(t, yaml, jr.Name, nil)
+				got, res := runLocal(t, yaml, jr.Name, nil)
+				if res.Conclusion != ConclusionSuccess || len(got.steps) == 0 {
+					t.Fatalf("job did not run: %+v %v", res, got.names())
+				}
 				if have := permissionsGroup(got.steps[0].Log); strings.Join(have, "\n") != strings.Join(want, "\n") {
 					t.Errorf("got\n%s\nwant\n%s", strings.Join(have, "\n"), strings.Join(want, "\n"))
 				}
