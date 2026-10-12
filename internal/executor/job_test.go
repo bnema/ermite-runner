@@ -619,3 +619,29 @@ func TestDeadlineOverridesTheTimeout(t *testing.T) {
 		t.Fatalf("took %v: %+v", time.Since(start), rec.steps[1])
 	}
 }
+
+// The env of a step reads its own id in github.action (StepsRunner.cs:118 sets
+// it before the env is evaluated), and the file command paths of the step
+// before it, as the recordings of github.com show for the dump step.
+func TestGithubActionInStepEnvIsTheStepsOwnID(t *testing.T) {
+	needTools(t, "bash")
+	rec, res := runLocal(t, wfHead+`    steps:
+      - run: echo one
+      - id: named
+        run: echo "$A|$GITHUB_ACTION|$GITHUB_ARTIFACTS" | sed 's#/[^|]*/##'
+        env:
+          A: ${{ github.action }}
+      - run: echo "$A"
+        env:
+          A: ${{ github.action }}
+`, "j", nil)
+	if res.Conclusion != ConclusionSuccess {
+		t.Fatalf("%+v", res)
+	}
+	if got := rec.steps[2].Log[len(rec.steps[2].Log)-1]; !strings.HasPrefix(got, "named|named|artifacts_") {
+		t.Errorf("named step: %q", got)
+	}
+	if got := rec.steps[3].Log[len(rec.steps[3].Log)-1]; got != "__run_2" {
+		t.Errorf("third step: %q", got)
+	}
+}
