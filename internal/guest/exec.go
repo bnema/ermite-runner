@@ -41,6 +41,10 @@ type ExecConfig struct {
 	// StepUser is the account the steps of a job run as when the executor is
 	// root; default "runner".
 	StepUser string
+	// AllowRootSteps lets the steps run as root when StepUser does not exist.
+	// For test images only; set by ERMITE_RUNNER_ALLOW_ROOT_STEPS=1 in the
+	// executor's environment.
+	AllowRootSteps bool
 	// ConnectTimeout bounds the connection attempts (default 30 s).
 	ConnectTimeout time.Duration
 	// RunTimeout bounds the wait for the host's Run frame (default 60 s).

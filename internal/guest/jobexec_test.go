@@ -6,6 +6,7 @@ import (
 	"context"
 	"net"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -181,3 +182,62 @@ func TestStepEnv(t *testing.T) {
 }
 
 func lookPath(name string) (string, error) { return exec.LookPath(name) }
+
+func TestMissingStepUserFailsTheJobUnlessTestOptionSet(t *testing.T) {
+	none := func(string) (*user.User, error) { return nil, user.UnknownUserError("runner") }
+	// As root with no such user: refuse.
+	if _, err := lookupStepUser(0, none, "runner", false); err == nil || !strings.Contains(err.Error(), `no user "runner"`) || !strings.Contains(err.Error(), "refusing to run them as root") {
+		t.Fatalf("%v", err)
+	}
+	// The test option allows root.
+	if su, err := lookupStepUser(0, none, "runner", true); err != nil || su.Name != "root" || su.Credential != nil {
+		t.Fatalf("%+v %v", su, err)
+	}
+	// Not root: the steps run as the current user, whatever the name.
+	if su, err := lookupStepUser(1000, none, "runner", false); err != nil || su.Credential != nil {
+		t.Fatalf("%+v %v", su, err)
+	}
+	// As root with the user: switch to it.
+	found := func(string) (*user.User, error) {
+		return &user.User{Uid: "1001", Gid: "1001", Username: "runner", HomeDir: "/home/runner"}, nil
+	}
+	su, err := lookupStepUser(0, found, "runner", false)
+	if err != nil || su.Credential == nil || su.Credential.Uid != 1001 || su.Credential.Gid != 1001 || su.Home != "/home/runner" {
+		t.Fatalf("%+v %v", su, err)
+	}
+}
+
+// The failure is reported like a failed "Set up job".
+func TestFailSetupReportsAFailedFirstStep(t *testing.T) {
+	host, guest := net.Pipe()
+	got := make(chan []string, 1)
+	go func() {
+		var frames []string
+		c := execstream.NewConn(host)
+		for {
+			f, err := c.Recv()
+			if err != nil {
+				got <- frames
+				return
+			}
+			switch b := f.Body.(type) {
+			case *execpb.Frame_StepStarted:
+				frames = append(frames, "start:"+b.StepStarted.Name)
+			case *execpb.Frame_Log:
+				frames = append(frames, "log:"+b.Log.Text)
+			case *execpb.Frame_StepCompleted:
+				frames = append(frames, "done:"+b.StepCompleted.Conclusion.String())
+			case *execpb.Frame_JobResult:
+				frames = append(frames, "result:"+b.JobResult.Conclusion.String())
+			}
+		}
+	}()
+	if code := failSetup(execstream.NewConn(guest), "no user"); code != 1 {
+		t.Fatal(code)
+	}
+	_ = guest.Close()
+	want := "start:Set up job|log:##[error]no user|done:STEP_CONCLUSION_FAILURE|result:STEP_CONCLUSION_FAILURE"
+	if g := strings.Join(<-got, "|"); g != want {
+		t.Fatalf("%s", g)
+	}
+}

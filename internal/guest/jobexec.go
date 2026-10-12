@@ -4,6 +4,7 @@ package guest
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/user"
 	"strconv"
@@ -80,11 +81,18 @@ type StepUser struct {
 }
 
 // LookupStepUser finds the user the steps run as. When the executor is not
-// root it cannot switch user: the steps run as the current user. When it is
-// root and name does not exist, the steps run as root (an image without the
-// user is a test image).
-func LookupStepUser(name string) StepUser {
-	if os.Geteuid() != 0 || name == "" {
+// root it cannot switch user: the steps run as the current user (a development
+// or test setup, never the sandbox of a runner, whose init is root). When it is
+// root and the user does not exist, the lookup fails: running a job's code as
+// root of the sandbox, with the docker daemon and the whole image at hand,
+// because an image lacks the account would hide a broken image. A test image
+// opts in with allowRoot.
+func LookupStepUser(name string, allowRoot bool) (StepUser, error) {
+	return lookupStepUser(os.Geteuid(), user.Lookup, name, allowRoot)
+}
+
+func lookupStepUser(euid int, lookup func(string) (*user.User, error), name string, allowRoot bool) (StepUser, error) {
+	if euid != 0 || name == "" {
 		u := StepUser{Home: os.Getenv("HOME")}
 		if cu, err := user.Current(); err == nil {
 			u.Name = cu.Username
@@ -92,11 +100,14 @@ func LookupStepUser(name string) StepUser {
 				u.Home = cu.HomeDir
 			}
 		}
-		return u
+		return u, nil
 	}
-	u, err := user.Lookup(name)
+	u, err := lookup(name)
 	if err != nil {
-		return StepUser{Name: "root", Home: "/root"}
+		if allowRoot {
+			return StepUser{Name: "root", Home: "/root"}, nil
+		}
+		return StepUser{}, fmt.Errorf("the image has no user %q to run the steps as (%v): refusing to run them as root", name, err)
 	}
 	uid, _ := strconv.ParseUint(u.Uid, 10, 32)
 	gid, _ := strconv.ParseUint(u.Gid, 10, 32)
@@ -108,7 +119,7 @@ func LookupStepUser(name string) StepUser {
 			}
 		}
 	}
-	return StepUser{Credential: cred, Name: u.Username, Home: u.HomeDir}
+	return StepUser{Credential: cred, Name: u.Username, Home: u.HomeDir}, nil
 }
 
 // stepEnv is the environment the steps inherit: the executor's, without the
@@ -145,7 +156,12 @@ func cancelKind(k execpb.CancelKind) executor.CancelReason {
 // runJob runs the job of a Run frame with the executor and reports on conn.
 // It returns the exit code to report.
 func runJob(ctx context.Context, conn *execstream.Conn, cfg ExecConfig, spec *execpb.JobSpec) int {
-	su := LookupStepUser(cfg.StepUser)
+	su, err := LookupStepUser(cfg.StepUser, cfg.AllowRootSteps)
+	if err != nil {
+		// Reported like any failure of "Set up job": the job fails, with the reason
+		// in its log, and nothing of the workflow runs.
+		return failSetup(conn, err.Error())
+	}
 	canceller := executor.NewCanceller()
 	rep := &frameReporter{conn: conn, failed: make(chan struct{})}
 
@@ -194,5 +210,17 @@ func runJob(ctx context.Context, conn *execstream.Conn, cfg ExecConfig, spec *ex
 	if res.Conclusion == executor.ConclusionSuccess {
 		return 0
 	}
+	return 1
+}
+
+// failSetup ends a job that cannot start, like a failed "Set up job": step 1
+// starts, logs the reason as an error, and fails; the job result is a failure.
+func failSetup(conn *execstream.Conn, msg string) int {
+	rep := &frameReporter{conn: conn, failed: make(chan struct{})}
+	now := time.Now()
+	rep.StepStarted(1, executor.SetUpJobName, now)
+	rep.Log(1, now, "##[error]"+msg)
+	rep.StepCompleted(1, executor.SetUpJobName, executor.ConclusionFailure, time.Now())
+	rep.JobCompleted(executor.Result{Conclusion: executor.ConclusionFailure, Error: msg})
 	return 1
 }

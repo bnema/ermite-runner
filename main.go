@@ -81,6 +81,9 @@ func execCmd(ctx context.Context) int {
 		Target:  target,
 		Sandbox: envOr("ERMITE_SANDBOX", "container"),
 		Version: envOr("ERMITE_VERSION", version),
+		// A test image without the user "runner" (ERMITE_RUNNER_ALLOW_ROOT_STEPS=1);
+		// a runner never sets it: the job refuses to start instead.
+		AllowRootSteps: os.Getenv("ERMITE_RUNNER_ALLOW_ROOT_STEPS") == "1",
 	})
 	if err != nil {
 		log.Error().Err(err).Msg("exec")
