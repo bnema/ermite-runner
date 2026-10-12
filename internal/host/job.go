@@ -422,27 +422,7 @@ func (j *jobRun) run(rt *Runner, shutdown <-chan struct{}) {
 	defer j.cancel(nil)
 	ctx := j.ctx
 
-	// 1. The acknowledgement comes first, before anything else. A shutdown ends
-	// the wait: the job is not started and not acknowledged, and the server
-	// gives it to another runner when no heartbeat comes within 30 s (runner.proto,
-	// FetchJob: this is not a failure of the job).
-	ackCtx, stopAck := context.WithCancel(ctx)
-	go func() {
-		select {
-		case <-shutdown:
-			stopAck()
-		case <-ackCtx.Done():
-		}
-	}()
-	acked := j.ack(ackCtx)
-	stopAck()
-	if !acked {
-		select {
-		case <-shutdown:
-			j.log.Warn().Msg("the runner is shutting down before the job was acknowledged: the server will give it to another runner")
-		default:
-			j.log.Warn().Msg("the assignment was lost before the job started")
-		}
+	if !j.acknowledge(ctx, shutdown) {
 		return
 	}
 	var bg sync.WaitGroup
@@ -455,15 +435,58 @@ func (j *jobRun) run(rt *Runner, shutdown <-chan struct{}) {
 	j.outbox = newOutbox(j.client, j.job.JobId, j.t, func(err error) { j.abandon(err) }, j.log)
 	j.outbox.start(ctx)
 
-	// Two reasons to stop the job from the host, each a cancellation followed
-	// by a hard stop of the sandbox if the executor does not answer: a shutdown
-	// of the runner (ShutdownGrace), and the job timeout, which the executor
-	// enforces itself but a stuck executor would not (TimeoutGrace after the
-	// deadline: the escalation SIGINT, SIGTERM, SIGKILL takes 10 s).
+	stopHard := j.startStopTimers(ctx, shutdown)
+	out := j.execute(ctx, rt, stopHard)
+	j.report(ctx, out)
+}
+
+// acknowledge sends the first heartbeat, before anything else. A shutdown ends
+// the wait: the job is not started and not acknowledged, and the server gives it
+// to another runner when no heartbeat comes within 30 s (runner.proto, FetchJob:
+// this is not a failure of the job). It reports whether the job goes on.
+func (j *jobRun) acknowledge(ctx context.Context, shutdown <-chan struct{}) bool {
+	ackCtx, stopAck := context.WithCancel(ctx)
+	defer stopAck()
+	go func() {
+		select {
+		case <-shutdown:
+			stopAck()
+		case <-ackCtx.Done():
+		}
+	}()
+	if j.ack(ackCtx) {
+		return true
+	}
+	select {
+	case <-shutdown:
+		j.log.Warn().Msg("the runner is shutting down before the job was acknowledged: the server will give it to another runner")
+	default:
+		j.log.Warn().Msg("the assignment was lost before the job started")
+	}
+	return false
+}
+
+// startStopTimers arms the two reasons to stop the job from the host, each a
+// cancellation followed by a hard stop of the sandbox (the returned channel is
+// closed) if the executor does not answer: a shutdown of the runner
+// (ShutdownGrace), and the job timeout, which the executor enforces itself but
+// a stuck executor would not (TimeoutGrace after the deadline: the escalation
+// SIGINT, SIGTERM, SIGKILL takes 10 s). The goroutines end with ctx.
+func (j *jobRun) startStopTimers(ctx context.Context, shutdown <-chan struct{}) <-chan struct{} {
 	stopHard := make(chan struct{})
 	var hardOnce sync.Once
 	hard := func() { hardOnce.Do(func() { close(stopHard) }) }
 	j.hard = hard
+	// after waits grace, then stops the sandbox; it returns early with ctx.
+	after := func(grace time.Duration) {
+		timer := time.NewTimer(grace)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			hard()
+		case <-ctx.Done():
+		}
+	}
 	go func() {
 		select {
 		case <-shutdown:
@@ -474,13 +497,7 @@ func (j *jobRun) run(rt *Runner, shutdown <-chan struct{}) {
 		j.stopping = true
 		j.cancelMu.Unlock()
 		j.requestCancel("the runner is shutting down", execpb.CancelKind_CANCEL_KIND_SHUTDOWN)
-		timer := time.NewTimer(j.t.ShutdownGrace)
-		defer timer.Stop()
-		select {
-		case <-timer.C:
-			hard()
-		case <-ctx.Done():
-		}
+		after(j.t.ShutdownGrace)
 	}()
 	go func() {
 		wait := time.NewTimer(time.Until(j.deadline()))
@@ -492,87 +509,70 @@ func (j *jobRun) run(rt *Runner, shutdown <-chan struct{}) {
 		}
 		j.log.Warn().Int("timeout_minutes", j.timeoutMinutes()).Msg("the job timeout has passed")
 		j.requestCancel("the job timeout has passed", execpb.CancelKind_CANCEL_KIND_TIMEOUT)
-		timer := time.NewTimer(j.t.TimeoutGrace)
-		defer timer.Stop()
-		select {
-		case <-timer.C:
-			hard()
-		case <-ctx.Done():
-		}
+		after(j.t.TimeoutGrace)
 	}()
+	return stopHard
+}
 
-	conclusion, outputs, shutdownFlag := j.execute(ctx, rt, stopHard)
-
-	// 2. Nothing more is sent to a job that is over.
+// report ends the job towards the server: the log is flushed, then CompleteJob.
+// Nothing is sent to a job that the server has ended.
+func (j *jobRun) report(ctx context.Context, out outcome) {
 	if err := j.abandoned(); err != nil {
 		j.log.Warn().Err(err).Msg("the server ended the job: no result is reported")
 		return
 	}
 	// The report is made even when the runner is shutting down: it uses its own
 	// deadline.
-	reportBudget := j.t.CompleteDeadline
+	budget := j.t.CompleteDeadline
 	if j.isStopping() {
 		// The service manager waits only so long (see Timing): the report of a job
 		// cut short by a shutdown gets what is left of the budget.
-		reportBudget = min(reportBudget, j.t.ShutdownReport)
+		budget = min(budget, j.t.ShutdownReport)
 	}
-	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), reportBudget)
+	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), budget)
 	defer cancel()
 	// Output limits are checked before the log is flushed: a job whose outputs
 	// the server would refuse fails without outputs, with a line in the log
 	// (runner.proto: CompleteJobRequest.outputs), and lines sent after
 	// CompleteJob are rejected.
-	if msg := checkOutputs(outputs); msg != "" {
+	if msg := checkOutputs(out.outputs); msg != "" {
 		j.sandboxError(msg)
-		outputs, conclusion, shutdownFlag = nil, ermite.CiConclusion_CI_CONCLUSION_FAILURE, false
+		out = failure()
 	}
 	j.outbox.Close(rctx)
 	if err := j.abandoned(); err != nil {
 		return
 	}
-	j.complete(rctx, conclusion, outputs, shutdownFlag)
+	j.complete(rctx, out.conclusion, out.outputs, out.shutdown)
 }
 
-// execute starts the sandbox, runs the job in it and returns the conclusion.
-func (j *jobRun) execute(ctx context.Context, rt *Runner, stopHard <-chan struct{}) (ermite.CiConclusion, map[string]string, bool) {
-	fail := func(format string, a ...any) (ermite.CiConclusion, map[string]string, bool) {
-		j.failEarly(fmt.Sprintf(format, a...))
-		return ermite.CiConclusion_CI_CONCLUSION_FAILURE, nil, false
-	}
+// outcome is how a job ended, as far as the host can tell.
+type outcome struct {
+	conclusion ermite.CiConclusion
+	outputs    map[string]string
+	// shutdown is true when the runner's shutdown cut the job short.
+	shutdown bool
+}
+
+func failure() outcome { return outcome{conclusion: ermite.CiConclusion_CI_CONCLUSION_FAILURE} }
+
+// execute starts the sandbox, runs the job in it and returns how it ended.
+func (j *jobRun) execute(ctx context.Context, rt *Runner, stopHard <-chan struct{}) outcome {
 	sb, err := rt.Driver.New()
 	if err != nil {
-		return fail("The runner has no free sandbox: %v", err)
+		j.failEarly(fmt.Sprintf("The runner has no free sandbox: %v", err))
+		return failure()
 	}
 	// Stop runs to completion even when the job context is done.
-	defer func() {
-		sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), j.t.StopDeadline)
-		defer cancel()
-		if err := sb.Stop(sctx); err != nil {
-			j.log.Error().Err(err).Msg("stopping the sandbox")
-			if errors.Is(err, sandbox.ErrLeaked) {
-				rt.markLeaked()
-			}
-		}
-	}()
+	defer j.stopSandbox(ctx, rt, sb)
 
-	// Starting the sandbox is bounded by the job context and a hard stop.
-	startCtx, cancelStart := context.WithCancel(ctx)
-	stopWatch := make(chan struct{})
-	go func() {
-		select {
-		case <-stopHard:
-			cancelStart()
-		case <-stopWatch:
-		}
-	}()
-	conn, err := sb.Start(startCtx, rt.spec(j.job))
-	close(stopWatch)
-	cancelStart()
+	conn, err := j.startSandbox(ctx, rt, sb, stopHard)
 	if err != nil {
 		if ctx.Err() != nil || j.cancelRequested() {
-			return ermite.CiConclusion_CI_CONCLUSION_CANCELLED, nil, j.isStopping()
+			return outcome{conclusion: ermite.CiConclusion_CI_CONCLUSION_CANCELLED, shutdown: j.isStopping()}
 		}
-		return fail("The sandbox did not start: %v", err)
+		j.failEarly(fmt.Sprintf("The sandbox did not start: %v", err))
+		return failure()
 	}
 	defer func() { _ = conn.Close() }()
 
@@ -590,6 +590,42 @@ func (j *jobRun) execute(ctx context.Context, rt *Runner, stopHard <-chan struct
 		}
 	}()
 
+	exit, err := j.drive(conn, rt)
+	return j.outcomeOf(ctx, exit, err)
+}
+
+// stopSandbox destroys the sandbox; a cleanup that left something behind stops
+// the runner from taking jobs until it is reaped.
+func (j *jobRun) stopSandbox(ctx context.Context, rt *Runner, sb sandbox.Sandbox) {
+	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), j.t.StopDeadline)
+	defer cancel()
+	if err := sb.Stop(sctx); err != nil {
+		j.log.Error().Err(err).Msg("stopping the sandbox")
+		if errors.Is(err, sandbox.ErrLeaked) {
+			rt.markLeaked()
+		}
+	}
+}
+
+// startSandbox starts the sandbox; the start is bounded by the job context and
+// by the hard stop.
+func (j *jobRun) startSandbox(ctx context.Context, rt *Runner, sb sandbox.Sandbox, stopHard <-chan struct{}) (sandbox.Conn, error) {
+	startCtx, cancelStart := context.WithCancel(ctx)
+	defer cancelStart()
+	stopWatch := make(chan struct{})
+	defer close(stopWatch)
+	go func() {
+		select {
+		case <-stopHard:
+			cancelStart()
+		case <-stopWatch:
+		}
+	}()
+	return sb.Start(startCtx, rt.spec(j.job))
+}
+
+// drive sends the job to the executor and handles its frames until it exits.
+func (j *jobRun) drive(conn sandbox.Conn, rt *Runner) (*execpb.Exit, error) {
 	run := &execpb.Run{Job: &execpb.JobSpec{
 		WorkflowPath: j.job.WorkflowPath, WorkflowYaml: j.job.WorkflowYaml, JobKey: j.job.JobKey,
 		Matrix: j.job.Matrix, Contexts: j.job.Contexts, Repo: j.job.Repo, TimeoutMinutes: int32(j.timeoutMinutes()),
@@ -601,6 +637,12 @@ func (j *jobRun) execute(ctx context.Context, rt *Runner, stopHard <-chan struct
 		Log:       j.logLine,
 		JobResult: func(r *execpb.JobResult) { j.mu.Lock(); j.result = r; j.mu.Unlock() },
 	})
+	return exit, err
+}
+
+// outcomeOf decides how the job ended from what the executor reported and what
+// the host asked of it.
+func (j *jobRun) outcomeOf(ctx context.Context, exit *execpb.Exit, driveErr error) outcome {
 	j.mu.Lock()
 	res := j.result
 	j.mu.Unlock()
@@ -609,7 +651,7 @@ func (j *jobRun) execute(ctx context.Context, rt *Runner, stopHard <-chan struct
 	case j.violated():
 		// The step numbers or lines of the executor were wrong: whatever it
 		// reported is not trusted, the job fails (the reason is in the log).
-		return ermite.CiConclusion_CI_CONCLUSION_FAILURE, nil, false
+		return failure()
 	case res != nil:
 		c := conclusionOf(res.Conclusion)
 		if c == ermite.CiConclusion_CI_CONCLUSION_UNSPECIFIED || c == ermite.CiConclusion_CI_CONCLUSION_SKIPPED {
@@ -618,27 +660,27 @@ func (j *jobRun) execute(ctx context.Context, rt *Runner, stopHard <-chan struct
 		if res.Error != "" {
 			j.log.Info().Str("error", res.Error).Msg("the job reported an error")
 		}
-		return c, res.Outputs, res.RunnerShutdown && c == ermite.CiConclusion_CI_CONCLUSION_CANCELLED
+		return outcome{conclusion: c, outputs: res.Outputs, shutdown: res.RunnerShutdown && c == ermite.CiConclusion_CI_CONCLUSION_CANCELLED}
 	case j.cancelRequested() || ctx.Err() != nil:
 		// The executor did not report: it was stopped. A timeout wins over a
 		// shutdown or a user cancel that came later, as on the server (the first
 		// reason decides, and the timeout is the first when it fired first).
 		switch {
 		case j.firstCancelKind() == execpb.CancelKind_CANCEL_KIND_TIMEOUT:
-			return ermite.CiConclusion_CI_CONCLUSION_TIMED_OUT, nil, false
+			return outcome{conclusion: ermite.CiConclusion_CI_CONCLUSION_TIMED_OUT}
 		case j.isStopping():
-			return ermite.CiConclusion_CI_CONCLUSION_CANCELLED, nil, true
+			return outcome{conclusion: ermite.CiConclusion_CI_CONCLUSION_CANCELLED, shutdown: true}
 		}
-		return ermite.CiConclusion_CI_CONCLUSION_CANCELLED, nil, false
+		return outcome{conclusion: ermite.CiConclusion_CI_CONCLUSION_CANCELLED}
 	}
 	why := "the executor ended without a result"
-	if err != nil {
-		why = err.Error()
+	if driveErr != nil {
+		why = driveErr.Error()
 	} else if exit != nil && exit.Error != "" {
 		why = exit.Error
 	}
 	j.sandboxError(fmt.Sprintf("The job's sandbox ended unexpectedly: %s", why))
-	return ermite.CiConclusion_CI_CONCLUSION_FAILURE, nil, false
+	return failure()
 }
 
 // timeoutMinutes is the job timeout: at least 1, 360 when the job has none
