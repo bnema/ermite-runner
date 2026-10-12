@@ -47,7 +47,7 @@ func (d *Driver) Reap(ctx context.Context) error {
 		}
 		killed[pid] = true
 		log.Warn().Int("pid", pid).Str("vm", id).Msg("reaping leftover VMM process")
-		if !d.opt.kill(pid, 5*time.Second) {
+		if !d.opt.kill(pid, func() bool { return cmdlineID(d.opt.ProcDir, pid, d.scope()) == id }, 5*time.Second) {
 			errs = append(errs, fmt.Errorf("vmm process %d (%s) did not exit", pid, id))
 		}
 	}

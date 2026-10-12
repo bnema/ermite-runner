@@ -53,7 +53,7 @@ type Options struct {
 	// FreeSpace overrides statfs for the free-space warning (tests).
 	FreeSpace func(string) (int64, error)
 	// kill overrides killAndWait (tests simulate a VMM that cannot be killed).
-	kill func(pid int, timeout time.Duration) bool
+	kill func(pid int, still func() bool, timeout time.Duration) bool
 }
 
 // vmmOverheadMiB is what the Firecracker process itself may use on top of the
@@ -640,6 +640,12 @@ func (s *vmSandbox) vmmPIDs() []int {
 	return out
 }
 
+// stillMine is the identity check handed to the kill: pid still carries this
+// VM's id and passes the scope (command line and root).
+func (s *vmSandbox) stillMine(pid int) func() bool {
+	return func() bool { return cmdlineID(s.d.opt.ProcDir, pid, s.d.scope()) == s.id }
+}
+
 // cleanupLocked removes everything the VM created, in dependency order. Steps
 // that need the VMM to be dead (network device, firewall rules, files, cgroup)
 // are skipped when it could not be killed: removing the TAP or the policy under
@@ -659,11 +665,11 @@ func (s *vmSandbox) cleanupLocked(ctx context.Context) error {
 		s.listener = nil
 	}
 	dead := true
-	if s.cmd != nil && s.cmd.Process != nil {
-		_ = syscall.Kill(-s.cmd.Process.Pid, syscall.SIGKILL) // the whole group
-	}
+	// No kill(-pgid) of the launched command: once it has been waited for, its
+	// pid (and so its group id) may belong to anyone. Every process of this VM is
+	// found by the scan (id, markers and scope) and killed through a pidfd.
 	for _, pid := range s.vmmPIDs() {
-		if !d.opt.kill(pid, 5*time.Second) {
+		if !d.opt.kill(pid, s.stillMine(pid), 5*time.Second) {
 			dead = false
 			errs = append(errs, fmt.Errorf("vmm process %d did not exit", pid))
 		}

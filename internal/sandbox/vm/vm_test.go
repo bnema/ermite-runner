@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/bnema/zerowrap"
+	"golang.org/x/sys/unix"
 
 	"bnema.dev/ermite-runner/internal/cmdrun"
 	"bnema.dev/ermite-runner/internal/execstream"
@@ -765,11 +766,11 @@ func TestStopKeepsNetworkWhenTheVMMSurvives(t *testing.T) {
 	e := newEnv(t, "")
 	stubborn := true
 	d, err := New(context.Background(), e.cfg, Options{Run: e.run, Net: e.plumb, BootTimeout: 5 * time.Second,
-		kill: func(pid int, to time.Duration) bool {
+		kill: func(pid int, still func() bool, to time.Duration) bool {
 			if stubborn {
 				return false
 			}
-			return killAndWait(pid, to)
+			return killAndWait(pid, still, to)
 		}})
 	if err != nil {
 		t.Fatal(err)
@@ -1230,5 +1231,79 @@ func TestScanIsScopedToOurJailBase(t *testing.T) {
 	}
 	if cmdlineID(proc, 101, sc) != "" || cmdlineID(proc, 100, sc) != "er00112233" {
 		t.Fatal("cmdlineID must apply the same scope")
+	}
+}
+
+// GO-001 (pid reuse): the kill goes through a pidfd, after the identity check.
+func startSleeper(t *testing.T) *exec.Cmd {
+	t.Helper()
+	c := exec.Command("sleep", "60")
+	if err := c.Start(); err != nil {
+		t.Skipf("cannot start sleep: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Process.Kill(); _ = c.Wait() })
+	return c
+}
+
+func needPidfd(t *testing.T) {
+	t.Helper()
+	fd, err := unix.PidfdOpen(os.Getpid(), 0)
+	if err != nil {
+		t.Skipf("no pidfd on this kernel: %v", err)
+	}
+	_ = unix.Close(fd)
+}
+
+func TestKillAndWaitKillsThroughThePidfd(t *testing.T) {
+	needPidfd(t)
+	c := startSleeper(t)
+	asked := false
+	if !killAndWait(c.Process.Pid, func() bool { asked = true; return true }, 5*time.Second) {
+		t.Fatal("the process is still there")
+	}
+	if !asked {
+		t.Fatal("the identity check did not run")
+	}
+	// The child is a zombie now (we have not waited for it): it must count as gone.
+	if _, err := c.Process.Wait(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestKillAndWaitDoesNotKillAMismatchAfterTheOpen(t *testing.T) {
+	needPidfd(t)
+	c := startSleeper(t)
+	// The pid now belongs to something that is not the VMM we meant (what a
+	// recycled pid looks like): no signal, and "gone" (the VMM we meant is).
+	if !killAndWait(c.Process.Pid, func() bool { return false }, 2*time.Second) {
+		t.Fatal("a mismatch means the intended process is gone: true expected")
+	}
+	if !pidAlive(c.Process.Pid) {
+		t.Fatal("a process that failed the identity check was killed")
+	}
+}
+
+func TestKillAndWaitOnAProcessThatIsAlreadyGone(t *testing.T) {
+	needPidfd(t)
+	c := exec.Command("true")
+	if err := c.Run(); err != nil {
+		t.Skip(err)
+	}
+	called := false
+	if !killAndWait(c.Process.Pid, func() bool { called = true; return true }, time.Second) {
+		t.Fatal("a reaped process must count as gone")
+	}
+	_ = called
+}
+
+func TestKillAndWaitReportsAProcessThatStays(t *testing.T) {
+	needPidfd(t)
+	// pid 1 cannot be killed by us in a test (and must never be: the identity
+	// check says it is ours here only to show the failure path would not hang).
+	if os.Geteuid() == 0 {
+		t.Skip("root could signal pid 1")
+	}
+	if killAndWait(1, func() bool { return true }, 200*time.Millisecond) {
+		t.Fatal("an unkillable process was reported gone")
 	}
 }

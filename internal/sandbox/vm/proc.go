@@ -4,6 +4,7 @@ package vm
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -12,6 +13,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 
 	"bnema.dev/ermite-runner/internal/sandbox"
 )
@@ -253,18 +256,57 @@ func (r *ring) String() string {
 	return string(bytes.TrimSpace(r.buf))
 }
 
-// killAndWait sends SIGKILL to pid and waits until it is gone (or a zombie that
-// its parent will reap). It reports whether the process is gone.
-func killAndWait(pid int, timeout time.Duration) bool {
-	_ = syscall.Kill(pid, syscall.SIGKILL)
+// killAndWait kills the process that was identified as pid, through a pidfd, and
+// waits for it to exit. It reports whether that process is gone.
+//
+// A pid read from /proc a moment ago may belong to another process by now (the
+// VMM exited and the number was recycled). The pidfd pins the process; then
+// still() re-runs the identity check (command line and root scope) on the pid,
+// and only if the pidfd is still not readable (the process had not exited at
+// that point, so the pid could not have been recycled while still() read it) the
+// signal goes out through the pidfd, which can only reach that process. A
+// mismatch means the process we meant is gone: nothing is signalled and true is
+// returned. Where pidfds are not available the process is not touched and false
+// is returned (the sandbox is then reported as leaked, never killed blindly).
+func killAndWait(pid int, still func() bool, timeout time.Duration) bool {
+	fd, err := unix.PidfdOpen(pid, 0)
+	if err != nil {
+		return errors.Is(err, unix.ESRCH) // no such process: gone
+	}
+	defer func() { _ = unix.Close(fd) }()
+	ours := still()
+	if exited, _ := pidfdWait(fd, 0); exited {
+		return true // it exited before or while we checked: nothing to kill
+	}
+	if !ours {
+		return true // alive, but not the process we meant
+	}
+	if err := unix.PidfdSendSignal(fd, unix.SIGKILL, nil, 0); err != nil && !errors.Is(err, unix.ESRCH) {
+		return false
+	}
+	exited, _ := pidfdWait(fd, timeout)
+	return exited
+}
+
+// pidfdWait waits up to timeout for the process behind fd to exit (a pidfd is
+// readable once it has, zombie included).
+func pidfdWait(fd int, timeout time.Duration) (bool, error) {
 	deadline := time.Now().Add(timeout)
 	for {
-		if !pidAlive(pid) {
-			return true
+		left := time.Until(deadline)
+		if left < 0 {
+			left = 0
 		}
-		if time.Now().After(deadline) {
-			return false
+		fds := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
+		n, err := unix.Poll(fds, int(left.Milliseconds()))
+		switch {
+		case errors.Is(err, unix.EINTR):
+			continue
+		case err != nil:
+			return false, err
+		case n > 0:
+			return true, nil
 		}
-		time.Sleep(20 * time.Millisecond)
+		return false, nil
 	}
 }
