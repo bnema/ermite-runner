@@ -38,7 +38,6 @@ TimeoutStopSec=120
 StateDirectory=ermite-runner
 StateDirectoryMode=0700
 RuntimeDirectory=ermite-runner
-UMask=0077
 
 # Jobs are many processes.
 TasksMax=infinity
@@ -96,3 +95,9 @@ WantedBy=multi-user.target
 #                     boundary of a job is the micro-VM or the container, not
 #                     this unit.
 # ProtectControlGroups=  The jailer writes the cgroups of the VMs.
+# UMask=0077          The state directory is made 0700 by the runner itself, and the
+#                     drivers create directories that the job's user must be able
+#                     to enter (the scratch disk's work and tmp directories are
+#                     made with mode 0755): a restrictive umask would turn them
+#                     into root-only directories, which cannot be tested without
+#                     a rootful host.

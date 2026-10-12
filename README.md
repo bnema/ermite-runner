@@ -158,7 +158,7 @@ loop mounts, the jailer, Docker), so the unit only takes away what it does not
 use: `NoNewPrivileges`, `ProtectHome`, `PrivateTmp`, `ProtectClock`,
 `ProtectKernelModules`, `ProtectKernelLogs`, `RestrictSUIDSGID`,
 `LockPersonality`, `RestrictRealtime`, `SystemCallArchitectures=native`,
-`RestrictAddressFamilies` (UNIX, INET, INET6, NETLINK, VSOCK) and `UMask=0077`.
+`RestrictAddressFamilies` (UNIX, INET, INET6, NETLINK, VSOCK).
 Checked on a workstation (a user manager, no root): the micro-VM job test
 (`TestVMRunsAJob`: user and network namespaces, Firecracker, TAP, vsock) passes
 under every option above except `ProtectHome`, which hides the home directory
@@ -173,7 +173,8 @@ runner turns on `net.ipv4.ip_forward`), `PrivateDevices=` (`/dev/kvm`,
 `CapabilityBoundingSet=` and `SystemCallFilter=` (network namespaces and
 devices, mounts, capabilities handed to the jailer and Docker),
 `MemoryDenyWriteExecute=` (Firecracker maps guest memory writable and
-executable). The boundary of a job is its micro-VM or container, not this unit;
+executable), `UMask=` (the drivers create directories that the job's user must
+enter, with explicit modes; the state directory is made 0700 by the runner). The boundary of a job is its micro-VM or container, not this unit;
 the unit cannot be tested end to end without a rootful host, so the options that
 would only break it silently are left out.
 
