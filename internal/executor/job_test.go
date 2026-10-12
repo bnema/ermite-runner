@@ -696,19 +696,56 @@ func TestSetUpJobSelfHostedNamesTheRunner(t *testing.T) {
 	}
 }
 
-// Permissions the workflow sets are not the default ones: no group is printed
-// rather than a wrong one.
-func TestSetUpJobWithPermissionsPrintsNoDefaultGroup(t *testing.T) {
+// The GITHUB_TOKEN Permissions group follows the effective permissions of the
+// job (the job's replace the workflow's), as recorded on github.com
+// (recordings/permissions-display.json).
+func TestSetUpJobPrintsTheTokenPermissionsGitHubGrants(t *testing.T) {
 	needTools(t, "bash")
-	for name, yaml := range map[string]string{
-		"workflow": "permissions:\n  contents: write\n" + wfHead + "    steps:\n      - run: echo hi\n",
-		"job":      wfHead + "    permissions: read-all\n    steps:\n      - run: echo hi\n",
-		"empty":    "permissions: {}\n" + wfHead + "    steps:\n      - run: echo hi\n",
-		"write":    "permissions: write-all\n" + wfHead + "    steps:\n      - run: echo hi\n",
+	steps := "    steps:\n      - run: echo hi\n"
+	for _, tc := range []struct {
+		name, yaml, want string
+	}{
+		{"no key", wfHead + steps, "Contents: read\nMetadata: read\nPackages: read"},
+		{"workflow {}", "permissions: {}\n" + wfHead + steps, "Metadata: read"},
+		{"job {}", "permissions: write-all\n" + wfHead + "    permissions: {}\n" + steps, "Metadata: read"},
+		{"workflow map", "permissions:\n  packages: read\n  contents: write\n" + wfHead + steps,
+			"Contents: write\nMetadata: read\nPackages: read"},
+		{"none and id-token are not listed", wfHead + "    permissions:\n      issues: none\n      id-token: write\n      checks: read\n" + steps,
+			"Checks: read\nMetadata: read"},
+		{"job replaces workflow", "permissions:\n  contents: write\n  issues: write\n" + wfHead + "    permissions:\n      pull-requests: read\n" + steps,
+			"Metadata: read\nPullRequests: read"},
+		{"job read-all over workflow map", "permissions:\n  contents: write\n" + wfHead + "    permissions: read-all\n" + steps, "read-all"},
+		{"workflow write-all, job narrows", "permissions: write-all\n" + wfHead + "    permissions:\n      contents: read\n" + steps,
+			"Contents: read\nMetadata: read"},
+		{"write-all", "permissions: write-all\n" + wfHead + steps, "write-all"},
+		{"metadata is not asked for", wfHead + "    permissions:\n      copilot-requests: write\n      security-events: read\n      pull-requests: write\n" + steps,
+			"CopilotRequests: write\nMetadata: read\nPullRequests: write\nSecurityEvents: read"},
 	} {
-		got := setupLog(t, yaml, "j", nil)
-		if strings.Contains(got, "GITHUB_TOKEN Permissions") || !strings.Contains(got, "Secret source: Actions\nCache mode: write") {
-			t.Errorf("%s:\n%s", name, got)
+		got := setupLog(t, tc.yaml, "j", nil)
+		start := strings.Index(got, "##[group]GITHUB_TOKEN Permissions\n")
+		end := strings.Index(got, "\n##[endgroup]")
+		if start < 0 || end < 0 || !strings.Contains(got, "##[endgroup]\nSecret source: Actions\nCache mode: write") {
+			t.Errorf("%s:\n%s", tc.name, got)
+			continue
+		}
+		have := strings.Split(got[start+len("##[group]GITHUB_TOKEN Permissions\n"):end], "\n")
+		switch tc.want {
+		case "read-all":
+			if len(have) != 19 || have[0] != "Actions: read" || strings.Contains(strings.Join(have, ","), "write") || strings.Contains(strings.Join(have, ","), "CopilotRequests") {
+				t.Errorf("%s: %v", tc.name, have)
+			}
+		case "write-all":
+			// recordings: p-write-all
+			wantAll := "Actions: write,ArtifactMetadata: write,Attestations: write,Checks: write,CodeQuality: write,Contents: write,CopilotRequests: write," +
+				"Deployments: write,Discussions: write,Drives: write,Issues: write,Metadata: read,Models: read,Packages: write,Pages: write,PullRequests: write," +
+				"RepositoryProjects: write,SecurityEvents: write,Statuses: write,VulnerabilityAlerts: read"
+			if strings.Join(have, ",") != wantAll {
+				t.Errorf("%s: %v", tc.name, have)
+			}
+		default:
+			if strings.Join(have, "\n") != tc.want {
+				t.Errorf("%s:\ngot  %v\nwant %q", tc.name, have, tc.want)
+			}
 		}
 	}
 }

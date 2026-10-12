@@ -580,37 +580,20 @@ const (
 	defaultCacheMode    = "write"
 )
 
-// defaultTokenPermissions is the GITHUB_TOKEN of a workflow without a
-// "permissions" key, as recorded (JobExtension.cs:157-166 prints the
-// permissions in the order of the server's JSON).
-var defaultTokenPermissions = [][2]string{{"Contents", "read"}, {"Metadata", "read"}, {"Packages", "read"}}
-
 // printTokenInfo prints the GITHUB_TOKEN permissions group, the secret source
 // and the cache mode.
 //
-// Without a "permissions" key the group is the recorded default. With one
-// (including {} and read-all/write-all) the group is omitted, on purpose: the
-// runner only prints what the server gives it (system.github.token.permissions,
-// a JSON object, JobExtension.cs:154-166), and the sources at hand do not say
-// what the server gives for those cases: the display names of the scopes
-// ("Pull requests" or "PullRequests", "Id-token" or "IdToken"), their order, the
-// levels the server grants on a push (Metadata is always read; write-all and
-// id-token depend on the repository's policy, the Permissions class of the
-// runner only models the workflow side, Sdk/WorkflowParser/Permissions.cs and
-// Conversion/PermissionsHelper.cs) and whether "none" scopes are listed. Only
-// the default is in the recordings (221 of 221 jobs; no corpus scenario sets
-// permissions). A group made up from the workflow would be a guess; add the
-// mapping once a recording of a scenario with permissions exists. The
-// complete fix is the server sending the effective permissions in the Job
-// message.
+// GitHub's runner prints what the server sends as
+// system.github.token.permissions (JobExtension.cs:154-166); ermite's Job
+// message does not carry it, so the group is worked out from the workflow
+// with the rules recorded on github.com (tokenPermissionLines). It is always
+// printed: Metadata is listed even for "permissions: {}".
 func (j *job) printTokenInfo() {
-	if j.wf.Permissions == nil && j.jb.Permissions == nil {
-		j.out(1, "##[group]GITHUB_TOKEN Permissions")
-		for _, p := range defaultTokenPermissions {
-			j.out(1, p[0]+": "+p[1])
-		}
-		j.out(1, "##[endgroup]")
+	j.out(1, "##[group]GITHUB_TOKEN Permissions")
+	for _, p := range tokenPermissionLines(j.wf, j.jb) {
+		j.out(1, p.name+": "+p.level)
 	}
+	j.out(1, "##[endgroup]")
 	// secret_source is a github context key (JobExtension.cs:172); the context
 	// of a job from ermite lacks it, so it is added with the recorded value.
 	src := j.state.GitHub("secret_source")

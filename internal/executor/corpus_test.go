@@ -24,10 +24,19 @@ import (
 
 func conformanceDir(t *testing.T) string {
 	t.Helper()
+	return conformanceDirFor(t, "")
+}
+
+// conformanceDirFor is conformanceDir for a checkout that has the recording of
+// scenario (any checkout with a corpus when scenario is empty): the scenario
+// may be on a branch that is not merged yet.
+func conformanceDirFor(t *testing.T, scenario string) string {
+	t.Helper()
 	cands := []string{os.Getenv("ERMITE_CONFORMANCE_DIR")}
 	wd, _ := os.Getwd()
 	for d := wd; d != "/" && d != "."; d = filepath.Dir(d) {
 		cands = append(cands,
+			filepath.Join(d, "ermite-conformance", ".worktrees", "permissions"),
 			filepath.Join(d, "ermite-conformance", ".worktrees", "corpus"),
 			filepath.Join(d, "ermite-conformance"))
 	}
@@ -35,9 +44,15 @@ func conformanceDir(t *testing.T) string {
 		if c == "" {
 			continue
 		}
-		if st, err := os.Stat(filepath.Join(c, "corpus")); err == nil && st.IsDir() {
-			return c
+		if st, err := os.Stat(filepath.Join(c, "corpus")); err != nil || !st.IsDir() {
+			continue
 		}
+		if scenario != "" {
+			if _, err := os.Stat(filepath.Join(c, "recordings", scenario+".json")); err != nil {
+				continue
+			}
+		}
+		return c
 	}
 	t.Skip("ermite-conformance checkout not found (set ERMITE_CONFORMANCE_DIR)")
 	return ""
@@ -163,6 +178,7 @@ func readFile(t *testing.T, p string) string {
 type recording struct {
 	Pushes []struct {
 		Runs []struct {
+			Workflow   string `json:"workflow"`
 			Conclusion string `json:"conclusion"`
 			Jobs       []struct {
 				Name       string `json:"name"`
@@ -323,4 +339,57 @@ func TestCorpusStatusInEnvIsRejected(t *testing.T) {
 	if res.Conclusion != ConclusionFailure || !strings.Contains(res.Error, "The workflow is not valid") || len(rec.steps) != 1 {
 		t.Fatalf("%+v %v", res, rec.names())
 	}
+}
+
+// TestCorpusPermissionsDisplay runs every job of every workflow of the
+// permissions-display scenario and compares the GITHUB_TOKEN Permissions group
+// of Set up job with the recording. The scenario has one workflow file per
+// case, so compareWithRecording does not apply. Workflows GitHub rejects have
+// no jobs in the recording and are not run.
+func TestCorpusPermissionsDisplay(t *testing.T) {
+	needTools(t, "bash")
+	dir := conformanceDirFor(t, "permissions-display")
+	var rec recording
+	if err := json.Unmarshal([]byte(readFile(t, filepath.Join(dir, "recordings", "permissions-display.json"))), &rec); err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, run := range rec.Pushes[0].Runs {
+		if len(run.Jobs) == 0 {
+			continue
+		}
+		file := run.Workflow
+		yaml := readFile(t, filepath.Join(dir, "corpus", "permissions-display", "tree", filepath.FromSlash(file)))
+		for _, jr := range run.Jobs {
+			t.Run(strings.TrimSuffix(filepath.Base(file), ".yml")+"/"+jr.Name, func(t *testing.T) {
+				want := permissionsGroup(jr.Steps[0].Log)
+				if want == nil {
+					t.Fatalf("no group in the recording: %v", jr.Steps[0].Log)
+				}
+				got, _ := runLocal(t, yaml, jr.Name, nil)
+				if have := permissionsGroup(got.steps[0].Log); strings.Join(have, "\n") != strings.Join(want, "\n") {
+					t.Errorf("got\n%s\nwant\n%s", strings.Join(have, "\n"), strings.Join(want, "\n"))
+				}
+			})
+			n++
+		}
+	}
+	if n < 20 {
+		t.Fatalf("only %d jobs in the recording", n)
+	}
+}
+
+// permissionsGroup returns the lines of the GITHUB_TOKEN Permissions group.
+func permissionsGroup(log []string) []string {
+	for i, l := range log {
+		if l != "##[group]GITHUB_TOKEN Permissions" {
+			continue
+		}
+		for k := i + 1; k < len(log); k++ {
+			if log[k] == "##[endgroup]" {
+				return log[i+1 : k]
+			}
+		}
+	}
+	return nil
 }
