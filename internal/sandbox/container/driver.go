@@ -163,12 +163,21 @@ func New(ctx context.Context, cfg sandbox.Config, opt Options) (*Driver, error) 
 	}
 	d.net = opt.Net
 	if d.net == nil {
-		d.net = netsetup.New(opt.Run, cfg.DNSPort, "")
+		d.net = newNet(opt.Run, cfg.DNSPort, info.Podman)
 	}
 	if err := d.net.EnableForwarding(); err != nil {
 		return fail(err)
 	}
 	return d, nil
+}
+
+// newNet builds the host network plumbing. Only podman creates the bridge
+// address late (see daemonInfo.Podman), so only there the DNS listener may come
+// before the address; on Docker a missing gateway address stays a startup error.
+func newNet(run cmdrun.Runner, dnsPort int, podman bool) *netsetup.Net {
+	n := netsetup.New(run, dnsPort, "")
+	n.DNS.FreeBind = podman
+	return n
 }
 
 // maxSockPath is the longest Unix socket path Linux accepts (108 with the NUL).

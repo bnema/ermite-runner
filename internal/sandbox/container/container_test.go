@@ -1010,3 +1010,14 @@ func TestSocketPathTooLongIsExplained(t *testing.T) {
 		t.Fatalf("leftovers: %v", left)
 	}
 }
+
+// GO-002: only a podman daemon gets a DNS listener that may precede the gateway
+// address; Docker keeps a normal bind.
+func TestOnlyPodmanGetsAFreeBindDNSListener(t *testing.T) {
+	if newNet(nil, 0, false).DNS.FreeBind {
+		t.Fatal("Docker must keep a normal bind")
+	}
+	if !newNet(nil, 0, true).DNS.FreeBind {
+		t.Fatal("podman needs the listener before the bridge address")
+	}
+}

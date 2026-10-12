@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/netip"
+	"strings"
 
 	cerrdefs "github.com/containerd/errdefs"
 	"github.com/moby/moby/api/types/container"
@@ -47,6 +48,9 @@ type daemonInfo struct {
 	Rootless bool
 	Runtimes []string
 	OSType   string
+	// Podman: the "Docker API" is podman's compatibility service, whose netavark
+	// configures a bridge address only when the first container starts.
+	Podman bool
 }
 
 type networkSpec struct {
@@ -107,6 +111,14 @@ func (e *dockerEngine) Info(ctx context.Context) (daemonInfo, error) {
 	}
 	for name := range r.Info.Runtimes {
 		di.Runtimes = append(di.Runtimes, name)
+	}
+	// Best effort: a daemon that cannot say what it is is treated as Docker.
+	if v, err := e.cli.ServerVersion(ctx, client.ServerVersionOptions{}); err == nil {
+		for _, c := range v.Components {
+			if strings.HasPrefix(c.Name, "Podman") {
+				di.Podman = true
+			}
+		}
 	}
 	return di, nil
 }

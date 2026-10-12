@@ -441,15 +441,26 @@ func TestUDPSaturationDropsAndIsolatesListeners(t *testing.T) {
 	}
 }
 
-// The gateway address can be configured after the listener starts (podman's
-// netavark creates the bridge address only when the first container starts):
-// Listen must bind an address the host does not own yet (IP_FREEBIND).
-func TestListenOnAnAddressTheHostDoesNotOwnYet(t *testing.T) {
+// By default Listen fails fast on an address the host does not own (Docker and
+// the VM driver have configured it by then: a missing one is an error).
+func TestListenOnAMissingAddressFailsByDefault(t *testing.T) {
 	f := New(func() []string { return nil }, 0)
 	t.Cleanup(f.CloseAll)
 	ip := netip.MustParseAddr("203.0.113.77") // TEST-NET-3: never configured here
+	if err := f.Listen(context.Background(), ip); err == nil {
+		t.Fatal("listening on an address the host does not own must fail without FreeBind")
+	}
+}
+
+// With FreeBind (podman's netavark creates the bridge address only when the
+// first container starts) Listen binds an address the host does not own yet.
+func TestFreeBindListensOnAnAddressTheHostDoesNotOwnYet(t *testing.T) {
+	f := New(func() []string { return nil }, 0)
+	f.FreeBind = true
+	t.Cleanup(f.CloseAll)
+	ip := netip.MustParseAddr("203.0.113.77")
 	if err := f.Listen(context.Background(), ip); err != nil {
-		t.Fatalf("listen on a not-yet-configured address: %v", err)
+		t.Fatalf("FreeBind: %v", err)
 	}
 	if _, ok := f.Addr(ip); !ok {
 		t.Fatal("no listener")
