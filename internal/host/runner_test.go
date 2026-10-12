@@ -9,6 +9,9 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1171,5 +1174,75 @@ func TestSandboxSizesAreLeftToTheDriversConfiguration(t *testing.T) {
 	}
 	if got := cfg.Resolve(h.driver.specs[0]); got.CPUs != 3 || got.MemoryMiB != 2048 || got.DiskMiB != 10240 {
 		t.Fatalf("%+v", got)
+	}
+}
+
+// ---- M5: shutdown
+
+// A job whose acknowledgement is pending when the runner shuts down is left to
+// the server (it requeues it after 30 s): the sandbox is never started, no
+// result is reported, and Run returns promptly.
+func TestShutdownBeforeTheAcknowledgementLeavesTheJobToTheServer(t *testing.T) {
+	h := newHarness(t, simpleScript("x"))
+	h.srv.jobs = []*ermite.Job{testJob("j1")}
+	h.srv.beatHook = func(int) error { return connect.NewError(connect.CodeUnavailable, io.EOF) } // never acknowledged
+	stop := h.run(t)
+	eventually(t, "a failed acknowledgement", func() bool { h.srv.mu.Lock(); defer h.srv.mu.Unlock(); return len(h.srv.beats) >= 2 })
+	start := time.Now()
+	if err := stop(); err != nil {
+		t.Fatal(err)
+	}
+	if time.Since(start) > 3*time.Second {
+		t.Fatalf("Run took %v to return", time.Since(start))
+	}
+	h.driver.mu.Lock()
+	defer h.driver.mu.Unlock()
+	if h.driver.news != 0 || h.driver.started != 0 {
+		t.Fatalf("a sandbox was created for a job that was never acknowledged: news=%d started=%d", h.driver.news, h.driver.started)
+	}
+	if n := h.srv.completeCount(); n != 0 {
+		t.Fatalf("CompleteJob was called %d times", n)
+	}
+	if !strings.Contains(h.logs.String(), "before the job was acknowledged") {
+		t.Fatalf("no explanation in the log:\n%s", h.logs.String())
+	}
+}
+
+// The graceful shutdown of the defaults fits the time the unit gives.
+func TestShutdownBudgetFitsTheUnit(t *testing.T) {
+	budget := Timing{}.ShutdownBudget()
+	if budget != 90*time.Second {
+		t.Fatalf("the budget is %v, README and contrib/ermite-runner.service say 90 s", budget)
+	}
+	unit, err := os.ReadFile("../../contrib/ermite-runner.service")
+	if err != nil {
+		t.Skip(err)
+	}
+	m := regexp.MustCompile(`(?m)^TimeoutStopSec=(\d+)$`).FindStringSubmatch(string(unit))
+	if m == nil {
+		t.Fatal("no TimeoutStopSec in the unit")
+	}
+	secs, _ := strconv.Atoi(m[1])
+	if time.Duration(secs)*time.Second < budget+15*time.Second {
+		t.Fatalf("TimeoutStopSec=%d does not leave 15 s of margin over the %v budget", secs, budget)
+	}
+}
+
+// ---- m7: the state directory is private
+
+func TestSaveStateMakesAnExistingDirectoryPrivate(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "state")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveState(dir, State{URL: "https://x", RunnerID: "r", Name: "n", RunnerToken: "ermiterun_t"}); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(dir)
+	if err != nil || fi.Mode().Perm() != 0o700 {
+		t.Fatalf("%v %v", fi, err)
+	}
+	if fi, _ := os.Stat(StateFile(dir)); fi.Mode().Perm() != 0o600 {
+		t.Fatalf("%v", fi.Mode())
 	}
 }

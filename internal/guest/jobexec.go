@@ -150,7 +150,11 @@ func runJob(ctx context.Context, conn *execstream.Conn, cfg ExecConfig, spec *ex
 	rep := &frameReporter{conn: conn, failed: make(chan struct{})}
 
 	// Frames from the host while the job runs: a Cancel stops the job; a lost
-	// host does too, like a runner shutdown.
+	// host does too, like a runner shutdown. The reader ends with the stream: the
+	// caller closes it after runJob, and the goroutine that reports a failed
+	// send ends with the job (done).
+	done := make(chan struct{})
+	defer close(done)
 	go func() {
 		for {
 			f, err := conn.Recv()
@@ -172,6 +176,7 @@ func runJob(ctx context.Context, conn *execstream.Conn, cfg ExecConfig, spec *ex
 		case <-rep.failed:
 			canceller.Cancel(executor.CancelShutdown)
 		case <-canceller.Done():
+		case <-done:
 		}
 	}()
 

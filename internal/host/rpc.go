@@ -176,8 +176,15 @@ type Timing struct {
 	// report, before the sandbox is destroyed.
 	TimeoutGrace time.Duration
 	// ShutdownGrace is how long jobs get to stop after a shutdown signal before
-	// their sandbox is destroyed.
+	// their sandbox is destroyed. The executor needs 10 s for its escalation
+	// (SIGINT, SIGTERM after 7.5 s, SIGKILL 2.5 s later) and some for the
+	// post-steps and the report to the host.
 	ShutdownGrace time.Duration
+	// StopDeadline bounds the destruction of a sandbox.
+	StopDeadline time.Duration
+	// ShutdownReport bounds the last flush of the log and CompleteJob of a job
+	// that a shutdown cut short.
+	ShutdownReport time.Duration
 	// CompleteDeadline bounds the flush of logs and CompleteJob at the end of
 	// a job.
 	CompleteDeadline time.Duration
@@ -204,10 +211,22 @@ func (t Timing) withDefaults() Timing {
 	def(&t.WatchRetry, time.Second)
 	def(&t.TimeoutGrace, 30*time.Second)
 	def(&t.ShutdownGrace, 30*time.Second)
+	def(&t.StopDeadline, 30*time.Second)
+	def(&t.ShutdownReport, 30*time.Second)
 	def(&t.CompleteDeadline, 5*time.Minute)
 	def(&t.NoJobPause, 0)
 	def(&t.ReapRetry, 5*time.Second)
 	return t
+}
+
+// ShutdownBudget is the longest a graceful shutdown takes with these timings:
+// the grace for the executor, the destruction of the sandbox, and the report.
+// The jobs shut down in parallel, so it does not depend on their number. The
+// service manager must wait at least this long (contrib/ermite-runner.service
+// has TimeoutStopSec=120 for the defaults, 90 s).
+func (t Timing) ShutdownBudget() time.Duration {
+	t = t.withDefaults()
+	return t.ShutdownGrace + t.StopDeadline + t.ShutdownReport
 }
 
 // sleep waits d or until ctx ends; it reports whether the full delay passed.

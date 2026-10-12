@@ -133,6 +133,12 @@ func SaveState(dir string, s State) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
+	// MkdirAll leaves an existing directory as it is; the directory holds the
+	// runner token, so it is made private (the VM images live in it too, and
+	// the runner runs as root: nobody else needs to enter).
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return fmt.Errorf("make the state directory private: %w", err)
+	}
 	b, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
 		return err

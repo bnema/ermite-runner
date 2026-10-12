@@ -422,9 +422,27 @@ func (j *jobRun) run(rt *Runner, shutdown <-chan struct{}) {
 	defer j.cancel(nil)
 	ctx := j.ctx
 
-	// 1. The acknowledgement comes first, before anything else.
-	if !j.ack(ctx) {
-		j.log.Warn().Msg("the assignment was lost before the job started")
+	// 1. The acknowledgement comes first, before anything else. A shutdown ends
+	// the wait: the job is not started and not acknowledged, and the server
+	// gives it to another runner when no heartbeat comes within 30 s (runner.proto,
+	// FetchJob: this is not a failure of the job).
+	ackCtx, stopAck := context.WithCancel(ctx)
+	go func() {
+		select {
+		case <-shutdown:
+			stopAck()
+		case <-ackCtx.Done():
+		}
+	}()
+	acked := j.ack(ackCtx)
+	stopAck()
+	if !acked {
+		select {
+		case <-shutdown:
+			j.log.Warn().Msg("the runner is shutting down before the job was acknowledged: the server will give it to another runner")
+		default:
+			j.log.Warn().Msg("the assignment was lost before the job started")
+		}
 		return
 	}
 	var bg sync.WaitGroup
@@ -456,22 +474,28 @@ func (j *jobRun) run(rt *Runner, shutdown <-chan struct{}) {
 		j.stopping = true
 		j.cancelMu.Unlock()
 		j.requestCancel("the runner is shutting down", execpb.CancelKind_CANCEL_KIND_SHUTDOWN)
+		timer := time.NewTimer(j.t.ShutdownGrace)
+		defer timer.Stop()
 		select {
-		case <-time.After(j.t.ShutdownGrace):
+		case <-timer.C:
 			hard()
 		case <-ctx.Done():
 		}
 	}()
 	go func() {
+		wait := time.NewTimer(time.Until(j.deadline()))
+		defer wait.Stop()
 		select {
-		case <-time.After(time.Until(j.deadline())):
+		case <-wait.C:
 		case <-ctx.Done():
 			return
 		}
 		j.log.Warn().Int("timeout_minutes", j.timeoutMinutes()).Msg("the job timeout has passed")
 		j.requestCancel("the job timeout has passed", execpb.CancelKind_CANCEL_KIND_TIMEOUT)
+		timer := time.NewTimer(j.t.TimeoutGrace)
+		defer timer.Stop()
 		select {
-		case <-time.After(j.t.TimeoutGrace):
+		case <-timer.C:
 			hard()
 		case <-ctx.Done():
 		}
@@ -486,7 +510,13 @@ func (j *jobRun) run(rt *Runner, shutdown <-chan struct{}) {
 	}
 	// The report is made even when the runner is shutting down: it uses its own
 	// deadline.
-	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), j.t.CompleteDeadline)
+	reportBudget := j.t.CompleteDeadline
+	if j.isStopping() {
+		// The service manager waits only so long (see Timing): the report of a job
+		// cut short by a shutdown gets what is left of the budget.
+		reportBudget = min(reportBudget, j.t.ShutdownReport)
+	}
+	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), reportBudget)
 	defer cancel()
 	// Output limits are checked before the log is flushed: a job whose outputs
 	// the server would refuse fails without outputs, with a line in the log
@@ -515,7 +545,7 @@ func (j *jobRun) execute(ctx context.Context, rt *Runner, stopHard <-chan struct
 	}
 	// Stop runs to completion even when the job context is done.
 	defer func() {
-		sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
+		sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), j.t.StopDeadline)
 		defer cancel()
 		if err := sb.Stop(sctx); err != nil {
 			j.log.Error().Err(err).Msg("stopping the sandbox")
@@ -546,13 +576,18 @@ func (j *jobRun) execute(ctx context.Context, rt *Runner, stopHard <-chan struct
 	}
 	defer func() { _ = conn.Close() }()
 
-	// Hard stops (grace elapsed, or the job was abandoned) close the stream.
+	// Hard stops (grace elapsed, or the job was abandoned) close the stream. The
+	// goroutine ends when this function returns, whatever happens to ctx.
+	sessionDone := make(chan struct{})
+	defer close(sessionDone)
 	go func() {
 		select {
 		case <-stopHard:
+			_ = conn.Close()
 		case <-ctx.Done():
+			_ = conn.Close()
+		case <-sessionDone:
 		}
-		_ = conn.Close()
 	}()
 
 	run := &execpb.Run{Job: &execpb.JobSpec{
