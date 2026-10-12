@@ -5,7 +5,6 @@ package executor
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
 	"sync"
 
@@ -52,7 +51,7 @@ func (s *stepRun) AddPath(p string) {
 // EnvFlag reads a boolean variable of the env context, then of the process
 // (ActionCommandManager.cs:236-246).
 func (s *stepRun) EnvFlag(name string) bool {
-	v := strings.ToLower(os.Getenv(name))
+	v := strings.ToLower(envValue(s.j.baseEnv, name))
 	if v != "true" {
 		if e, ok := s.env.Get(name); ok {
 			v = strings.ToLower(e)

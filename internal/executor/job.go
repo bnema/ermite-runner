@@ -75,7 +75,7 @@ type Config struct {
 	Credential *syscall.Credential
 	// Cancellation timings and test hooks, see procSpec.
 	TermAfter, KillAfter, WaitDelay time.Duration
-	Signal                          func(pgid int, sig syscall.Signal)
+	Signal                          func(pid int, sig syscall.Signal)
 	// Now returns the current time; nil means time.Now.
 	Now func() time.Time
 }

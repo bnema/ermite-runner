@@ -184,7 +184,7 @@ func runJob(ctx context.Context, conn *execstream.Conn, cfg ExecConfig, spec *ex
 		RunnerVersion:  spec.GetRunnerVersion(),
 		Home:           su.Home, ToolCache: os.Getenv("RUNNER_TOOL_CACHE"), BaseEnv: stepEnv(os.Environ(), su), Credential: su.Credential,
 		Debug: spec.GetDebug(), Reporter: rep,
-		TermAfter: cfg.TermAfter, KillAfter: cfg.KillAfter, WaitDelay: cfg.WaitDelay, Signal: cfg.signal,
+		TermAfter: cfg.TermAfter, KillAfter: cfg.KillAfter, WaitDelay: cfg.WaitDelay,
 	})
 	if res.Conclusion == executor.ConclusionSuccess {
 		return 0

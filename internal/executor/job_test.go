@@ -351,10 +351,10 @@ func TestCancelEscalatesToTermAndKill(t *testing.T) {
 		JobKey:       "j", ContextsJSON: testGitHubContext("j"), Layout: &layout, Reporter: rep,
 		BaseEnv:   []string{"PATH=" + envPath(), "HOME=" + home},
 		TermAfter: 250 * time.Millisecond, KillAfter: 250 * time.Millisecond,
-		Signal: func(pgid int, sig syscall.Signal) {
+		Signal: func(pid int, sig syscall.Signal) {
 			got = append(got, sig)
 			times = append(times, time.Since(t0))
-			_ = syscall.Kill(-pgid, sig)
+			_ = syscall.Kill(pid, sig)
 			mu <- struct{}{}
 		},
 	})
@@ -522,5 +522,82 @@ func TestEventJSONIsNeverWrittenThroughALink(t *testing.T) {
 	}
 	if got := logOf(rec.steps[2]); !strings.Contains(got, `"ref": "refs/heads/scn/x/r1"`) {
 		t.Fatalf("the second step does not see a fresh event.json:\n%s", got)
+	}
+}
+
+func TestLineWriterBoundsALineWithoutEnd(t *testing.T) {
+	var got []string
+	w := &lineWriter{fn: func(l string) { got = append(got, l) }}
+	// 2.5 MiB of two-byte characters without a line feed, in odd-sized writes
+	// that cut characters in two.
+	blob := []byte(strings.Repeat("é", (5<<20)/4))
+	for i := 0; i < len(blob); i += 7777 {
+		_, _ = w.Write(blob[i:min(i+7777, len(blob))])
+	}
+	w.Flush()
+	total := 0
+	for _, l := range got {
+		if len(l) > maxLineBytes {
+			t.Fatalf("a line of %d bytes", len(l))
+		}
+		if strings.ContainsRune(l, '\ufffd') {
+			t.Fatal("a character was cut in two")
+		}
+		total += len(l)
+	}
+	if len(got) < 3 || total != len(blob) {
+		t.Fatalf("%d lines, %d bytes of %d", len(got), total, len(blob))
+	}
+}
+
+func TestEnvFlagReadsTheStepEnvironmentNotTheExecutors(t *testing.T) {
+	// ACTIONS_ALLOW_UNSECURE_COMMANDS is read from the environment the steps
+	// get (BaseEnv), not from the process of the executor.
+	t.Setenv("ACTIONS_ALLOW_UNSECURE_COMMANDS", "true")
+	needTools(t, "bash")
+	rec, res := runLocal(t, wfHead+"    steps:\n      - run: echo '::set-env name=X::1'\n", "j", nil)
+	if res.Conclusion != ConclusionFailure || !strings.Contains(logOf(rec.steps[1]), "The `set-env` command is disabled.") {
+		t.Fatalf("%+v\n%s", res, logOf(rec.steps[1]))
+	}
+	rec, res = runLocal(t, wfHead+"    steps:\n      - run: echo '::set-env name=X::1'\n      - run: echo \"X=$X\"\n", "j", func(c *Config) {
+		c.BaseEnv = append(c.BaseEnv, "ACTIONS_ALLOW_UNSECURE_COMMANDS=true")
+	})
+	if res.Conclusion != ConclusionSuccess || !strings.HasSuffix(logOf(rec.steps[2]), "X=1") {
+		t.Fatalf("%+v\n%s", res, logOf(rec.steps[1]))
+	}
+}
+
+// SIGINT goes to the process the step started, like the official runner
+// (ProcessInvoker.SendSignal: kill(_proc.Id, SIGINT)), not to its group: bash
+// is interrupted but the foreground sleep it waits for is not signalled by it.
+func TestCancelSignalsTheShellNotTheGroup(t *testing.T) {
+	needTools(t, "bash")
+	c := NewCanceller()
+	started := make(chan struct{})
+	rec := newRecorder()
+	rep := &signalReporter{recorder: rec, started: started, match: "ready"}
+	go func() { <-started; c.Cancel(CancelUser) }()
+	home := t.TempDir()
+	layout := NewLayout(home, "hello", home+"/tc")
+	marker := filepath.Join(home, "child-survived")
+	var sigs []syscall.Signal
+	res := Run(c, Config{
+		WorkflowYAML: []byte(wfHead + "    steps:\n      - run: |\n          trap 'echo got-int' INT\n          echo ready\n          sleep 1 && touch " + marker + "\n"),
+		JobKey:       "j", ContextsJSON: testGitHubContext("j"), Layout: &layout, Reporter: rep,
+		BaseEnv:   []string{"PATH=" + envPath(), "HOME=" + home},
+		TermAfter: 5 * time.Second, KillAfter: 5 * time.Second,
+		Signal: func(pid int, sig syscall.Signal) {
+			sigs = append(sigs, sig)
+			if err := syscall.Kill(pid, sig); err != nil {
+				t.Error(err)
+			}
+		},
+	})
+	if res.Conclusion != ConclusionCancelled || len(sigs) != 1 || sigs[0] != syscall.SIGINT {
+		t.Fatalf("%+v signals %v", res, sigs)
+	}
+	// bash runs its trap after the foreground child ends: the sleep was not killed.
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("the foreground child was signalled with the shell: %v", err)
 	}
 }

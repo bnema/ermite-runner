@@ -39,6 +39,12 @@ type lineWriter struct {
 	pending bool // the last byte seen was "\r": a following "\n" is part of it
 }
 
+// maxLineBytes bounds what a line may hold before it is emitted unfinished: a
+// step that prints gigabytes without a line feed must not fill the memory of
+// the executor. The official runner reads lines with StreamReader.ReadLine and
+// has no such bound; a line cut here is sent as consecutive lines.
+const maxLineBytes = 1 << 20
+
 func (w *lineWriter) Write(p []byte) (int, error) {
 	n := len(p)
 	for len(p) > 0 {
@@ -51,6 +57,12 @@ func (w *lineWriter) Write(p []byte) (int, error) {
 		}
 		i := bytes.IndexAny(p, "\r\n")
 		if i < 0 {
+			for len(w.buf)+len(p) > maxLineBytes {
+				room := maxLineBytes - len(w.buf)
+				w.buf = append(w.buf, p[:room]...)
+				p = p[room:]
+				w.emitCut()
+			}
 			w.buf = append(w.buf, p...)
 			break
 		}
@@ -60,6 +72,24 @@ func (w *lineWriter) Write(p []byte) (int, error) {
 		p = p[i+1:]
 	}
 	return n, nil
+}
+
+// emitCut emits the buffer without a line end, cutting before an incomplete
+// UTF-8 character so that it is not replaced by U+FFFD.
+func (w *lineWriter) emitCut() {
+	cut := len(w.buf)
+	for back := 1; back <= utf8.UTFMax && back <= len(w.buf); back++ {
+		if utf8.RuneStart(w.buf[len(w.buf)-back]) {
+			if !utf8.FullRune(w.buf[len(w.buf)-back:]) {
+				cut = len(w.buf) - back
+			}
+			break
+		}
+	}
+	rest := append([]byte(nil), w.buf[cut:]...)
+	w.buf = w.buf[:cut]
+	w.emit()
+	w.buf = append(w.buf, rest...)
 }
 
 func (w *lineWriter) emit() {
@@ -173,8 +203,9 @@ type procSpec struct {
 	Cancel <-chan struct{}
 
 	TermAfter, KillAfter, WaitDelay time.Duration
-	// Signal delivers a signal to a process group; tests replace it.
-	Signal func(pgid int, sig syscall.Signal)
+	// Signal delivers a signal to the process the step started (the shell);
+	// tests replace it.
+	Signal func(pid int, sig syscall.Signal)
 }
 
 // procResult is how a process ended.
@@ -199,7 +230,18 @@ func runProcess(spec procSpec) (procResult, error) {
 		spec.WaitDelay = DefaultWaitDelay
 	}
 	if spec.Signal == nil {
-		spec.Signal = func(pgid int, sig syscall.Signal) { _ = syscall.Kill(-pgid, sig) }
+		// Like the official runner, which signals the process it started and
+		// not its group: ProcessInvoker.SendSignal calls kill(_proc.Id, signal)
+		// for SIGINT and SIGTERM (Runner.Sdk/ProcessInvoker.cs:829-833), and the
+		// last resort is Process.Kill() of that process alone (:855-869, which
+		// is named "KillProcessTree" but does not kill the tree). What the shell
+		// started is left to the shell: bash forwards nothing to a foreground
+		// child it waits for, and the children that outlive the step are
+		// killed by "Complete job" (the orphan cleanup, JobExtension.cs:132).
+		// The step is still started in its own process group, so that a signal
+		// sent to the executor's group (init forwarding a SIGTERM) does not reach
+		// it before the executor decides.
+		spec.Signal = func(pid int, sig syscall.Signal) { _ = syscall.Kill(pid, sig) }
 	}
 	cmd := exec.Command(spec.Argv[0], spec.Argv[1:]...)
 	cmd.Dir = spec.Dir
