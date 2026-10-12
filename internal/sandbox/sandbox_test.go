@@ -123,6 +123,7 @@ func TestIDs(t *testing.T) {
 type fakeDriver struct{ mode Mode }
 
 func (f fakeDriver) Mode() Mode               { return f.mode }
+func (f fakeDriver) Isolation() Isolation     { return Isolation(f.mode) }
 func (fakeDriver) New() (Sandbox, error)      { return nil, nil }
 func (fakeDriver) Reap(context.Context) error { return nil }
 func (fakeDriver) Close() error               { return nil }

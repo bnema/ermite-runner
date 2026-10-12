@@ -29,6 +29,13 @@ const (
 	EnvJailer      = "ERMITE_RUNNER_JAILER"
 	EnvJailerMode  = "ERMITE_RUNNER_JAILER_MODE"
 	EnvKernel      = "ERMITE_RUNNER_KERNEL"
+
+	EnvJobPids         = "ERMITE_RUNNER_JOB_PIDS"
+	EnvDenyPrivileged  = "ERMITE_RUNNER_DENY_PRIVILEGED"
+	EnvLockFile        = "ERMITE_RUNNER_LOCK_FILE"
+	EnvJobDiskBW       = "ERMITE_RUNNER_JOB_DISK_BANDWIDTH"
+	EnvJobDiskIOPS     = "ERMITE_RUNNER_JOB_DISK_IOPS"
+	EnvJobNetBandwidth = "ERMITE_RUNNER_JOB_NET_BANDWIDTH"
 )
 
 // Defaults.
@@ -40,6 +47,17 @@ const (
 	DefaultCPUs      = 2
 	DefaultMemoryMiB = 4096
 	DefaultDiskMiB   = 64 * 1024
+	DefaultJobPids   = 32768
+	// DefaultLockFile is the single-instance lock of the host: reaping removes
+	// everything the runner labels as its own, so two runners (even with
+	// different state directories, or one in a container) must never coexist.
+	DefaultLockFile = "/run/ermite-runner.lock"
+	// Rate limits of a micro-VM, generous so that they only stop a runaway job
+	// from starving the host: 400 MiB/s and 20000 IOPS per disk, 1 Gbit/s per
+	// network direction. Zero disables a limit.
+	DefaultDiskBandwidthMiB = 400
+	DefaultDiskIOPS         = 20000
+	DefaultNetMbit          = 1000
 )
 
 // Config is the sandbox part of the runner configuration.
@@ -81,6 +99,17 @@ type Config struct {
 	// DNSPort is the port of the DNS forwarder; 53 in production. Tests that
 	// cannot bind it use another port with no guest.
 	DNSPort int
+
+	// JobPids is the process limit of a job (container PidsLimit, VM pids.max
+	// is derived from the vCPU count and is not affected).
+	JobPids int
+	// DenyPrivileged refuses the container mode when it would have to run
+	// privileged (no sysbox).
+	DenyPrivileged bool
+	// LockFile is the host-wide single-instance lock.
+	LockFile string
+	// Rate limits of micro-VMs; zero disables.
+	DiskBandwidthMiB, DiskIOPS, NetMbit int
 }
 
 // LoadConfig reads the sandbox settings from getenv (os.Getenv in production).
@@ -95,6 +124,12 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 		UIDBase:      DefaultUIDBase,
 		KVMPath:      "/dev/kvm",
 		DNSPort:      53,
+		JobPids:      DefaultJobPids,
+		LockFile:     DefaultLockFile,
+
+		DiskBandwidthMiB: DefaultDiskBandwidthMiB,
+		DiskIOPS:         DefaultDiskIOPS,
+		NetMbit:          DefaultNetMbit,
 	}
 	var err error
 	if v := getenv(EnvIsolation); v != "" {
@@ -143,6 +178,31 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 	}
 	if 1<<(30-c.Network.Bits()) < c.Capacity {
 		return c, fmt.Errorf("%s: %s has fewer /30 subnets than the capacity %d", EnvNetwork, c.Network, c.Capacity)
+	}
+	if c.JobPids, err = intEnv(getenv, EnvJobPids, c.JobPids, 64, 4_194_304); err != nil {
+		return c, err
+	}
+	switch strings.ToLower(strings.TrimSpace(getenv(EnvDenyPrivileged))) {
+	case "", "0", "false", "no":
+	case "1", "true", "yes":
+		c.DenyPrivileged = true
+	default:
+		return c, fmt.Errorf("%s: %q is not 0 or 1", EnvDenyPrivileged, getenv(EnvDenyPrivileged))
+	}
+	if v := getenv(EnvLockFile); v != "" {
+		if !filepath.IsAbs(v) {
+			return c, fmt.Errorf("%s: %q must be an absolute path", EnvLockFile, v)
+		}
+		c.LockFile = v
+	}
+	if c.DiskBandwidthMiB, err = intEnv(getenv, EnvJobDiskBW, c.DiskBandwidthMiB, 0, 1_000_000); err != nil {
+		return c, err
+	}
+	if c.DiskIOPS, err = intEnv(getenv, EnvJobDiskIOPS, c.DiskIOPS, 0, 100_000_000); err != nil {
+		return c, err
+	}
+	if c.NetMbit, err = intEnv(getenv, EnvJobNetBandwidth, c.NetMbit, 0, 1_000_000); err != nil {
+		return c, err
 	}
 	c.Firecracker = getenv(EnvFirecracker)
 	c.Jailer = getenv(EnvJailer)
