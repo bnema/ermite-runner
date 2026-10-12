@@ -437,7 +437,7 @@ func (j *jobRun) run(rt *Runner, shutdown <-chan struct{}) {
 
 	stopHard := j.startStopTimers(ctx, shutdown)
 	out := j.execute(ctx, rt, stopHard)
-	j.report(ctx, out)
+	j.report(ctx, out, shutdown)
 }
 
 // acknowledge sends the first heartbeat, before anything else. A shutdown ends
@@ -516,7 +516,7 @@ func (j *jobRun) startStopTimers(ctx context.Context, shutdown <-chan struct{}) 
 
 // report ends the job towards the server: the log is flushed, then CompleteJob.
 // Nothing is sent to a job that the server has ended.
-func (j *jobRun) report(ctx context.Context, out outcome) {
+func (j *jobRun) report(ctx context.Context, out outcome, shutdown <-chan struct{}) {
 	if err := j.abandoned(); err != nil {
 		j.log.Warn().Err(err).Msg("the server ended the job: no result is reported")
 		return
@@ -524,10 +524,14 @@ func (j *jobRun) report(ctx context.Context, out outcome) {
 	// The report is made even when the runner is shutting down: it uses its own
 	// deadline.
 	budget := j.t.CompleteDeadline
-	if j.isStopping() {
-		// The service manager waits only so long (see Timing): the report of a job
-		// cut short by a shutdown gets what is left of the budget.
+	select {
+	case <-shutdown:
+		// The service manager waits only so long (see Timing): once the runner's
+		// shutdown channel is closed, whatever the job's outcome, the report gets
+		// what is left of the budget. The channel is read here, not the flag set
+		// by the stop timers, which may not have run yet.
 		budget = min(budget, j.t.ShutdownReport)
+	default:
 	}
 	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), budget)
 	defer cancel()
