@@ -43,21 +43,16 @@ RuntimeDirectory=ermite-runner
 TasksMax=infinity
 LimitNOFILE=1048576
 
-# ---- sandboxing that keeps loop mounts, TAP, nftables, KVM and the jailer ----
+# ---- sandboxing that leaves the unit in the host's mount namespace ----------
+# Only options that do not give the unit a mount namespace of its own: in
+# container mode the runner loop-mounts the scratch disk of a job, and the Docker
+# daemon, which lives in the host's namespace, must see that mount to bind it
+# into the container. See the end of the file.
 NoNewPrivileges=yes
-# Nobody else's files, and no interactive logins' data.
-ProtectHome=yes
-# A private /tmp: the runner and the jailer do not share files with the host
-# through it (the sandbox directories live in the state directory).
-PrivateTmp=yes
-# The runner does not set the clock, load modules or change kernel logging.
+# The runner does not set the clock.
 ProtectClock=yes
-ProtectKernelModules=yes
-ProtectKernelLogs=yes
 # No setuid/setgid files created by the runner or its children.
 RestrictSUIDSGID=yes
-# Kernel tunables stay read-only for the unit... except where the runner needs
-# them: see the end of the file (net.ipv4.ip_forward, cgroups).
 LockPersonality=yes
 # The runner does not need real-time scheduling.
 RestrictRealtime=yes
@@ -74,27 +69,38 @@ WantedBy=multi-user.target
 
 # ---- deliberately absent -----------------------------------------------------
 #
+# PrivateTmp=, ProtectHome=, ProtectSystem=, ProtectKernelModules=,
+# ProtectKernelLogs=, ProtectKernelTunables=, ProtectControlGroups=,
+# PrivateDevices=, ReadOnlyPaths=, ReadWritePaths=, InaccessiblePaths=,
+# TemporaryFileSystem=, BindPaths=
+#                     Each of these puts the unit in a mount namespace of its own
+#                     (systemd sets one up for ProtectKernelModules and
+#                     ProtectKernelLogs too: it hides /usr/lib/modules and
+#                     /proc/kmsg with mounts). In container mode the runner
+#                     loop-mounts the scratch disk of a job below the state
+#                     directory, and the Docker daemon, in the host's namespace,
+#                     cannot see a mount made inside the unit's: the bind
+#                     sources of the container would be empty directories. The
+#                     micro-VM mode would tolerate them, but one unit serves both
+#                     modes and a second unit for VM-only hardening is not worth
+#                     it. test: internal/host TestUnitHasNoMountNamespaceOptions.
+#
 # Delegate=yes        The runner does not manage cgroups of its own. The jailer
 #                     creates the cgroups of the VMs below /sys/fs/cgroup itself
 #                     (it is root and writes there directly), and Docker has its
 #                     own. Delegation would hand a subtree to this unit that
 #                     nothing uses.
-# ProtectSystem=      The runner writes to the state directory, /run, /sys/fs/cgroup,
-#                     /dev (mounts, TAP, loop devices), and Docker's data: a
-#                     read-only /usr is possible but would be the only gain, and
-#                     it breaks `ip`/`nft` helpers found by PATH on some distros.
-# PrivateDevices=     The runner needs /dev/kvm, /dev/net/tun, /dev/loop*.
-# PrivateNetwork=, RestrictNamespaces=, ProtectKernelTunables=,
+# PrivateNetwork=, RestrictNamespaces=,
 # CapabilityBoundingSet=, MemoryDenyWriteExecute=, SystemCallFilter=
 #                     The runner creates network namespaces and devices (TAP,
 #                     veth, bridges) and mounts file systems, enables
-#                     net.ipv4.ip_forward, hands capabilities to the jailer and
+#                     net.ipv4.ip_forward (the jailer also writes cgroups, /dev/kvm, /dev/net/tun and
+#                     /dev/loop* are needed), hands capabilities to the jailer and
 #                     to Docker, and starts Firecracker (which maps guest memory
 #                     writable and executable). Each of these would break a path
 #                     that cannot be tested without a rootful host; the
 #                     boundary of a job is the micro-VM or the container, not
 #                     this unit.
-# ProtectControlGroups=  The jailer writes the cgroups of the VMs.
 # UMask=0077          The state directory is made 0700 by the runner itself, and the
 #                     drivers create directories that the job's user must be able
 #                     to enter (the scratch disk's work and tmp directories are

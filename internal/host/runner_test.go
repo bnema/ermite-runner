@@ -1246,3 +1246,71 @@ func TestSaveStateMakesAnExistingDirectoryPrivate(t *testing.T) {
 		t.Fatalf("%v", fi.Mode())
 	}
 }
+
+// mountNamespaceOptions are the [Service] options that give a unit a mount
+// namespace of its own. The unit must set none of them: in container mode the
+// runner loop-mounts the scratch disk of a job; the Docker daemon, in the host's
+// namespace, binds it into the container, and a mount made inside a private mount
+// namespace of the unit is invisible to it (GO-001). Besides the options that say
+// so (PrivateTmp, ProtectHome, ProtectSystem...), systemd builds a mount
+// namespace for ProtectKernelModules and ProtectKernelLogs too.
+var mountNamespaceOptions = []string{
+	"PrivateTmp", "PrivateDevices", "PrivateMounts", "PrivateUsers", "ProtectHome", "ProtectSystem",
+	"ProtectKernelModules", "ProtectKernelLogs", "ProtectKernelTunables", "ProtectControlGroups",
+	"ProtectProc", "ProcSubset", "ProtectHostname", "ReadOnlyPaths", "ReadWritePaths", "InaccessiblePaths",
+	"ExecPaths", "NoExecPaths", "TemporaryFileSystem", "BindPaths", "BindReadOnlyPaths", "MountFlags",
+	"MountAPIVFS", "RootDirectory", "RootImage", "RootEphemeral", "BindLogSockets", "LogNamespace",
+	"PrivateIPC", "PrivatePIDs", "MountImages", "ExtensionImages", "ExtensionDirectories",
+}
+
+// unitMountNamespaceOptions returns the lines of the [Service] section of a unit
+// that set one of mountNamespaceOptions. Comments, which name the options on
+// purpose, and other sections are ignored.
+func unitMountNamespaceOptions(unit string) []string {
+	var found []string
+	inService := false
+	for _, line := range strings.Split(unit, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "[") {
+			inService = line == "[Service]"
+			continue
+		}
+		if !inService || line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, _, _ := strings.Cut(line, "=")
+		for _, f := range mountNamespaceOptions {
+			if strings.EqualFold(strings.TrimSpace(key), f) {
+				found = append(found, line)
+			}
+		}
+	}
+	return found
+}
+
+func TestUnitHasNoMountNamespaceOptions(t *testing.T) {
+	unit, err := os.ReadFile("../../contrib/ermite-runner.service")
+	if err != nil {
+		t.Skip(err)
+	}
+	if found := unitMountNamespaceOptions(string(unit)); len(found) > 0 {
+		t.Fatalf("the unit sets options that give it a mount namespace of its own, which hides the loop mounts from Docker: %q", found)
+	}
+	// The hardening that stays must still be there.
+	for _, want := range []string{"NoNewPrivileges=yes", "RestrictSUIDSGID=yes", "ProtectClock=yes", "RestrictAddressFamilies="} {
+		if !strings.Contains(string(unit), "\n"+want) {
+			t.Errorf("the unit lost %s", want)
+		}
+	}
+}
+
+// The check sees the options in [Service] (also with spaces and another case),
+// and ignores comments and other sections.
+func TestUnitMountNamespaceCheckSeesOptions(t *testing.T) {
+	unit := "[Unit]\nPrivateTmp=yes\n[Service]\nPrivateTmp=yes\n  protecthome = read-only\nProtectKernelModules=yes\n# ProtectSystem=strict\nNoNewPrivileges=yes\n[Install]\nProtectSystem=yes\n"
+	got := unitMountNamespaceOptions(unit)
+	want := []string{"PrivateTmp=yes", "protecthome = read-only", "ProtectKernelModules=yes"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("%q", got)
+	}
+}

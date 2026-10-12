@@ -155,28 +155,39 @@ everything labelled as the runner's own.
 
 **Sandboxing of the unit.** The runner has to be root (TAP devices, nftables,
 loop mounts, the jailer, Docker), so the unit only takes away what it does not
-use: `NoNewPrivileges`, `ProtectHome`, `PrivateTmp`, `ProtectClock`,
-`ProtectKernelModules`, `ProtectKernelLogs`, `RestrictSUIDSGID`,
-`LockPersonality`, `RestrictRealtime`, `SystemCallArchitectures=native`,
-`RestrictAddressFamilies` (UNIX, INET, INET6, NETLINK, VSOCK).
-Checked on a workstation (a user manager, no root): the micro-VM job test
-(`TestVMRunsAJob`: user and network namespaces, Firecracker, TAP, vsock) passes
-under every option above except `ProtectHome`, which hides the home directory
-where that test's tree lives; with it the binary itself was run (`version`) and
-`/home` is denied as intended. Not checked, because they need root on a real
-host: the jailer, loop mounts, nftables in the host namespace, Docker. **Deliberately absent**, and why:
-`Delegate=` (the runner manages no cgroup of its own: the jailer writes the
-VMs' cgroups as root, Docker has its own), `ProtectSystem=`,
-`ProtectControlGroups=`, `ProtectKernelTunables=` (the jailer writes cgroups, the
-runner turns on `net.ipv4.ip_forward`), `PrivateDevices=` (`/dev/kvm`,
-`/dev/net/tun`, `/dev/loop*`), `RestrictNamespaces=`, `PrivateNetwork=`,
-`CapabilityBoundingSet=` and `SystemCallFilter=` (network namespaces and
-devices, mounts, capabilities handed to the jailer and Docker),
-`MemoryDenyWriteExecute=` (Firecracker maps guest memory writable and
-executable), `UMask=` (the drivers create directories that the job's user must
-enter, with explicit modes; the state directory is made 0700 by the runner). The boundary of a job is its micro-VM or container, not this unit;
-the unit cannot be tested end to end without a rootful host, so the options that
-would only break it silently are left out.
+use, and only with options that **leave it in the host's mount namespace**:
+`NoNewPrivileges`, `ProtectClock`, `RestrictSUIDSGID`, `LockPersonality`,
+`RestrictRealtime`, `SystemCallArchitectures=native` and `RestrictAddressFamilies`
+(UNIX, INET, INET6, NETLINK, VSOCK).
+
+**Deliberately absent**, and why:
+
+- **Every option that gives the unit a mount namespace of its own:** `PrivateTmp`,
+  `ProtectHome`, `ProtectSystem`, `ProtectKernelModules`, `ProtectKernelLogs`,
+  `ProtectKernelTunables`, `ProtectControlGroups`, `PrivateDevices`,
+  `ReadOnlyPaths`, `ReadWritePaths`, `InaccessiblePaths`, `TemporaryFileSystem`,
+  `BindPaths`. In container mode the runner loop-mounts the scratch disk of each
+  job and the Docker daemon, which lives in the host's namespace, binds that
+  directory into the container; a mount made inside the unit's namespace is
+  invisible to it and the container would get an empty directory. (`ProtectKernelModules`
+  and `ProtectKernelLogs` look harmless but are implemented with mounts too.) The
+  micro-VM mode would tolerate them, but one unit serves both modes, and a second
+  unit for VM-only hardening is not worth maintaining. A test in `internal/host`
+  fails if the unit sets any of them.
+- `Delegate=`: the runner manages no cgroup of its own (the jailer writes the
+  VMs' cgroups as root, Docker has its own).
+- `RestrictNamespaces=`, `PrivateNetwork=`, `CapabilityBoundingSet=`,
+  `SystemCallFilter=`: network namespaces and devices (TAP, veth), mounts,
+  `net.ipv4.ip_forward`, capabilities handed to the jailer and Docker.
+- `MemoryDenyWriteExecute=`: Firecracker maps guest memory writable and executable.
+- `UMask=`: the drivers create directories that the job's user must enter, with
+  explicit modes; the state directory is made 0700 by the runner.
+
+The boundary of a job is its micro-VM or container, not this unit. Checked on a
+workstation (a user manager, no root): the micro-VM job test (`TestVMRunsAJob`:
+user and network namespaces, Firecracker, TAP, vsock) passes under the options
+that remain. Not checked, because they need root on a real host: the jailer, loop
+mounts, nftables in the host namespace, Docker.
 
 ## The image
 
