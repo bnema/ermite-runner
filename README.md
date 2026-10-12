@@ -51,16 +51,28 @@ Everything a job creates (process, TAP or bridge, nftables rules, files, loop mo
 ## Running jobs
 
 ```
-ermite-runner register --token <token with runner:register>   # once
-ermite-runner run                                              # as a service
+printf %s "$TOKEN" | ermite-runner register --token-stdin   # once
+ermite-runner run                                           # as a service
 ```
 
 `register` picks the isolation mode like `run` will, registers the runner with
 ermite (name, labels, version, isolation, architecture) and stores the runner
-token in `$ERMITE_RUNNER_STATE_DIR/runner.json` (mode 0600; a file readable by
-others is refused). The register token can also come from
-`ERMITE_RUNNER_REGISTER_TOKEN`; `--replace` removes a runner of the same name
-first.
+token in `$ERMITE_RUNNER_STATE_DIR/runner.json` (mode 0600, in a directory made
+0700; a file readable by others is refused). `--replace` removes a runner of the
+same name first.
+
+**The token of `register`** (scope `runner:register`: it reads the code and the
+secrets of every repository, see `runner.proto`) is looked up in this order:
+standard input with `--token-stdin`, then `ERMITE_RUNNER_REGISTER_TOKEN`, then
+`--token`. Prefer the first two: **the arguments of a process are visible to
+every user of the host** (`ps`, `/proc/<pid>/cmdline`), the environment and
+standard input are not.
+
+**The server URL** must be `https://`. Plain `http://` is accepted for
+`localhost`, `127.0.0.0/8` and `::1` only; `ERMITE_RUNNER_INSECURE_HTTP=1` allows
+any other `http://` URL (tests, a trusted network) and sends every token in
+clear. The client never follows a redirect, so a token cannot be carried to
+another host.
 
 `run` reaps what a previous run left, then polls `FetchJob` whenever a slot is
 free (`ERMITE_RUNNER_CAPACITY`), with a `poll_id` that is kept when a response
@@ -81,7 +93,10 @@ the host process; the sandbox receives the workflow and its contexts only.
 | `ERMITE_RUNNER_URL` | base URL of ermite |
 | `ERMITE_RUNNER_NAME` | runner name (default: the host name) |
 | `ERMITE_RUNNER_LABELS` | extra labels, comma separated (`ubuntu-latest,ubuntu-24.04`) |
-| `ERMITE_RUNNER_REGISTER_TOKEN` | token for `register` |
+| `ERMITE_RUNNER_REGISTER_TOKEN` | token for `register` (see above) |
+| `ERMITE_RUNNER_INSECURE_HTTP` | `1` allows a non-loopback `http://` URL (tests only) |
+| `ERMITE_RUNNER_LOG_LEVEL` | `debug`, `info` (default), `warn`, `error` |
+| `ERMITE_RUNNER_LOG_FORMAT` | `console` (default, colours) or `json` |
 
 ## Installing the service
 
@@ -93,7 +108,7 @@ jobs never do: they run as user `runner` in a micro-VM or a container.
 sudo install -m 0755 ermite-runner /usr/local/bin/ermite-runner     # a static build: CGO_ENABLED=0
 sudo install -m 0644 contrib/ermite-runner.service /etc/systemd/system/
 sudo install -d -m 0700 /etc/ermite-runner
-sudo tee /etc/ermite-runner/env >/dev/null <<'ENV'
+sudo install -m 0600 /dev/stdin /etc/ermite-runner/env <<'ENV'
 ERMITE_RUNNER_URL=https://ermite.example.org
 ERMITE_RUNNER_NAME=igor
 ERMITE_RUNNER_LABELS=ubuntu-latest,ubuntu-24.04
@@ -102,19 +117,65 @@ ERMITE_RUNNER_CAPACITY=2
 ERMITE_RUNNER_JOB_CPUS=4
 ERMITE_RUNNER_JOB_MEMORY=8G
 ERMITE_RUNNER_JOB_DISK=64G
+ERMITE_RUNNER_LOG_FORMAT=json
 ENV
-sudo chmod 0600 /etc/ermite-runner/env
-ERMITE_RUNNER_STATE_DIR=/var/lib/ermite-runner ERMITE_RUNNER_URL=https://ermite.example.org \
-  sudo -E ermite-runner register --token <token with runner:register>
+# Register once, in the same environment as the service (the settings, the state
+# directory), with the token on standard input so that it is not in any
+# command line:
+printf %s "$TOKEN" | sudo systemd-run --pipe --wait -p EnvironmentFile=/etc/ermite-runner/env \
+  -p StateDirectory=ermite-runner -p StateDirectoryMode=0700 \
+  /usr/local/bin/ermite-runner register --token-stdin
 sudo systemctl enable --now ermite-runner
+journalctl -u ermite-runner -f
 ```
 
-`systemctl stop` sends SIGTERM: running jobs are cancelled with
+`systemd-run` reads the same `EnvironmentFile` as the unit, so `register` and
+`run` agree on the URL, the name, the labels, the isolation mode and the state
+directory (`/var/lib/ermite-runner`, the default of `ERMITE_RUNNER_STATE_DIR`).
+
+**Logs.** The runner writes to standard error, which journald collects. Set
+`ERMITE_RUNNER_LOG_FORMAT=json` under journald: one JSON event per line, with
+`job_id`, `run_id` and `attempt` on every line about a job, `warn` for what is
+retried and `error` for what is refused or leaked; the colours of the `console`
+format are noise in a journal. `ERMITE_RUNNER_LOG_LEVEL=debug` adds detail.
+Tokens are never logged.
+
+**Stopping.** `systemctl stop` sends SIGTERM: running jobs are cancelled with
 `runner_shutdown`, reported to ermite, and their sandboxes removed before the
-service exits (the unit allows 120 s). A crash or a power cut leaves sandboxes
-behind; the next start reaps them. Only one runner may live on a host (a
-host-wide lock enforces it), because reaping removes everything labelled as the
-runner's own.
+service exits. The budget, with the defaults, is **90 s**: 30 s for the executor
+to stop its steps (SIGINT, SIGTERM after 7.5 s, SIGKILL 2.5 s later, then the
+post-steps), 30 s to destroy the sandbox, 30 s to flush the log and report; jobs
+do this in parallel, so it does not grow with `ERMITE_RUNNER_CAPACITY`. The unit
+sets `TimeoutStopSec=120`, 30 s of margin (a test in `internal/host` fails if the
+two drift apart). A job whose first heartbeat is still pending when the signal
+arrives is not started: ermite gives it to another runner after 30 s. A crash or
+a power cut leaves sandboxes behind; the next start reaps them. Only one runner
+may live on a host (a host-wide lock enforces it), because reaping removes
+everything labelled as the runner's own.
+
+**Sandboxing of the unit.** The runner has to be root (TAP devices, nftables,
+loop mounts, the jailer, Docker), so the unit only takes away what it does not
+use: `NoNewPrivileges`, `ProtectHome`, `PrivateTmp`, `ProtectClock`,
+`ProtectKernelModules`, `ProtectKernelLogs`, `RestrictSUIDSGID`,
+`LockPersonality`, `RestrictRealtime`, `SystemCallArchitectures=native`,
+`RestrictAddressFamilies` (UNIX, INET, INET6, NETLINK, VSOCK) and `UMask=0077`.
+Checked on a workstation (a user manager, no root): the micro-VM job test
+(`TestVMRunsAJob`: user and network namespaces, Firecracker, TAP, vsock) passes
+under every option above except `ProtectHome`, which hides the home directory
+where that test's tree lives; with it the binary itself was run (`version`) and
+`/home` is denied as intended. Not checked, because they need root on a real
+host: the jailer, loop mounts, nftables in the host namespace, Docker. **Deliberately absent**, and why:
+`Delegate=` (the runner manages no cgroup of its own: the jailer writes the
+VMs' cgroups as root, Docker has its own), `ProtectSystem=`,
+`ProtectControlGroups=`, `ProtectKernelTunables=` (the jailer writes cgroups, the
+runner turns on `net.ipv4.ip_forward`), `PrivateDevices=` (`/dev/kvm`,
+`/dev/net/tun`, `/dev/loop*`), `RestrictNamespaces=`, `PrivateNetwork=`,
+`CapabilityBoundingSet=` and `SystemCallFilter=` (network namespaces and
+devices, mounts, capabilities handed to the jailer and Docker),
+`MemoryDenyWriteExecute=` (Firecracker maps guest memory writable and
+executable). The boundary of a job is its micro-VM or container, not this unit;
+the unit cannot be tested end to end without a rootful host, so the options that
+would only break it silently are left out.
 
 ## The image
 
