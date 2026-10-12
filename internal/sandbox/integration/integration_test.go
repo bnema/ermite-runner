@@ -202,6 +202,11 @@ func leftovers(stateDir string) []string {
 		_ = filepath.WalkDir(filepath.Join(stateDir, d), func(p string, e os.DirEntry, err error) error {
 			if err == nil && p != filepath.Join(stateDir, d) {
 				rel, _ := filepath.Rel(stateDir, p)
+				// <state>/jail/<exec file name> is the jailer's static parent of the
+				// per-job chroots (like jail/ itself): not a leftover when empty.
+				if e.IsDir() && d == "jail" && filepath.Dir(rel) == "jail" {
+					return nil
+				}
 				left = append(left, "file "+rel)
 			}
 			return nil
