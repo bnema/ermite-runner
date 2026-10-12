@@ -1,0 +1,58 @@
+// SPDX-License-Identifier: MIT
+
+// Internal wire format between the host process of ermite-runner and the
+// executor running inside a sandbox (vsock in a micro-VM, Unix socket in a
+// container). Frames are length-prefixed on the stream (see frame.go); this file
+// defines the payload. It is internal to ermite-runner: no compatibility is
+// promised between runner versions, which is safe because the host attaches its
+// own executable to every sandbox.
+
+syntax = "proto3";
+
+package ermite.runner.exec.v1;
+
+option go_package = "bnema.dev/ermite-runner/internal/execstream/execpb";
+
+// Frame is the only message on the stream.
+message Frame {
+  oneof body {
+    Hello hello = 1;   // executor -> host, first frame
+    Run run = 2;       // host -> executor, after Hello
+    Output output = 3; // executor -> host
+    Exit exit = 4;     // executor -> host, last frame
+    Cancel cancel = 5; // host -> executor
+  }
+}
+
+message Hello {
+  string version = 1;  // runner version of the executor
+  string sandbox = 2;  // "vm" or "container"
+  string hostname = 3;
+}
+
+// Run asks the executor to run a script. CI-1 stub executor: the script is run
+// with `sh -c`; an empty script means the built-in diagnostics script.
+message Run {
+  string script = 1;
+  map<string, string> env = 2;
+}
+
+enum StreamKind {
+  STREAM_KIND_UNSPECIFIED = 0;
+  STREAM_KIND_STDOUT = 1;
+  STREAM_KIND_STDERR = 2;
+}
+
+message Output {
+  StreamKind stream = 1;
+  bytes data = 2;
+  int64 unix_nano = 3;
+}
+
+message Exit {
+  int32 code = 1;
+  string error = 2; // set when the executor failed to run the script at all
+}
+
+// Cancel asks the executor to stop the running script: SIGINT now.
+message Cancel {}
