@@ -3,12 +3,15 @@
 package executor
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/bnema/zerowrap"
 )
 
 const wfHead = "on: push\njobs:\n  j:\n    runs-on: x\n"
@@ -752,6 +755,9 @@ jobs:
 		{"static-name", `{"n":2}`, `{"job-index":1}`, "same name for every leg (2)"},
 		{"plain", `{}`, ``, "plain push"},
 		{"static-name", `{"n":9}`, ``, "static-name"}, // not one of the combinations: the job key
+		// job-index points to another combination: it is not trusted.
+		{"default-name", `{"os":"a","n":2}`, `{"job-index":0}`, "default-name (a, 2)"},
+		{"default-name", `{"os":"b","n":2}`, `{"job-index":7}`, "default-name (b, 2)"},
 	} {
 		t.Run(tc.want, func(t *testing.T) {
 			got := setupLog(t, yaml, tc.job, func(c *Config) {
@@ -768,5 +774,76 @@ jobs:
 				t.Errorf("got:\n%s", got)
 			}
 		})
+	}
+}
+
+func TestJobDisplayNameReadsNeedsVarsAndIgnoresRunnerKeys(t *testing.T) {
+	needTools(t, "bash")
+	yaml := `on: push
+jobs:
+  j:
+    name: "${{ needs.a.outputs.o }}-${{ vars.V }}-${{ github.workspace }}-${{ github.secret_source }}-${{ github.token }}-${{ github.event_name }}"
+    runs-on: x
+    steps:
+      - run: echo hi
+`
+	got := setupLog(t, yaml, "j", func(c *Config) {
+		c.ContextsJSON = `{"github":{"repository":"octo/hello","event_name":"push","job":"j"},"needs":{"a":{"outputs":{"o":"out"}}},"vars":{"V":"v1"}}`
+	})
+	// workspace, secret_source and token are added by the runner: empty for the name.
+	if !strings.HasSuffix(got, "Complete job name: out-v1----push") {
+		t.Errorf("got:\n%s", got)
+	}
+}
+
+func TestJobDisplayNameIncludeOnlyMatrix(t *testing.T) {
+	needTools(t, "bash")
+	yaml := `on: push
+jobs:
+  j:
+    runs-on: x
+    strategy:
+      matrix:
+        include:
+          - os: a
+            n: 1
+          - os: b
+            n: 2
+    steps:
+      - run: echo hi
+`
+	for matrix, want := range map[string]string{`{"os":"b","n":2}`: "j (b, 2)", `{"os":"a","n":1}`: "j (a, 1)"} {
+		got := setupLog(t, yaml, "j", func(c *Config) {
+			c.MatrixJSON = matrix
+			c.ContextsJSON = strings.TrimSuffix(testGitHubContext("j"), "}") + `,"matrix":` + matrix + `}`
+		})
+		if !strings.HasSuffix(got, "Complete job name: "+want) {
+			t.Errorf("%s:\n%s", matrix, got)
+		}
+	}
+}
+
+func TestJobDisplayNameFallsBackToTheKeyWithAWarning(t *testing.T) {
+	needTools(t, "bash")
+	yaml := `on: push
+jobs:
+  j:
+    runs-on: x
+    strategy:
+      matrix:
+        n: [1, 2]
+    steps:
+      - run: echo hi
+`
+	var logs bytes.Buffer
+	got := setupLog(t, yaml, "j", func(c *Config) {
+		c.MatrixJSON = `{"n":5}`
+		c.Log = zerowrap.New(zerowrap.Config{Level: "debug", Format: "json", Output: &logs})
+	})
+	if !strings.HasSuffix(got, "Complete job name: j") {
+		t.Errorf("got:\n%s", got)
+	}
+	if !strings.Contains(logs.String(), `"level":"warn"`) || !strings.Contains(logs.String(), "using the job key") {
+		t.Errorf("no warning: %q", logs.String())
 	}
 }

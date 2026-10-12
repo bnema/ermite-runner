@@ -16,6 +16,7 @@ import (
 	"bnema.dev/ermite-actions/expr"
 	"bnema.dev/ermite-actions/template"
 	"bnema.dev/ermite-actions/workflow"
+	"github.com/bnema/zerowrap"
 	"github.com/google/uuid"
 )
 
@@ -75,6 +76,9 @@ type Config struct {
 	Debug bool
 
 	Reporter Reporter
+	// Log receives the runner's own diagnostics (not the job log); the zero value
+	// discards them.
+	Log zerowrap.Logger
 
 	// Credential, when set, is the user the steps run as.
 	Credential *syscall.Credential
@@ -610,59 +614,81 @@ func (j *job) printTokenInfo() {
 // jobDisplayName is the name of the job as GitHub shows it and the runner
 // prints it after "Complete job name:": the "name" of the job (the job key when
 // it has none) evaluated with github, needs, strategy, matrix, vars and inputs
-// (the contexts the schema allows there), followed by the matrix values in
-// parentheses unless the name reads the matrix (recorded: matrix-job-name, see
-// workflow.Job.DisplayName). The combination of this job is the one at
-// strategy.job-index, else the one whose values equal the matrix. On any
-// failure the job key is used: the name is not worth failing the job for.
+// as the server has them (State.ServerContexts: github without the keys the
+// runner adds), followed by the matrix values in parentheses unless the name
+// reads the matrix (recorded: matrix-job-name, see workflow.Job.DisplayName).
+// When the name cannot be worked out the job key is used and a warning is
+// logged: the name is not worth failing the job for.
 func (j *job) jobDisplayName() string {
 	ctx := context.Background()
-	all := j.evalEnv(newOrdered())
-	env := all
-	env.Contexts = map[string]expr.Value{}
-	for _, k := range []string{"github", "needs", "strategy", "matrix", "vars", "inputs"} {
-		if v, ok := all.Contexts[k]; ok {
-			env.Contexts[k] = v
-		}
+	fallback := func(why string, err error) string {
+		j.cfg.Log.Warn().Err(err).Str("job_key", j.cfg.JobKey).Msg("job display name: " + why + ", using the job key")
+		return j.cfg.JobKey
 	}
+	j.mu.Lock()
+	all := j.state.ServerContexts()
+	j.mu.Unlock()
+	env := j.evalEnv(newOrdered())
+	env.Contexts = all
 	// The strategy itself sees neither the strategy nor the matrix context.
 	senv := env
 	senv.Contexts = map[string]expr.Value{}
 	for _, k := range []string{"github", "needs", "vars", "inputs"} {
-		if v, ok := env.Contexts[k]; ok {
-			senv.Contexts[k] = v
-		}
+		senv.Contexts[k] = all[k]
 	}
 	st, err := j.jb.EvaluateStrategy(ctx, senv)
 	if err != nil {
-		return j.cfg.JobKey
+		return fallback("the strategy does not evaluate", err)
 	}
-	idx := 0
-	if st.HasMatrix {
-		idx = -1
-		if d, ok := env.Contexts["strategy"].(*expr.Dictionary); ok {
-			if n, ok := d.Get("job-index"); ok {
-				if f, ok := n.(expr.Number); ok && int(f) >= 0 && int(f) < len(st.Combos) {
-					idx = int(f)
-				}
-			}
-		}
-		if idx < 0 {
-			want := expr.ToJSON(env.Contexts["matrix"])
-			for i, c := range st.Combos {
-				if expr.ToJSON(c.Values) == want {
-					idx = i
-					break
-				}
-			}
-		}
-		if idx < 0 {
-			return j.cfg.JobKey
-		}
+	idx, ok := comboIndex(st, all["strategy"], all["matrix"])
+	if !ok {
+		return fallback("the matrix of the job is not one of the combinations of its strategy", nil)
 	}
 	name, err := j.jb.DisplayName(ctx, env, st, idx)
 	if err != nil {
-		return j.cfg.JobKey
+		return fallback("the name does not evaluate", err)
 	}
 	return name
+}
+
+// comboIndex finds the combination of the strategy that is this job. Without a
+// matrix it is the only one. The index of the strategy context is trusted only
+// when that combination has the matrix of the job; otherwise the first
+// combination with equal values is taken. ok is false when there is none.
+func comboIndex(st *workflow.Strategy, strategyCtx, matrix expr.Value) (idx int, ok bool) {
+	if !st.HasMatrix {
+		return 0, true
+	}
+	m, isDict := matrix.(*expr.Dictionary)
+	if !isDict {
+		return 0, false
+	}
+	if d, isDict := strategyCtx.(*expr.Dictionary); isDict {
+		if n, found := d.Get("job-index"); found {
+			if f, isNum := n.(expr.Number); isNum && f >= 0 && int(f) < len(st.Combos) && sameMatrix(st.Combos[int(f)].Values, m) {
+				return int(f), true
+			}
+		}
+	}
+	for i, c := range st.Combos {
+		if sameMatrix(c.Values, m) {
+			return i, true
+		}
+	}
+	return 0, false
+}
+
+// sameMatrix compares two matrix values: the same keys (ignoring case and
+// order) with equal values.
+func sameMatrix(a, b *expr.Dictionary) bool {
+	if a.Len() != b.Len() {
+		return false
+	}
+	for _, p := range a.Pairs() {
+		v, found := b.Get(p.Key)
+		if !found || expr.ToJSON(v) != expr.ToJSON(p.Value) {
+			return false
+		}
+	}
+	return true
 }

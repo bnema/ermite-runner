@@ -197,8 +197,13 @@ type stepCtx struct {
 type State struct {
 	layout Layout
 	github *expr.Dictionary
-	runner *expr.Dictionary
-	job    *expr.Dictionary
+	// serverGitHub is the github context as the server sent it, before the
+	// runner added its keys (token, workspace, the file commands, secret_source,
+	// action...): the contexts that the server itself evaluates the job name
+	// with (see ServerContexts).
+	serverGitHub *expr.Dictionary
+	runner       *expr.Dictionary
+	job          *expr.Dictionary
 	// other holds needs, strategy, matrix, inputs, vars: copied from the server.
 	other map[string]expr.Value
 	// env is Global.EnvironmentVariables: the job-level environment and what
@@ -249,6 +254,10 @@ func NewState(contextsJSON, matrixJSON, jobKey string, r RunnerInfo, repoFallbac
 			}
 			gh.Add(p.Key, p.Value)
 		}
+	}
+	s.serverGitHub = expr.NewDictionary()
+	if v, ok := root.Get("github"); ok {
+		s.serverGitHub = v.(*expr.Dictionary)
 	}
 	if str(gh, "job") == "" && jobKey != "" {
 		gh = setKeySorted(gh, "job", expr.String(jobKey))
@@ -452,6 +461,19 @@ func (s *State) Values(env *ordered) map[string]expr.Value {
 	}
 	for k, v := range s.other {
 		m[k] = v
+	}
+	return m
+}
+
+// ServerContexts returns the contexts that the server has when it evaluates
+// the name of a job: github as received (without the keys the runner adds),
+// needs, strategy, matrix, vars and inputs.
+func (s *State) ServerContexts() map[string]expr.Value {
+	m := map[string]expr.Value{"github": s.serverGitHub}
+	for _, k := range []string{"needs", "strategy", "matrix", "vars", "inputs"} {
+		if v, ok := s.other[k]; ok {
+			m[k] = v
+		}
 	}
 	return m
 }
