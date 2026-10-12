@@ -18,7 +18,9 @@ import (
 // vmmProcs scans a /proc tree for processes started by this runner for a VM:
 // the Firecracker process and the jailer. A process is ours when its command
 // line has "--id <id>" with an id of the form sandbox.NewID produces and also
-// "--api-sock" (Firecracker) or "--exec-file" (jailer). The program name is not
+// "--api-sock" (Firecracker), "--exec-file" (jailer) or "--start-time-us" (the
+// Firecracker the jailer execs into its chroot: it gets neither of the first two,
+// only --id and the jailer's --start-time-* arguments). The program name is not
 // looked at: the binary may be renamed or versioned (firecracker-v1.17), and a
 // jailer in a PID namespace leaves a Firecracker whose argv[0] is whatever the
 // jailer chose. Processes of other users of Firecracker (other ids) are never
@@ -55,7 +57,7 @@ func vmIDFromCmdline(args []string) string {
 			if i+1 < len(args) && sandbox.ValidID(args[i+1]) {
 				id = args[i+1]
 			}
-		case "--api-sock", "--exec-file":
+		case "--api-sock", "--exec-file", "--start-time-us":
 			marker = true
 		}
 	}

@@ -214,7 +214,7 @@ func leftovers(stateDir string) []string {
 }
 
 // vmmProcs returns the processes whose command line carries one of our VM ids
-// (and --api-sock or --exec-file), whatever the program is called: the rule the
+// (and --api-sock, --exec-file or the jailer's --start-time-us), whatever the program is called: the rule the
 // driver's Reap uses.
 func vmmProcs() map[int]string {
 	out := map[int]string{}
@@ -233,7 +233,7 @@ func vmmProcs() map[int]string {
 				if i+1 < len(args) && sandbox.ValidID(args[i+1]) {
 					id = args[i+1]
 				}
-			case "--api-sock", "--exec-file":
+			case "--api-sock", "--exec-file", "--start-time-us":
 				marker = true
 			}
 		}

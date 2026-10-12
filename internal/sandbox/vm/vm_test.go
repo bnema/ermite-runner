@@ -724,13 +724,15 @@ func TestVMIDFromCmdline(t *testing.T) {
 		args []string
 		want string
 	}{
-		"firecracker":      {[]string{"firecracker", "--id", "er00112233", "--api-sock", "/x"}, "er00112233"},
-		"jailer":           {[]string{"jailer", "--id", "er00112233", "--exec-file", "/fc", "--uid", "1"}, "er00112233"},
-		"renamed":          {[]string{"anything", "--api-sock", "/x", "--id", "er44556677"}, "er44556677"},
-		"foreign id":       {[]string{"firecracker", "--id", "my-vm", "--api-sock", "/x"}, ""},
-		"no marker":        {[]string{"python", "--id", "er00112233"}, ""},
-		"id without value": {[]string{"firecracker", "--api-sock", "/x", "--id"}, ""},
-		"path-like id":     {[]string{"firecracker", "--id", "er../../../x", "--api-sock", "/x"}, ""},
+		"firecracker": {[]string{"firecracker", "--id", "er00112233", "--api-sock", "/x"}, "er00112233"},
+		"jailer":      {[]string{"jailer", "--id", "er00112233", "--exec-file", "/fc", "--uid", "1"}, "er00112233"},
+		"renamed":     {[]string{"anything", "--api-sock", "/x", "--id", "er44556677"}, "er44556677"},
+		// What a real jailer 1.17 leaves: /firecracker --id <id> --start-time-us ...
+		"jailed firecracker": {[]string{"/firecracker", "--id", "er00112233", "--start-time-us", "150801025577", "--start-time-cpu-us", "60", "--parent-cpu-time-us", "1332"}, "er00112233"},
+		"foreign id":         {[]string{"firecracker", "--id", "my-vm", "--api-sock", "/x"}, ""},
+		"no marker":          {[]string{"python", "--id", "er00112233"}, ""},
+		"id without value":   {[]string{"firecracker", "--api-sock", "/x", "--id"}, ""},
+		"path-like id":       {[]string{"firecracker", "--id", "er../../../x", "--api-sock", "/x"}, ""},
 	} {
 		if got := vmIDFromCmdline(tc.args); got != tc.want {
 			t.Errorf("%s: got %q want %q", name, got, tc.want)
