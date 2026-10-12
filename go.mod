@@ -4,17 +4,19 @@ go 1.27.1
 
 require (
 	bnema.dev/ermite-actions v0.0.0-20261012165742-b6c4c3a2f7ff
+	bnema.dev/ermite-api v0.0.0-20261012155218-f8f64413e63c
+	connectrpc.com/connect v1.21.0
 	github.com/bnema/zerowrap v1.4.1
 	github.com/containerd/errdefs v1.0.0
 	github.com/google/uuid v1.6.0
 	github.com/moby/moby/api v1.56.1
 	github.com/moby/moby/client v0.6.2
+	golang.org/x/net v0.58.0
 	golang.org/x/sys v0.49.0
 	google.golang.org/protobuf v1.36.12
 )
 
 require (
-	bnema.dev/ermite-api v0.0.0-20261012155218-f8f64413e63c // indirect
 	buf.build/gen/go/bufbuild/bufplugin/protocolbuffers/go v1.36.12-20260722160903-4d94f3df3a7b.2 // indirect
 	buf.build/gen/go/bufbuild/protodescriptor/protocolbuffers/go v1.36.12-20250109164928-1da0de137947.2 // indirect
 	buf.build/gen/go/bufbuild/protovalidate/protocolbuffers/go v1.36.12-20260825204119-511051f7f437.2 // indirect
@@ -31,7 +33,6 @@ require (
 	buf.build/go/standard v0.1.1-0.20260325175353-2b287e071df5 // indirect
 	cel.dev/cel-go v0.32.0 // indirect
 	cel.dev/expr v0.25.3 // indirect
-	connectrpc.com/connect v1.21.0 // indirect
 	connectrpc.com/otelconnect v0.9.0 // indirect
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/antlr4-go/antlr/v4 v4.13.1 // indirect
@@ -90,7 +91,6 @@ require (
 	golang.org/x/crypto v0.56.0 // indirect
 	golang.org/x/exp v0.0.0-20260824195058-e88cd73687aa // indirect
 	golang.org/x/mod v0.40.0 // indirect
-	golang.org/x/net v0.58.0 // indirect
 	golang.org/x/sync v0.23.0 // indirect
 	golang.org/x/term v0.45.0 // indirect
 	golang.org/x/text v0.41.0 // indirect

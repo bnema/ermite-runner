@@ -120,6 +120,8 @@ type Timing struct {
 	// NoJobPause is the pause after a poll without a job and without
 	// retry_after.
 	NoJobPause time.Duration
+	// ReapRetry is the delay between attempts to reap after a leaked sandbox.
+	ReapRetry time.Duration
 }
 
 func (t Timing) withDefaults() Timing {
@@ -139,6 +141,7 @@ func (t Timing) withDefaults() Timing {
 	def(&t.ShutdownGrace, 30*time.Second)
 	def(&t.CompleteDeadline, 5*time.Minute)
 	def(&t.NoJobPause, 0)
+	def(&t.ReapRetry, 5*time.Second)
 	return t
 }
 

@@ -29,6 +29,10 @@ const (
 // DefaultTimeoutMinutes is the timeout of a job without timeout-minutes.
 const DefaultTimeoutMinutes = 360
 
+// MaxOutputBytes is the limit of ermite on the job outputs, names and values
+// together (1 MiB).
+const MaxOutputBytes = 1 << 20
+
 // maxIssueMessageLength is ExecutionContext._maxIssueMessageLength.
 const maxIssueMessageLength = 4096
 
@@ -933,10 +937,25 @@ func (j *job) completeJob(num int) map[string]string {
 			j.result = &m
 			j.mu.Unlock()
 		}
+		total := 0
 		for _, p := range pairs {
 			if p.Value == "" {
 				j.debug(num, fmt.Sprintf("Skip output '%s' since it's empty", p.Key))
 				continue
+			}
+			// ermite refuses outputs above 1 MiB in total (runner.proto,
+			// CompleteJobRequest.outputs), and they would not fit a frame of the
+			// stream either: the job fails without outputs.
+			if total += len(p.Key) + len(p.Value); total > MaxOutputBytes {
+				result = resFailed
+				j.errorf(num, "Fail to evaluate job outputs")
+				j.errorf(num, "The job outputs are larger than 1 MiB in total.")
+				j.mu.Lock()
+				m := merge(j.result, resFailed)
+				j.result = &m
+				j.mu.Unlock()
+				outputs = map[string]string{}
+				break
 			}
 			outputs[p.Key] = p.Value
 		}

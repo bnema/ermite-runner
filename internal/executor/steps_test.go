@@ -475,3 +475,25 @@ func TestStopCommands(t *testing.T) {
 		t.Errorf("%s", got)
 	}
 }
+
+func TestJobOutputsOverOneMiBFailTheJob(t *testing.T) {
+	needTools(t, "bash")
+	rec, res := runLocal(t, `on: push
+jobs:
+  j:
+    runs-on: x
+    outputs:
+      big: ${{ steps.s.outputs.big }}
+      other: ${{ steps.s.outputs.big }}
+    steps:
+      - id: s
+        run: echo "big=$(head -c 600000 /dev/zero | tr '\0' x)" >> "$GITHUB_OUTPUT"
+`, "j", nil)
+	if res.Conclusion != ConclusionFailure || len(res.Outputs) != 0 {
+		t.Fatalf("%+v", res.Conclusion)
+	}
+	last := rec.steps[len(rec.steps)-1]
+	if last.Name != CompleteJobName || last.Conclusion != ConclusionFailure || !strings.Contains(logOf(last), "##[error]The job outputs are larger than 1 MiB in total.") {
+		t.Fatalf("%s %s", last.Conclusion, logOf(last))
+	}
+}

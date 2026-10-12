@@ -99,7 +99,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		}
 		if r.leaked.Load() {
 			<-slots
-			if !r.recover(ctx, slots) {
+			if !r.recover(ctx, slots, t.ReapRetry) {
 				return nil
 			}
 			continue
@@ -152,7 +152,7 @@ func (r *Runner) Run(ctx context.Context) error {
 }
 
 // recover waits until no job runs, then reaps. It returns false when ctx ends.
-func (r *Runner) recover(ctx context.Context, slots chan struct{}) bool {
+func (r *Runner) recover(ctx context.Context, slots chan struct{}, retry time.Duration) bool {
 	r.logf("a sandbox could not be cleaned up: waiting for the running jobs, then reaping")
 	for ctx.Err() == nil {
 		if len(slots) == 0 {
@@ -164,7 +164,7 @@ func (r *Runner) recover(ctx context.Context, slots chan struct{}) bool {
 				r.logf("reap failed, retrying: %v", err)
 			}
 		}
-		if !sleep(ctx, 5*time.Second) {
+		if !sleep(ctx, retry) {
 			return false
 		}
 	}

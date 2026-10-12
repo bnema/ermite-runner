@@ -25,7 +25,9 @@ import (
 )
 
 // MaxFrame is the largest accepted serialized frame.
-const MaxFrame = 1 << 20
+// It leaves room for the largest job result: outputs of 1 MiB in total (the
+// limit of ermite) plus the overhead of the encoding.
+const MaxFrame = 2 << 20
 
 // ChunkSize is the largest output payload placed in one Output frame.
 const ChunkSize = 32 * 1024

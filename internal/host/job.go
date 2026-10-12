@@ -298,7 +298,8 @@ func (j *jobRun) run(rt *Runner, shutdown <-chan struct{}) {
 	bg.Add(2)
 	go func() { defer bg.Done(); j.heartbeats(ctx) }()
 	go func() { defer bg.Done(); j.watch(ctx) }()
-	defer bg.Wait()
+	// The context is cancelled first, so that the heartbeat and watch loops end.
+	defer func() { j.cancel(nil); bg.Wait() }()
 
 	j.outbox = newOutbox(j.client, j.job.JobId, j.t, func(err error) { j.abandon(err) }, j.logf)
 	j.outbox.start(ctx)
