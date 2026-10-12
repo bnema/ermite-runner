@@ -53,10 +53,11 @@ type Options struct {
 	Net netsetup.Plumbing
 	// engine overrides the Docker client (tests).
 	engine engine
-	// allowRootless lets tests exercise the Engine API against the rootless
-	// daemon of a workstation. Never set outside tests: a nested dockerd cannot
-	// work in a rootless daemon.
-	allowRootless bool
+	// AllowRootless lets tests exercise the Engine API and the executor against
+	// the rootless daemon of a workstation. Never set outside tests: a nested
+	// dockerd cannot work in a rootless daemon, so the jobs would run without
+	// Docker. The factories of package drivers never set it.
+	AllowRootless bool
 	// ConnectTimeout bounds container start + init + executor connection
 	// (default 90 s).
 	ConnectTimeout time.Duration
@@ -133,7 +134,7 @@ func New(ctx context.Context, cfg sandbox.Config, opt Options) (*Driver, error) 
 	if err != nil {
 		return fail(fmt.Errorf("cannot reach the Docker daemon (DOCKER_HOST): %w", err))
 	}
-	if info.Rootless && !opt.allowRootless {
+	if info.Rootless && !opt.AllowRootless {
 		return fail(errRootless)
 	}
 	if info.OSType != "" && info.OSType != "linux" {
