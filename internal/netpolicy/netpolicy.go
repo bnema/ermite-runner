@@ -10,7 +10,8 @@
 // container):
 //   - to the host itself (input hook): only DNS (udp/tcp 53) to the gateway
 //     address of that guest, where the runner's DNS forwarder listens; every
-//     other packet is dropped;
+//     other packet is dropped, and port 53 of a gateway is closed to every
+//     other interface;
 //   - IPv6 from the guest is dropped (the guest also disables IPv6);
 //   - forwarded traffic must carry the guest's own source address;
 //   - forwarded traffic to RFC 1918, CGNAT 100.64.0.0/10 (VPN overlays),
@@ -42,15 +43,29 @@ var IfacePrefixes = []string{"ertap", "erbr"}
 
 // blockedV4 are the destinations a guest may never reach.
 var blockedV4 = []string{
-	"0.0.0.0/8",      // "this network"
-	"10.0.0.0/8",     // RFC 1918
-	"100.64.0.0/10",  // RFC 6598 shared address space (CGNAT, VPN overlays)
-	"127.0.0.0/8",    // loopback
-	"169.254.0.0/16", // link-local, incl. the 169.254.169.254 metadata service
-	"172.16.0.0/12",  // RFC 1918
-	"192.168.0.0/16", // RFC 1918
-	"224.0.0.0/4",    // multicast
-	"240.0.0.0/4",    // reserved, incl. limited broadcast
+	"0.0.0.0/8",       // "this network"
+	"10.0.0.0/8",      // RFC 1918
+	"100.64.0.0/10",   // RFC 6598 shared address space (CGNAT, VPN overlays)
+	"127.0.0.0/8",     // loopback
+	"169.254.0.0/16",  // link-local, incl. the 169.254.169.254 metadata service
+	"172.16.0.0/12",   // RFC 1918
+	"192.0.0.0/24",    // IETF protocol assignments
+	"192.0.2.0/24",    // TEST-NET-1
+	"192.168.0.0/16",  // RFC 1918
+	"198.18.0.0/15",   // benchmarking
+	"198.51.100.0/24", // TEST-NET-2
+	"203.0.113.0/24",  // TEST-NET-3
+	"224.0.0.0/4",     // multicast
+	"240.0.0.0/4",     // reserved, incl. limited broadcast
+}
+
+// prefixSet renders IfacePrefixes as an nft anonymous set of interface wildcards.
+func prefixSet() string {
+	q := make([]string, len(IfacePrefixes))
+	for i, p := range IfacePrefixes {
+		q[i] = `"` + p + `*"`
+	}
+	return "{ " + strings.Join(q, ", ") + " }"
 }
 
 // Guest is one sandbox network attachment.
@@ -129,25 +144,48 @@ func Ruleset(guests []Guest) string {
 	for _, p := range IfacePrefixes {
 		fmt.Fprintf(&b, "\t\tiifname \"%s*\" meta nfproto ipv6 drop\n", p)
 	}
+	// The DNS forwarder of a guest answers that guest only: port 53 of a gateway
+	// address is dropped from every other interface (other guests, the LAN).
+	for _, g := range gs {
+		for _, proto := range []string{"udp", "tcp"} {
+			fmt.Fprintf(&b, "\t\tip daddr %s %s dport 53 iifname != \"%s\" drop\n", g.Gateway, proto, g.Iface)
+		}
+	}
 	for _, g := range gs {
 		for _, proto := range []string{"udp", "tcp"} {
 			fmt.Fprintf(&b, "\t\tiifname \"%s\" ip saddr %s ip daddr %s %s dport 53 accept\n", g.Iface, g.Addr, g.Gateway, proto)
 		}
 		fmt.Fprintf(&b, "\t\tiifname \"%s\" drop\n", g.Iface)
 	}
+	// An interface with our prefix that no live guest owns (a leftover) is
+	// dropped as well.
+	for _, p := range IfacePrefixes {
+		fmt.Fprintf(&b, "\t\tiifname \"%s*\" drop\n", p)
+	}
 	b.WriteString("\t}\n")
 
+	// Forward chain. Order matters: everything a guest sends is checked (family,
+	// source address, destination ranges) BEFORE any "established" accept, or a
+	// guest could forge the source of another guest's flow and have it accepted
+	// as a reply.
 	b.WriteString("\tchain forward {\n\t\ttype filter hook forward priority filter; policy accept;\n")
-	for _, p := range IfacePrefixes {
-		fmt.Fprintf(&b, "\t\toifname \"%s*\" ct state established,related accept\n", p)
-		fmt.Fprintf(&b, "\t\toifname \"%s*\" drop\n", p)
-	}
 	for _, p := range IfacePrefixes {
 		fmt.Fprintf(&b, "\t\tiifname \"%s*\" meta nfproto ipv6 drop\n", p)
 	}
 	for _, g := range gs {
 		fmt.Fprintf(&b, "\t\tiifname \"%s\" ip saddr != %s drop\n", g.Iface, g.Addr)
 		fmt.Fprintf(&b, "\t\tiifname \"%s\" ip daddr @blocked_v4 drop\n", g.Iface)
+	}
+	// Replies from outside to a guest; never for packets that come from a guest.
+	b.WriteString("\t\tiifname != " + prefixSet() + " oifname " + prefixSet() + " ct state established,related accept\n")
+	for _, p := range IfacePrefixes {
+		fmt.Fprintf(&b, "\t\toifname \"%s*\" drop\n", p)
+	}
+	for _, g := range gs {
+		fmt.Fprintf(&b, "\t\tiifname \"%s\" accept\n", g.Iface)
+	}
+	for _, p := range IfacePrefixes {
+		fmt.Fprintf(&b, "\t\tiifname \"%s*\" drop\n", p)
 	}
 	b.WriteString("\t}\n")
 

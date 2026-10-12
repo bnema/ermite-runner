@@ -78,6 +78,64 @@ func TestRulesetPolicyInvariants(t *testing.T) {
 	}
 }
 
+// S1: nothing a guest sends may be accepted by a conntrack rule before the
+// per-guest checks: a forged "reply" from guest A to guest B's flow would
+// otherwise be accepted as established traffic.
+func TestForwardChainChecksGuestTrafficBeforeEstablished(t *testing.T) {
+	rs := Ruleset([]Guest{guest(t, "ertap0", 0), guest(t, "erbr1", 1)})
+	fwd := rs[strings.Index(rs, "chain forward"):strings.Index(rs, "chain postrouting")]
+	lines := strings.Split(fwd, "\n")
+	idx := func(sub string) int {
+		for i, l := range lines {
+			if strings.Contains(l, sub) {
+				return i
+			}
+		}
+		t.Fatalf("forward chain lacks %q:\n%s", sub, fwd)
+		return -1
+	}
+	est := idx("ct state established,related accept")
+	for _, must := range []string{
+		`iifname "ertap*" meta nfproto ipv6 drop`, `iifname "erbr*" meta nfproto ipv6 drop`,
+		`iifname "ertap0" ip saddr != 10.200.0.2 drop`, `iifname "ertap0" ip daddr @blocked_v4 drop`,
+		`iifname "erbr1" ip saddr != 10.200.0.6 drop`, `iifname "erbr1" ip daddr @blocked_v4 drop`,
+	} {
+		if idx(must) > est {
+			t.Errorf("%q must come before the established accept", must)
+		}
+	}
+	// And the established accept itself never applies to packets that enter
+	// through a sandbox interface.
+	if !strings.Contains(lines[est], `iifname != { "ertap*", "erbr*" }`) {
+		t.Errorf("established accept must exclude sandbox ingress: %s", lines[est])
+	}
+}
+
+// S6: port 53 of a gateway address is closed to every interface but its guest's.
+func TestInputChainClosesGatewayDNSToOtherInterfaces(t *testing.T) {
+	rs := Ruleset([]Guest{guest(t, "ertap0", 0), guest(t, "ertap1", 1)})
+	for _, want := range []string{
+		`ip daddr 10.200.0.1 udp dport 53 iifname != "ertap0" drop`,
+		`ip daddr 10.200.0.1 tcp dport 53 iifname != "ertap0" drop`,
+		`ip daddr 10.200.0.5 udp dport 53 iifname != "ertap1" drop`,
+		`ip daddr 10.200.0.5 tcp dport 53 iifname != "ertap1" drop`,
+	} {
+		if !strings.Contains(rs, want) {
+			t.Errorf("lacks %q", want)
+		}
+	}
+}
+
+// S10: documentation, test-net and benchmarking ranges are blocked too.
+func TestBlockedSetCoversSpecialUseRanges(t *testing.T) {
+	rs := Ruleset([]Guest{guest(t, "ertap0", 0)})
+	for _, r := range []string{"192.0.0.0/24", "192.0.2.0/24", "198.18.0.0/15", "198.51.100.0/24", "203.0.113.0/24", "224.0.0.0/4", "240.0.0.0/4"} {
+		if !strings.Contains(rs, r) {
+			t.Errorf("blocked set lacks %s", r)
+		}
+	}
+}
+
 func TestSubnet(t *testing.T) {
 	base := netip.MustParsePrefix("10.200.0.0/16")
 	n, err := Subnet(base, 3)
