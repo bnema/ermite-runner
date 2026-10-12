@@ -20,26 +20,48 @@ import (
 // conclusions and their logs with the recordings made on github.com. They need
 // a checkout of ermite-conformance (the corpus and recordings directories),
 // found through ERMITE_CONFORMANCE_DIR or as a sibling of this repository;
-// they skip without it.
+// they skip without it (and fail when ERMITE_CONFORMANCE_DIR is wrong).
 
 func conformanceDir(t *testing.T) string {
 	t.Helper()
-	cands := []string{os.Getenv("ERMITE_CONFORMANCE_DIR")}
+	return conformanceDirFor(t, "")
+}
+
+// conformanceDirFor is conformanceDir for a checkout that has the recording of
+// scenario (any checkout with a corpus when scenario is empty). The checkout is
+// ERMITE_CONFORMANCE_DIR when set (the test fails if it lacks the corpus or the
+// recording: a wrong path must not look like a pass), else the main checkout
+// ermite-conformance next to this repository (skipped when it has none).
+func conformanceDirFor(t *testing.T, scenario string) string {
+	t.Helper()
+	has := func(dir string) (corpus, rec bool) {
+		if st, err := os.Stat(filepath.Join(dir, "corpus")); err == nil && st.IsDir() {
+			corpus = true
+		}
+		if scenario == "" {
+			return corpus, true
+		}
+		_, err := os.Stat(filepath.Join(dir, "recordings", scenario+".json"))
+		return corpus, err == nil
+	}
+	if dir := os.Getenv("ERMITE_CONFORMANCE_DIR"); dir != "" {
+		corpus, rec := has(dir)
+		if !corpus {
+			t.Fatalf("ERMITE_CONFORMANCE_DIR=%s has no corpus directory", dir)
+		}
+		if !rec {
+			t.Fatalf("ERMITE_CONFORMANCE_DIR=%s has no recordings/%s.json", dir, scenario)
+		}
+		return dir
+	}
 	wd, _ := os.Getwd()
 	for d := wd; d != "/" && d != "."; d = filepath.Dir(d) {
-		cands = append(cands,
-			filepath.Join(d, "ermite-conformance", ".worktrees", "corpus"),
-			filepath.Join(d, "ermite-conformance"))
-	}
-	for _, c := range cands {
-		if c == "" {
-			continue
-		}
-		if st, err := os.Stat(filepath.Join(c, "corpus")); err == nil && st.IsDir() {
+		c := filepath.Join(d, "ermite-conformance")
+		if corpus, rec := has(c); corpus && rec {
 			return c
 		}
 	}
-	t.Skip("ermite-conformance checkout not found (set ERMITE_CONFORMANCE_DIR)")
+	t.Skip("ermite-conformance checkout not found next to this repository (set ERMITE_CONFORMANCE_DIR)")
 	return ""
 }
 
@@ -163,6 +185,7 @@ func readFile(t *testing.T, p string) string {
 type recording struct {
 	Pushes []struct {
 		Runs []struct {
+			Workflow   string `json:"workflow"`
 			Conclusion string `json:"conclusion"`
 			Jobs       []struct {
 				Name       string `json:"name"`
@@ -323,4 +346,63 @@ func TestCorpusStatusInEnvIsRejected(t *testing.T) {
 	if res.Conclusion != ConclusionFailure || !strings.Contains(res.Error, "The workflow is not valid") || len(rec.steps) != 1 {
 		t.Fatalf("%+v %v", res, rec.names())
 	}
+}
+
+// TestCorpusPermissionsDisplay runs every job of every workflow of the
+// permissions-display scenario and compares the GITHUB_TOKEN Permissions group
+// of Set up job with the recording. The scenario has one workflow file per
+// case, so compareWithRecording does not apply. Workflows GitHub rejects have
+// no jobs in the recording and are not run.
+func TestCorpusPermissionsDisplay(t *testing.T) {
+	needTools(t, "bash")
+	dir := conformanceDirFor(t, "permissions-display")
+	var rec recording
+	if err := json.Unmarshal([]byte(readFile(t, filepath.Join(dir, "recordings", "permissions-display.json"))), &rec); err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, run := range rec.Pushes[0].Runs {
+		if len(run.Jobs) == 0 {
+			continue
+		}
+		file := run.Workflow
+		yaml := readFile(t, filepath.Join(dir, "corpus", "permissions-display", "tree", filepath.FromSlash(file)))
+		for _, jr := range run.Jobs {
+			t.Run(strings.TrimSuffix(filepath.Base(file), ".yml")+"/"+jr.Name, func(t *testing.T) {
+				if len(jr.Steps) == 0 {
+					t.Fatal("no steps in the recording")
+				}
+				want := permissionsGroup(jr.Steps[0].Log)
+				if want == nil {
+					t.Fatalf("no group in the recording: %v", jr.Steps[0].Log)
+				}
+				got, res := runLocal(t, yaml, jr.Name, nil)
+				if res.Conclusion != ConclusionSuccess || len(got.steps) == 0 {
+					t.Fatalf("job did not run: %+v %v", res, got.names())
+				}
+				if have := permissionsGroup(got.steps[0].Log); strings.Join(have, "\n") != strings.Join(want, "\n") {
+					t.Errorf("got\n%s\nwant\n%s", strings.Join(have, "\n"), strings.Join(want, "\n"))
+				}
+			})
+			n++
+		}
+	}
+	if n < 20 {
+		t.Fatalf("only %d jobs in the recording", n)
+	}
+}
+
+// permissionsGroup returns the lines of the GITHUB_TOKEN Permissions group.
+func permissionsGroup(log []string) []string {
+	for i, l := range log {
+		if l != "##[group]GITHUB_TOKEN Permissions" {
+			continue
+		}
+		for k := i + 1; k < len(log); k++ {
+			if log[k] == "##[endgroup]" {
+				return log[i+1 : k]
+			}
+		}
+	}
+	return nil
 }

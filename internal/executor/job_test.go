@@ -696,19 +696,81 @@ func TestSetUpJobSelfHostedNamesTheRunner(t *testing.T) {
 	}
 }
 
-// Permissions the workflow sets are not the default ones: no group is printed
-// rather than a wrong one.
-func TestSetUpJobWithPermissionsPrintsNoDefaultGroup(t *testing.T) {
+// The expected groups of the whole-token cases, as recorded on github.com
+// (recordings/permissions-display.json: p-read-all, p-write-all).
+const (
+	recordedReadAll = `Actions: read
+ArtifactMetadata: read
+Attestations: read
+Checks: read
+CodeQuality: read
+Contents: read
+Deployments: read
+Discussions: read
+Drives: read
+Issues: read
+Metadata: read
+Models: read
+Packages: read
+Pages: read
+PullRequests: read
+RepositoryProjects: read
+SecurityEvents: read
+Statuses: read
+VulnerabilityAlerts: read`
+	recordedWriteAll = `Actions: write
+ArtifactMetadata: write
+Attestations: write
+Checks: write
+CodeQuality: write
+Contents: write
+CopilotRequests: write
+Deployments: write
+Discussions: write
+Drives: write
+Issues: write
+Metadata: read
+Models: read
+Packages: write
+Pages: write
+PullRequests: write
+RepositoryProjects: write
+SecurityEvents: write
+Statuses: write
+VulnerabilityAlerts: read`
+)
+
+// The GITHUB_TOKEN Permissions group follows the effective permissions of the
+// job (the job's replace the workflow's), as recorded on github.com
+// (recordings/permissions-display.json).
+func TestSetUpJobPrintsTheTokenPermissionsGitHubGrants(t *testing.T) {
 	needTools(t, "bash")
-	for name, yaml := range map[string]string{
-		"workflow": "permissions:\n  contents: write\n" + wfHead + "    steps:\n      - run: echo hi\n",
-		"job":      wfHead + "    permissions: read-all\n    steps:\n      - run: echo hi\n",
-		"empty":    "permissions: {}\n" + wfHead + "    steps:\n      - run: echo hi\n",
-		"write":    "permissions: write-all\n" + wfHead + "    steps:\n      - run: echo hi\n",
+	steps := "    steps:\n      - run: echo hi\n"
+	for _, tc := range []struct {
+		name, yaml, want string
+	}{
+		{"no key", wfHead + steps, "Contents: read\nMetadata: read\nPackages: read"},
+		{"workflow {}", "permissions: {}\n" + wfHead + steps, "Metadata: read"},
+		{"job {}", "permissions: write-all\n" + wfHead + "    permissions: {}\n" + steps, "Metadata: read"},
+		{"workflow map", "permissions:\n  packages: read\n  contents: write\n" + wfHead + steps,
+			"Contents: write\nMetadata: read\nPackages: read"},
+		{"none and id-token are not listed", wfHead + "    permissions:\n      issues: none\n      id-token: write\n      checks: read\n" + steps,
+			"Checks: read\nMetadata: read"},
+		{"job replaces workflow", "permissions:\n  contents: write\n  issues: write\n" + wfHead + "    permissions:\n      pull-requests: read\n" + steps,
+			"Metadata: read\nPullRequests: read"},
+		{"job read-all over workflow map", "permissions:\n  contents: write\n" + wfHead + "    permissions: read-all\n" + steps, recordedReadAll},
+		{"workflow write-all, job narrows", "permissions: write-all\n" + wfHead + "    permissions:\n      contents: read\n" + steps,
+			"Contents: read\nMetadata: read"},
+		{"read-all", "permissions: read-all\n" + wfHead + steps, recordedReadAll},
+		{"write-all", "permissions: write-all\n" + wfHead + steps, recordedWriteAll},
+		{"metadata is not asked for", wfHead + "    permissions:\n      copilot-requests: write\n      security-events: read\n      pull-requests: write\n" + steps,
+			"CopilotRequests: write\nMetadata: read\nPullRequests: write\nSecurityEvents: read"},
 	} {
-		got := setupLog(t, yaml, "j", nil)
-		if strings.Contains(got, "GITHUB_TOKEN Permissions") || !strings.Contains(got, "Secret source: Actions\nCache mode: write") {
-			t.Errorf("%s:\n%s", name, got)
+		want := strings.Join([]string{"Current runner version: 'test'", "##[group]GITHUB_TOKEN Permissions", tc.want,
+			"##[endgroup]", "Secret source: Actions", "Cache mode: write", "Prepare workflow directory",
+			"Prepare all required actions", "Complete job name: j"}, "\n")
+		if got := setupLog(t, tc.yaml, "j", nil); got != want {
+			t.Errorf("%s:\ngot\n%s\nwant\n%s", tc.name, got, want)
 		}
 	}
 }
