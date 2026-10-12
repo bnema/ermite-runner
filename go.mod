@@ -3,6 +3,7 @@ module bnema.dev/ermite-runner
 go 1.27.1
 
 require (
+	bnema.dev/ermite-actions v0.0.0-20261012165742-b6c4c3a2f7ff
 	github.com/bnema/zerowrap v1.4.1
 	github.com/containerd/errdefs v1.0.0
 	github.com/google/uuid v1.6.0

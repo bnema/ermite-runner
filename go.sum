@@ -1,3 +1,5 @@
+bnema.dev/ermite-actions v0.0.0-20261012165742-b6c4c3a2f7ff h1:pL7zBg/EGJdrmuXpmHTiVekqDu0bwDFQeYDOZlXF5rI=
+bnema.dev/ermite-actions v0.0.0-20261012165742-b6c4c3a2f7ff/go.mod h1:qoIB/Iz4xKdLUG4R6wuBDk6cemdugR+UEo5bpSJJYh4=
 buf.build/gen/go/bufbuild/bufplugin/protocolbuffers/go v1.36.12-20260722160903-4d94f3df3a7b.2 h1:z5+rVknD0AvorY/QV9cb3ohUXw4E7HvxU4+2JUH6EHU=
 buf.build/gen/go/bufbuild/bufplugin/protocolbuffers/go v1.36.12-20260722160903-4d94f3df3a7b.2/go.mod h1:Owcuj2phVyvThVYCD74iSV8ki0dAXw/uxkdcdZScdCc=
 buf.build/gen/go/bufbuild/protodescriptor/protocolbuffers/go v1.36.12-20250109164928-1da0de137947.2 h1:tE4A2RVukQOSd4K+6ndK+8s65FbjiBt2k5CiddXxCCo=
