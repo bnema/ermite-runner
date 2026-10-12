@@ -30,6 +30,11 @@ const (
 	cmdStepSummary = "step_summary"
 	cmdState       = "state"
 	cmdOutput      = "output"
+	// The two artifact files exist on GitHub-hosted runners (recordings: the
+	// github context has artifacts and artifacts_list, the steps GITHUB_ARTIFACTS
+	// and GITHUB_ARTIFACTS_LIST). ermite does not process them, see below.
+	cmdArtifacts     = "artifacts"
+	cmdArtifactsList = "artifacts_list"
 )
 
 // fileCommand describes one file command like the IFileCommandExtension of
@@ -47,10 +52,21 @@ var fileCommands = []fileCommand{
 	{cmdStepSummary, "step_summary_"}, // CreateStepSummaryCommand (:221)
 	{cmdState, "save_state_"},         // SaveStateFileCommand (:295)
 	{cmdOutput, "set_output_"},        // SetOutputFileCommand (:328)
+	// CreateArtifactsFileCommand (CreateArtifactsFileCommand.cs:39) and
+	// ArtifactsListFileCommand (ArtifactsListFileCommand.cs:37), registered in
+	// ExtensionManager.cs:65-66. Both do nothing unless the feature flag
+	// actions_runner_allow_artifacts_file or ACTIONS_RUNNER_ALLOW_ARTIFACTS_FILE
+	// is on (CreateArtifactsFileCommand.cs:67-79); ermite has neither, so the
+	// files are created empty (as the C# runner does when the feature is off)
+	// and what a step writes to them is ignored. Artifact subjects are not
+	// declared yet.
+	{cmdArtifacts, "artifacts_"},
+	{cmdArtifactsList, "artifacts_list_"},
 }
 
 // EnvVarName returns the environment variable that holds the file of a command:
-// GITHUB_ENV, GITHUB_OUTPUT, GITHUB_PATH, GITHUB_STATE, GITHUB_STEP_SUMMARY
+// GITHUB_ARTIFACTS, GITHUB_ARTIFACTS_LIST, GITHUB_ENV, GITHUB_OUTPUT, GITHUB_PATH,
+// GITHUB_STATE, GITHUB_STEP_SUMMARY
 // (GitHubContext.GetRuntimeEnvironmentVariables, GitHubContext.cs:52).
 func envVarName(contextName string) string { return "GITHUB_" + strings.ToUpper(contextName) }
 
@@ -166,6 +182,8 @@ func (f *FileCommands) Process(sink Sink) {
 			err = processStepSummary(sink, f.root, p)
 		case cmdState:
 			err = processPairs(sink, f.root, p, sink.SaveState, func(k, v string) { sink.Debug(fmt.Sprintf("Save intra-action state %s = %s", k, v)) })
+		case cmdArtifacts, cmdArtifactsList:
+			// Disabled feature: nothing to process (see fileCommands).
 		case cmdOutput:
 			err = processPairs(sink, f.root, p, sink.SetOutput, func(k, v string) { sink.Debug(fmt.Sprintf("Set output %s = %s", k, v)) })
 		}

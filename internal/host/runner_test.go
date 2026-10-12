@@ -80,7 +80,7 @@ func TestTheJobTokenAndTheRunnerTokenStayApart(t *testing.T) {
 	h.run(t)
 	eventually(t, "CompleteJob", func() bool { return h.srv.completeCount() == 1 })
 	// The sandbox gets the workflow and contexts, never a token.
-	if sawJobSpec == nil || sawJobSpec.JobKey != "j" || sawJobSpec.RunnerName != "r1" || sawJobSpec.RunnerEnvironment != "self-hosted" || sawJobSpec.TimeoutMinutes != 5 {
+	if sawJobSpec == nil || sawJobSpec.JobKey != "j" || sawJobSpec.RunnerName != "r1" || sawJobSpec.RunnerEnvironment != "github-hosted" || sawJobSpec.TimeoutMinutes != 5 {
 		t.Fatalf("%v", sawJobSpec)
 	}
 	if strings.Contains(sawJobSpec.String(), "ermitejob_") || strings.Contains(sawJobSpec.String(), "ermiterun_") {
@@ -785,6 +785,18 @@ func TestLoadConfig(t *testing.T) {
 	if c.URL != "https://ermite.example" || c.Name != "my-host.local" || strings.Join(c.Labels, ",") != "ubuntu-latest,Ubuntu-24.04" || c.Capacity != 2 {
 		t.Fatalf("%+v", c)
 	}
+	if c.Environment != "github-hosted" {
+		t.Errorf("default environment %q", c.Environment)
+	}
+	env[EnvEnvironment] = " Self-Hosted "
+	if c, err := LoadConfig(func(k string) string { return env[k] }, "h", "/s", 1, ""); err != nil || c.Environment != "self-hosted" {
+		t.Errorf("self-hosted: %q, %v", c.Environment, err)
+	}
+	env[EnvEnvironment] = "cloud"
+	if _, err := LoadConfig(func(k string) string { return env[k] }, "h", "/s", 1, ""); err == nil || !strings.Contains(err.Error(), EnvEnvironment) {
+		t.Errorf("an invalid environment was accepted: %v", err)
+	}
+	delete(env, EnvEnvironment)
 	env[EnvName] = "bad name"
 	if _, err := LoadConfig(func(k string) string { return env[k] }, "h", "/s", 1, ""); err == nil {
 		t.Error("an invalid name was accepted")

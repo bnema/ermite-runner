@@ -3,12 +3,15 @@
 package executor
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/bnema/zerowrap"
 )
 
 const wfHead = "on: push\njobs:\n  j:\n    runs-on: x\n"
@@ -31,7 +34,7 @@ func TestImplicitStepsAndNumbering(t *testing.T) {
 		}
 	}
 	setup := logOf(rec.steps[0])
-	for _, w := range []string{"Current runner version: 'test'", "Runner name: 'test-runner'", "Prepare workflow directory", "Prepare all required actions", "Complete job name: j"} {
+	for _, w := range []string{"Current runner version: 'test'", "Prepare workflow directory", "Prepare all required actions", "Complete job name: j"} {
 		if !strings.Contains(setup, w) {
 			t.Errorf("Set up job lacks %q:\n%s", w, setup)
 		}
@@ -617,5 +620,232 @@ func TestDeadlineOverridesTheTimeout(t *testing.T) {
 	}
 	if time.Since(start) > 10*time.Second || rec.steps[1].Conclusion != ConclusionCancelled {
 		t.Fatalf("took %v: %+v", time.Since(start), rec.steps[1])
+	}
+}
+
+// The env of a step reads its own id in github.action (StepsRunner.cs:118 sets
+// it before the env is evaluated), and the file command paths of the step
+// before it, as the recordings of github.com show for the dump step.
+func TestGithubActionInStepEnvIsTheStepsOwnID(t *testing.T) {
+	needTools(t, "bash")
+	rec, res := runLocal(t, wfHead+`    steps:
+      - run: echo one
+      - id: named
+        run: echo "$A|$GITHUB_ACTION|$GITHUB_ARTIFACTS" | sed 's#/[^|]*/##'
+        env:
+          A: ${{ github.action }}
+      - run: echo "$A"
+        env:
+          A: ${{ github.action }}
+`, "j", nil)
+	if res.Conclusion != ConclusionSuccess {
+		t.Fatalf("%+v", res)
+	}
+	if got := rec.steps[2].Log[len(rec.steps[2].Log)-1]; !strings.HasPrefix(got, "named|named|artifacts_") {
+		t.Errorf("named step: %q", got)
+	}
+	if got := rec.steps[3].Log[len(rec.steps[3].Log)-1]; got != "__run_2" {
+		t.Errorf("third step: %q", got)
+	}
+}
+
+// Without a matrix the matrix context is null, as on github.com (toJSON prints
+// null), and matrix.x is still readable (null, so an empty string).
+func TestMatrixContextWithoutMatrixIsNull(t *testing.T) {
+	needTools(t, "bash")
+	rec, res := runLocal(t, wfHead+`    steps:
+      - run: echo "json=$J x=[$X] eq=$E"
+        env:
+          J: ${{ toJSON(matrix) }}
+          X: ${{ matrix.x }}
+          E: ${{ matrix == null }}
+`, "j", nil)
+	if res.Conclusion != ConclusionSuccess {
+		t.Fatalf("%+v %v", res, logOf(rec.steps[1]))
+	}
+	if got := rec.steps[1].Log[len(rec.steps[1].Log)-1]; got != "json=null x=[] eq=true" {
+		t.Errorf("%q", got)
+	}
+}
+
+func setupLog(t *testing.T, yaml, job string, tweak func(*Config)) string {
+	t.Helper()
+	rec, res := runLocal(t, yaml, job, tweak)
+	if res.Conclusion != ConclusionSuccess {
+		t.Fatalf("%+v", res)
+	}
+	return logOf(rec.steps[0])
+}
+
+func TestSetUpJobMatchesGitHubHosted(t *testing.T) {
+	needTools(t, "bash")
+	want := strings.Join([]string{"Current runner version: 'test'", "##[group]GITHUB_TOKEN Permissions", "Contents: read", "Metadata: read",
+		"Packages: read", "##[endgroup]", "Secret source: Actions", "Cache mode: write", "Prepare workflow directory",
+		"Prepare all required actions", "Complete job name: j"}, "\n")
+	if got := setupLog(t, wfHead+"    steps:\n      - run: echo hi\n", "j", nil); got != want {
+		t.Errorf("github-hosted:\n%s", got)
+	}
+}
+
+func TestSetUpJobSelfHostedNamesTheRunner(t *testing.T) {
+	needTools(t, "bash")
+	got := setupLog(t, wfHead+"    steps:\n      - run: echo hi\n", "j", func(c *Config) { c.Runner.Environment = "self-hosted" })
+	host, _ := os.Hostname()
+	if !strings.Contains(got, "Runner name: 'test-runner'\nMachine name: '"+host+"'\n##[group]GITHUB_TOKEN") {
+		t.Errorf("self-hosted:\n%s", got)
+	}
+}
+
+// Permissions the workflow sets are not the default ones: no group is printed
+// rather than a wrong one.
+func TestSetUpJobWithPermissionsPrintsNoDefaultGroup(t *testing.T) {
+	needTools(t, "bash")
+	for name, yaml := range map[string]string{
+		"workflow": "permissions:\n  contents: write\n" + wfHead + "    steps:\n      - run: echo hi\n",
+		"job":      wfHead + "    permissions: read-all\n    steps:\n      - run: echo hi\n",
+		"empty":    "permissions: {}\n" + wfHead + "    steps:\n      - run: echo hi\n",
+		"write":    "permissions: write-all\n" + wfHead + "    steps:\n      - run: echo hi\n",
+	} {
+		got := setupLog(t, yaml, "j", nil)
+		if strings.Contains(got, "GITHUB_TOKEN Permissions") || !strings.Contains(got, "Secret source: Actions\nCache mode: write") {
+			t.Errorf("%s:\n%s", name, got)
+		}
+	}
+}
+
+func TestSetUpJobNamesTheJobLikeGitHub(t *testing.T) {
+	needTools(t, "bash")
+	// recordings/matrix-job-name.json
+	yaml := `on: push
+jobs:
+  default-name:
+    runs-on: x
+    strategy:
+      matrix:
+        os: [a, b]
+        n: [1, 2]
+    steps:
+      - run: echo hi
+  custom-name:
+    name: "custom ${{ matrix.os }} / ${{ matrix.n }} / ${{ github.event_name }}"
+    runs-on: x
+    strategy:
+      matrix:
+        os: [a, b]
+        n: [1]
+    steps:
+      - run: echo hi
+  static-name:
+    name: same name for every leg
+    runs-on: x
+    strategy:
+      matrix:
+        n: [1, 2]
+    steps:
+      - run: echo hi
+  plain:
+    name: "plain ${{ github.event_name }}"
+    runs-on: x
+    steps:
+      - run: echo hi
+`
+	for _, tc := range []struct{ job, matrix, strategy, want string }{
+		{"default-name", `{"os":"b","n":1}`, `{"job-index":2}`, "default-name (b, 1)"},
+		{"default-name", `{"os":"a","n":2}`, `{"job-index":1}`, "default-name (a, 2)"},
+		{"default-name", `{"os":"b","n":2}`, ``, "default-name (b, 2)"},
+		{"custom-name", `{"os":"b","n":1}`, `{"job-index":1}`, "custom b / 1 / push"},
+		{"static-name", `{"n":2}`, `{"job-index":1}`, "same name for every leg (2)"},
+		{"plain", `{}`, ``, "plain push"},
+		{"static-name", `{"n":9}`, ``, "static-name"}, // not one of the combinations: the job key
+		// job-index points to another combination: it is not trusted.
+		{"default-name", `{"os":"a","n":2}`, `{"job-index":0}`, "default-name (a, 2)"},
+		{"default-name", `{"os":"b","n":2}`, `{"job-index":7}`, "default-name (b, 2)"},
+	} {
+		t.Run(tc.want, func(t *testing.T) {
+			got := setupLog(t, yaml, tc.job, func(c *Config) {
+				c.MatrixJSON = tc.matrix
+				ctx := testGitHubContext(tc.job)
+				ctx = strings.TrimSuffix(ctx, "}")
+				ctx += `,"matrix":` + tc.matrix
+				if tc.strategy != "" {
+					ctx += `,"strategy":` + tc.strategy
+				}
+				c.ContextsJSON = ctx + "}"
+			})
+			if !strings.HasSuffix(got, "Complete job name: "+tc.want) {
+				t.Errorf("got:\n%s", got)
+			}
+		})
+	}
+}
+
+func TestJobDisplayNameReadsNeedsVarsAndIgnoresRunnerKeys(t *testing.T) {
+	needTools(t, "bash")
+	yaml := `on: push
+jobs:
+  j:
+    name: "${{ needs.a.outputs.o }}-${{ vars.V }}-${{ github.workspace }}-${{ github.secret_source }}-${{ github.token }}-${{ github.event_name }}"
+    runs-on: x
+    steps:
+      - run: echo hi
+`
+	got := setupLog(t, yaml, "j", func(c *Config) {
+		c.ContextsJSON = `{"github":{"repository":"octo/hello","event_name":"push","job":"j"},"needs":{"a":{"outputs":{"o":"out"}}},"vars":{"V":"v1"}}`
+	})
+	// workspace, secret_source and token are added by the runner: empty for the name.
+	if !strings.HasSuffix(got, "Complete job name: out-v1----push") {
+		t.Errorf("got:\n%s", got)
+	}
+}
+
+func TestJobDisplayNameIncludeOnlyMatrix(t *testing.T) {
+	needTools(t, "bash")
+	yaml := `on: push
+jobs:
+  j:
+    runs-on: x
+    strategy:
+      matrix:
+        include:
+          - os: a
+            n: 1
+          - os: b
+            n: 2
+    steps:
+      - run: echo hi
+`
+	for matrix, want := range map[string]string{`{"os":"b","n":2}`: "j (b, 2)", `{"os":"a","n":1}`: "j (a, 1)"} {
+		got := setupLog(t, yaml, "j", func(c *Config) {
+			c.MatrixJSON = matrix
+			c.ContextsJSON = strings.TrimSuffix(testGitHubContext("j"), "}") + `,"matrix":` + matrix + `}`
+		})
+		if !strings.HasSuffix(got, "Complete job name: "+want) {
+			t.Errorf("%s:\n%s", matrix, got)
+		}
+	}
+}
+
+func TestJobDisplayNameFallsBackToTheKeyWithAWarning(t *testing.T) {
+	needTools(t, "bash")
+	yaml := `on: push
+jobs:
+  j:
+    runs-on: x
+    strategy:
+      matrix:
+        n: [1, 2]
+    steps:
+      - run: echo hi
+`
+	var logs bytes.Buffer
+	got := setupLog(t, yaml, "j", func(c *Config) {
+		c.MatrixJSON = `{"n":5}`
+		c.Log = zerowrap.New(zerowrap.Config{Level: "debug", Format: "json", Output: &logs})
+	})
+	if !strings.HasSuffix(got, "Complete job name: j") {
+		t.Errorf("got:\n%s", got)
+	}
+	if !strings.Contains(logs.String(), `"level":"warn"`) || !strings.Contains(logs.String(), "using the job key") {
+		t.Errorf("no warning: %q", logs.String())
 	}
 }

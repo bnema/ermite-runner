@@ -91,7 +91,6 @@ func (j *job) prepareFileCommands(st *workflow.Step) error {
 	for _, c := range fileCommands {
 		j.state.SetGitHub(c.ContextName, files[envVarName(c.ContextName)])
 	}
-	j.state.SetGitHub("action", st.ID)
 	j.state.SetGitHub("action_repository", "")
 	j.state.SetGitHub("action_ref", "")
 	if ev := j.state.EventJSON(); ev != "" {

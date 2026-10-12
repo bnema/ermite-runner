@@ -12,6 +12,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/bnema/zerowrap"
+
 	"bnema.dev/ermite-runner/internal/execstream"
 	"bnema.dev/ermite-runner/internal/execstream/execpb"
 	"bnema.dev/ermite-runner/internal/executor"
@@ -204,7 +206,7 @@ func runJob(ctx context.Context, conn *execstream.Conn, cfg ExecConfig, spec *ex
 		Runner:        executor.RunnerInfo{Name: spec.GetRunnerName(), Environment: env},
 		RunnerVersion: spec.GetRunnerVersion(),
 		Home:          su.Home, ToolCache: os.Getenv("RUNNER_TOOL_CACHE"), BaseEnv: stepEnv(os.Environ(), su), Credential: su.Credential,
-		Debug: spec.GetDebug(), Reporter: rep,
+		Debug: spec.GetDebug(), Reporter: rep, Log: zerowrap.FromCtx(ctx),
 		TermAfter: cfg.TermAfter, KillAfter: cfg.KillAfter, WaitDelay: cfg.WaitDelay,
 	})
 	if res.Conclusion == executor.ConclusionSuccess {

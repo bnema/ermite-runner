@@ -130,6 +130,10 @@ func (j *job) runStep(num int, st *workflow.Step) {
 	// Environment of the step (StepsRunner.cs:108-139): job env, then the step's
 	// own, evaluated against the job env.
 	j.mu.Lock()
+	// github.action is the id of the step, set before the step's env is
+	// evaluated (StepsRunner.cs:118), so that the env and the if of a step see
+	// its own id (the dump step of the recordings reads __run_6, not __run_5).
+	j.state.SetGitHub("action", st.ID)
 	jobEnv := j.state.JobEnv()
 	j.mu.Unlock()
 	s.env = jobEnv.Clone()

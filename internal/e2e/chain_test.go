@@ -78,9 +78,13 @@ var (
 	// Machine-dependent parts of the recordings, like the normalisation rules of
 	// ermite-conformance: random script names and the repository name.
 	repoRe = regexp.MustCompile(`/work/hello/hello`)
+	// The runner version moves with each release (rule runner-version of
+	// ermite-conformance).
+	versionRe = regexp.MustCompile(`(Current runner version: ')[^']*(')`)
 )
 
 func normalize(l string) string {
+	l = versionRe.ReplaceAllString(l, "${1}<runner-version>${2}")
 	l = repoRe.ReplaceAllString(l, "/work/<repo>/<repo>")
 	return uuidRe.ReplaceAllString(l, "<uuid>")
 }
@@ -215,8 +219,10 @@ func contains(l []string, s string) bool {
 }
 
 // compareJob checks the steps, conclusions, outputs and log lines reported for
-// a job against the recording. "Set up job" (runner and image details) and the
-// ermite-dump step that the harness appends to every job are not compared.
+// a job against the recording. The ermite-dump step that the harness appends to
+// every job is not compared, and neither are the three groups of "Set up job"
+// that describe GitHub's fleet and image (ermite-conformance drops them from
+// the recordings, rule infra-groups): the other lines of "Set up job" are.
 func compareJob(t *testing.T, got hosttest.Result, want recJob, scenario string) {
 	if got.Complete == nil {
 		t.Fatal("the job did not complete")
@@ -258,7 +264,7 @@ func compareJob(t *testing.T, got hosttest.Result, want recJob, scenario string)
 	type es = recStep
 	var wantSteps, gotSteps []es
 	for _, s := range want.Steps {
-		if s.Name == "Set up job" || s.Name == "ermite-dump" {
+		if s.Name == "ermite-dump" {
 			continue
 		}
 		wantSteps = append(wantSteps, s)
@@ -269,9 +275,6 @@ func compareJob(t *testing.T, got hosttest.Result, want recJob, scenario string)
 	}
 	for _, n := range steps {
 		u := got.Steps[n]
-		if u.Name == "Set up job" {
-			continue
-		}
 		if u.State != ermite.StepState_STEP_STATE_COMPLETED || u.StartedAt == nil || u.CompletedAt == nil {
 			t.Errorf("step %d %q is not a complete snapshot: %v", n, u.Name, u)
 		}

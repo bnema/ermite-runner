@@ -94,6 +94,7 @@ the host process; the sandbox receives the workflow and its contexts only.
 | `ERMITE_RUNNER_URL` | base URL of ermite, as in a browser (the runner adds `/-/api` itself) |
 | `ERMITE_RUNNER_NAME` | runner name (default: the host name) |
 | `ERMITE_RUNNER_LABELS` | extra labels, comma separated (`ubuntu-latest,ubuntu-24.04`) |
+| `ERMITE_RUNNER_ENVIRONMENT` | `github-hosted` (default) or `self-hosted`: the `runner.environment` value the jobs see. ermite's runners stand in for GitHub-hosted ones, so workflows written for github.com (`runner.environment == 'github-hosted'`) behave the same; `self-hosted` also makes "Set up job" print the runner and machine name, as GitHub does for self-hosted runners |
 | `ERMITE_RUNNER_REGISTER_TOKEN` | token for `register` (see above) |
 | `ERMITE_RUNNER_INSECURE_HTTP` | `1` allows a non-loopback `http://` URL (tests only) |
 | `ERMITE_RUNNER_LOG_LEVEL` | `debug`, `info` (default), `warn`, `error` |

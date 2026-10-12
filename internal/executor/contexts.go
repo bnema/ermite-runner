@@ -77,6 +77,35 @@ func setKey(d *expr.Dictionary, key string, v expr.Value) *expr.Dictionary {
 	return out
 }
 
+// setKeySorted is setKey for the github context: a key that is not there yet
+// goes before the first key that sorts after it (bytewise; "token" stays first)
+// instead of at the end, so that the keys the runner adds (workspace,
+// secret_source, the file commands...) sit where the ermite-conformance
+// recordings list them. Note that the recordings are normalised with sorted
+// keys, so they show the sorted order, not necessarily the insertion order of
+// GitHub's runner (SetGitHubContext appends). Keys that exist are replaced in
+// place.
+func setKeySorted(d *expr.Dictionary, key string, v expr.Value) *expr.Dictionary {
+	for _, p := range d.Pairs() {
+		if strings.EqualFold(p.Key, key) {
+			return setKey(d, key, v)
+		}
+	}
+	out := expr.NewDictionary()
+	done := false
+	for _, p := range d.Pairs() {
+		if !done && p.Key > key && !strings.EqualFold(p.Key, "token") {
+			out.Add(key, v)
+			done = true
+		}
+		out.Add(p.Key, p.Value)
+	}
+	if !done {
+		out.Add(key, v)
+	}
+	return out
+}
+
 func str(d *expr.Dictionary, key string) string {
 	if v, ok := d.Get(key); ok {
 		if s, ok := v.(expr.String); ok {
@@ -127,6 +156,11 @@ type RunnerInfo struct {
 	Arch string
 }
 
+// githubHosted reports whether the runner.environment is "github-hosted". An
+// empty Environment is "self-hosted", the default of the official runner's
+// runner context.
+func (r RunnerInfo) githubHosted() bool { return r.Environment == "github-hosted" }
+
 func (r RunnerInfo) arch() string {
 	if r.Arch != "" {
 		return r.Arch
@@ -163,8 +197,13 @@ type stepCtx struct {
 type State struct {
 	layout Layout
 	github *expr.Dictionary
-	runner *expr.Dictionary
-	job    *expr.Dictionary
+	// serverGitHub is the github context as the server sent it, before the
+	// runner added its keys (token, workspace, the file commands, secret_source,
+	// action...): the contexts that the server itself evaluates the job name
+	// with (see ServerContexts).
+	serverGitHub *expr.Dictionary
+	runner       *expr.Dictionary
+	job          *expr.Dictionary
 	// other holds needs, strategy, matrix, inputs, vars: copied from the server.
 	other map[string]expr.Value
 	// env is Global.EnvironmentVariables: the job-level environment and what
@@ -216,8 +255,12 @@ func NewState(contextsJSON, matrixJSON, jobKey string, r RunnerInfo, repoFallbac
 			gh.Add(p.Key, p.Value)
 		}
 	}
+	s.serverGitHub = expr.NewDictionary()
+	if v, ok := root.Get("github"); ok {
+		s.serverGitHub = v.(*expr.Dictionary)
+	}
 	if str(gh, "job") == "" && jobKey != "" {
-		gh = setKey(gh, "job", expr.String(jobKey))
+		gh = setKeySorted(gh, "job", expr.String(jobKey))
 	}
 	repo := repoName(str(gh, "repository"))
 	if repo == "" {
@@ -228,7 +271,7 @@ func NewState(contextsJSON, matrixJSON, jobKey string, r RunnerInfo, repoFallbac
 	}
 	home := "/home/runner"
 	s.layout = NewLayout(home, repo, "")
-	s.github = setKey(gh, "workspace", expr.String(s.layout.Workspace))
+	s.github = setKeySorted(gh, "workspace", expr.String(s.layout.Workspace))
 	return s, s.layout, s.initRest(root, matrixJSON, r)
 }
 
@@ -236,7 +279,7 @@ func NewState(contextsJSON, matrixJSON, jobKey string, r RunnerInfo, repoFallbac
 // must be called before the first step.
 func (s *State) WithLayout(l Layout) {
 	s.layout = l
-	s.github = setKey(s.github, "workspace", expr.String(l.Workspace))
+	s.github = setKeySorted(s.github, "workspace", expr.String(l.Workspace))
 	s.runner = setKey(s.runner, "temp", expr.String(l.Temp))
 	s.runner = setKey(s.runner, "tool_cache", expr.String(l.ToolCache))
 	s.runner = setKey(s.runner, "workspace", expr.String(l.RunnerWorkspace))
@@ -256,6 +299,14 @@ func (s *State) initRest(root *expr.Dictionary, matrixJSON string, r RunnerInfo)
 		} else {
 			return fmt.Errorf("job matrix: %w", err)
 		}
+	}
+	// A job without a matrix has the matrix context null on github.com, not an
+	// empty object (recordings: "matrix": null in the 176 of 221 jobs that have
+	// none, and toJSON(matrix) prints null). The server sends "{}" for such a
+	// job (runner.proto: Job.matrix), so an empty matrix becomes null here.
+	// matrix.x still works: a property of null is null, as for a missing key.
+	if d, ok := s.other["matrix"].(*expr.Dictionary); !ok || d.Len() == 0 {
+		s.other["matrix"] = expr.Null{}
 	}
 	// A context the job does not have is an empty object, like the server's
 	// ("needs": {}, "inputs": {}, "vars": {}); matrix and strategy are null
@@ -302,7 +353,7 @@ func (s *State) initRest(root *expr.Dictionary, matrixJSON string, r RunnerInfo)
 func (s *State) Layout() Layout { return s.layout }
 
 // SetGitHub sets a key of the github context (SetGitHubContext).
-func (s *State) SetGitHub(k, v string) { s.github = setKey(s.github, k, expr.String(v)) }
+func (s *State) SetGitHub(k, v string) { s.github = setKeySorted(s.github, k, expr.String(v)) }
 
 // GitHub returns a string key of the github context ("" when absent).
 func (s *State) GitHub(k string) string { return str(s.github, k) }
@@ -410,6 +461,19 @@ func (s *State) Values(env *ordered) map[string]expr.Value {
 	}
 	for k, v := range s.other {
 		m[k] = v
+	}
+	return m
+}
+
+// ServerContexts returns the contexts that the server has when it evaluates
+// the name of a job: github as received (without the keys the runner adds),
+// needs, strategy, matrix, vars and inputs.
+func (s *State) ServerContexts() map[string]expr.Value {
+	m := map[string]expr.Value{"github": s.serverGitHub}
+	for _, k := range []string{"needs", "strategy", "matrix", "vars", "inputs"} {
+		if v, ok := s.other[k]; ok {
+			m[k] = v
+		}
 	}
 	return m
 }

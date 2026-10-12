@@ -102,15 +102,23 @@ func TestServerContextsAndDefaults(t *testing.T) {
 			t.Errorf("context %s missing", k)
 		}
 	}
-	// Absent contexts: needs/inputs/vars are empty objects, matrix is not set
-	// (null in expressions), as the recordings show.
+	// Absent contexts: needs/inputs/vars are empty objects, matrix is null
+	// (also when the server sends {}), as the recordings show.
 	s2, _, err := NewState(`{"github":{"repository":"o/r"}}`, "{}", "j", RunnerInfo{}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	v2 := s2.Values(nil)
-	if _, ok := v2["matrix"]; ok {
-		t.Error("matrix must be absent without a matrix")
+	if _, ok := v2["matrix"].(expr.Null); !ok {
+		t.Errorf("matrix without a matrix: %v, want null", v2["matrix"])
+	}
+	// The server's "{}" in the contexts is null too.
+	s3, _, err := NewState(`{"github":{"repository":"o/r"},"matrix":{}}`, "{}", "j", RunnerInfo{}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := s3.Values(nil)["matrix"].(expr.Null); !ok {
+		t.Errorf("empty matrix: %v, want null", s3.Values(nil)["matrix"])
 	}
 	if d, ok := v2["needs"].(*expr.Dictionary); !ok || d.Len() != 0 {
 		t.Errorf("needs %v", v2["needs"])
@@ -241,5 +249,23 @@ func TestWithLayout(t *testing.T) {
 		if got, _ := env.Get(k); got != v {
 			t.Errorf("%s = %q", k, got)
 		}
+	}
+}
+
+func TestGitHubKeysAddedByTheRunnerKeepTheSortedOrder(t *testing.T) {
+	// A server that lists its keys sorted, as the recordings do: the keys the
+	// runner adds land at their sorted place, replaced keys stay, token is first.
+	s, _, err := NewState(`{"github":{"actor":"a","event_name":"push","job":"j","repository":"o/r","sha":"s","zzz":"1"}}`, "", "j", RunnerInfo{}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"secret_source", "artifacts", "action", "event_path"} {
+		s.SetGitHub(k, "x")
+	}
+	s.SetGitHub("sha", "t")
+	got := strings.Join(s.Values(nil)["github"].(*expr.Dictionary).Keys(), ",")
+	want := "token,action,actor,artifacts,event_name,event_path,job,repository,secret_source,sha,workspace,zzz"
+	if got != want {
+		t.Errorf("keys\n got %s\nwant %s", got, want)
 	}
 }

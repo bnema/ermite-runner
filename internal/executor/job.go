@@ -16,6 +16,7 @@ import (
 	"bnema.dev/ermite-actions/expr"
 	"bnema.dev/ermite-actions/template"
 	"bnema.dev/ermite-actions/workflow"
+	"github.com/bnema/zerowrap"
 	"github.com/google/uuid"
 )
 
@@ -75,6 +76,9 @@ type Config struct {
 	Debug bool
 
 	Reporter Reporter
+	// Log receives the runner's own diagnostics (not the job log); the zero value
+	// discards them.
+	Log zerowrap.Logger
 
 	// Credential, when set, is the user the steps run as.
 	Credential *syscall.Credential
@@ -324,11 +328,17 @@ func (j *job) evalMap(m *template.Mapping, env *ordered) ([]Pair, error) {
 func (j *job) setUp() ([]*workflow.Step, error) {
 	cfg := j.cfg
 	j.out(1, fmt.Sprintf("Current runner version: '%s'", cfg.RunnerVersion))
-	if cfg.Runner.Name != "" {
-		j.out(1, fmt.Sprintf("Runner name: '%s'", cfg.Runner.Name))
-	}
-	if host, err := os.Hostname(); err == nil {
-		j.out(1, fmt.Sprintf("Machine name: '%s'", host))
+	// Only a self-hosted runner prints its name and machine (JobExtension.cs:
+	// 88-98: the runner is identified by its OAuth client id); the recordings
+	// of github-hosted runners have neither line. The runner group name
+	// (system.runnerGroupName) is not known to ermite.
+	if !cfg.Runner.githubHosted() {
+		if cfg.Runner.Name != "" {
+			j.out(1, fmt.Sprintf("Runner name: '%s'", cfg.Runner.Name))
+		}
+		if host, err := os.Hostname(); err == nil {
+			j.out(1, fmt.Sprintf("Machine name: '%s'", host))
+		}
 	}
 
 	wf, errs := workflow.Parse(cfg.WorkflowPath, cfg.WorkflowYAML)
@@ -372,6 +382,8 @@ func (j *job) setUp() ([]*workflow.Step, error) {
 	case jb.Services != nil:
 		return nil, errors.New("not supported yet: jobs.<id>.services")
 	}
+
+	j.printTokenInfo()
 
 	// Directories (TempDirectoryManager, PipelineDirectoryManager).
 	j.out(1, "Prepare workflow directory")
@@ -439,9 +451,12 @@ func (j *job) setUp() ([]*workflow.Step, error) {
 	}
 
 	j.out(1, "Prepare all required actions")
+	// JobExtension.cs:418-422: the display name of the job, which the server
+	// computes there (message.JobDisplayName). ermite's Job message has no such
+	// field, so the executor evaluates it (see jobDisplayName).
 	name := cfg.JobName
 	if name == "" {
-		name = cfg.JobKey
+		name = j.jobDisplayName()
 	}
 	if strings.TrimSpace(name) != "" {
 		j.out(1, "Complete job name: "+name)
@@ -551,4 +566,140 @@ func (j *job) completeJob(num int) map[string]string {
 
 	rep.StepCompleted(num, CompleteJobName, result.conclusion(), j.now())
 	return outputs
+}
+
+// Defaults of the lines "Set up job" prints between the runner version and
+// "Prepare workflow directory" (JobExtension.cs:150-182). The server gives
+// GitHub's runner these as the variables system.github.token.permissions and
+// actions_cache_mode and the github context key secret_source; ermite's Job
+// message carries none of them, so the values recorded on github.com for a
+// push to a public repository are used. Every one of the 221 recorded jobs
+// has exactly these lines.
+const (
+	defaultSecretSource = "Actions"
+	defaultCacheMode    = "write"
+)
+
+// defaultTokenPermissions is the GITHUB_TOKEN of a workflow without a
+// "permissions" key, as recorded (JobExtension.cs:157-166 prints the
+// permissions in the order of the server's JSON).
+var defaultTokenPermissions = [][2]string{{"Contents", "read"}, {"Metadata", "read"}, {"Packages", "read"}}
+
+// printTokenInfo prints the GITHUB_TOKEN permissions group, the secret source
+// and the cache mode.
+//
+// Without a "permissions" key the group is the recorded default. With one
+// (including {} and read-all/write-all) the group is omitted, on purpose: the
+// runner only prints what the server gives it (system.github.token.permissions,
+// a JSON object, JobExtension.cs:154-166), and the sources at hand do not say
+// what the server gives for those cases: the display names of the scopes
+// ("Pull requests" or "PullRequests", "Id-token" or "IdToken"), their order, the
+// levels the server grants on a push (Metadata is always read; write-all and
+// id-token depend on the repository's policy, the Permissions class of the
+// runner only models the workflow side, Sdk/WorkflowParser/Permissions.cs and
+// Conversion/PermissionsHelper.cs) and whether "none" scopes are listed. Only
+// the default is in the recordings (221 of 221 jobs; no corpus scenario sets
+// permissions). A group made up from the workflow would be a guess; add the
+// mapping once a recording of a scenario with permissions exists. The
+// complete fix is the server sending the effective permissions in the Job
+// message.
+func (j *job) printTokenInfo() {
+	if j.wf.Permissions == nil && j.jb.Permissions == nil {
+		j.out(1, "##[group]GITHUB_TOKEN Permissions")
+		for _, p := range defaultTokenPermissions {
+			j.out(1, p[0]+": "+p[1])
+		}
+		j.out(1, "##[endgroup]")
+	}
+	// secret_source is a github context key (JobExtension.cs:172); the context
+	// of a job from ermite lacks it, so it is added with the recorded value.
+	src := j.state.GitHub("secret_source")
+	if src == "" {
+		src = defaultSecretSource
+		j.state.SetGitHub("secret_source", src)
+	}
+	j.out(1, "Secret source: "+src)
+	j.out(1, "Cache mode: "+defaultCacheMode)
+}
+
+// jobDisplayName is the name of the job as GitHub shows it and the runner
+// prints it after "Complete job name:": the "name" of the job (the job key when
+// it has none) evaluated with github, needs, strategy, matrix, vars and inputs
+// as the server has them (State.ServerContexts: github without the keys the
+// runner adds), followed by the matrix values in parentheses unless the name
+// reads the matrix (recorded: matrix-job-name, see workflow.Job.DisplayName).
+// When the name cannot be worked out the job key is used and a warning is
+// logged: the name is not worth failing the job for.
+func (j *job) jobDisplayName() string {
+	ctx := context.Background()
+	fallback := func(why string, err error) string {
+		j.cfg.Log.Warn().Err(err).Str("job_key", j.cfg.JobKey).Msg("job display name: " + why + ", using the job key")
+		return j.cfg.JobKey
+	}
+	j.mu.Lock()
+	all := j.state.ServerContexts()
+	j.mu.Unlock()
+	env := j.evalEnv(newOrdered())
+	env.Contexts = all
+	// The strategy itself sees neither the strategy nor the matrix context.
+	senv := env
+	senv.Contexts = map[string]expr.Value{}
+	for _, k := range []string{"github", "needs", "vars", "inputs"} {
+		senv.Contexts[k] = all[k]
+	}
+	st, err := j.jb.EvaluateStrategy(ctx, senv)
+	if err != nil {
+		return fallback("the strategy does not evaluate", err)
+	}
+	idx, ok := comboIndex(st, all["strategy"], all["matrix"])
+	if !ok {
+		return fallback("the matrix of the job is not one of the combinations of its strategy", nil)
+	}
+	name, err := j.jb.DisplayName(ctx, env, st, idx)
+	if err != nil {
+		return fallback("the name does not evaluate", err)
+	}
+	return name
+}
+
+// comboIndex finds the combination of the strategy that is this job. Without a
+// matrix it is the only one. The index of the strategy context is trusted only
+// when that combination has the matrix of the job; otherwise the first
+// combination with equal values is taken. ok is false when there is none.
+func comboIndex(st *workflow.Strategy, strategyCtx, matrix expr.Value) (idx int, ok bool) {
+	if !st.HasMatrix {
+		return 0, true
+	}
+	m, isDict := matrix.(*expr.Dictionary)
+	if !isDict {
+		return 0, false
+	}
+	if d, isDict := strategyCtx.(*expr.Dictionary); isDict {
+		if n, found := d.Get("job-index"); found {
+			if f, isNum := n.(expr.Number); isNum && f >= 0 && int(f) < len(st.Combos) && sameMatrix(st.Combos[int(f)].Values, m) {
+				return int(f), true
+			}
+		}
+	}
+	for i, c := range st.Combos {
+		if sameMatrix(c.Values, m) {
+			return i, true
+		}
+	}
+	return 0, false
+}
+
+// sameMatrix compares two matrix values: the same keys (ignoring case and
+// order) with equal values.
+func sameMatrix(a, b *expr.Dictionary) bool {
+	if a.Len() != b.Len() {
+		return false
+	}
+	for _, p := range a.Pairs() {
+		v, found := b.Get(p.Key)
+		if !found || expr.ToJSON(v) != expr.ToJSON(p.Value) {
+			return false
+		}
+	}
+	return true
 }
