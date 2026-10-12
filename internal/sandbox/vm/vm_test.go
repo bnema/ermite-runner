@@ -27,6 +27,7 @@ import (
 	"bnema.dev/ermite-runner/internal/execstream"
 	"bnema.dev/ermite-runner/internal/execstream/execpb"
 	"bnema.dev/ermite-runner/internal/sandbox"
+	"bnema.dev/ermite-runner/internal/sandbox/disk"
 	"bnema.dev/ermite-runner/internal/sandbox/sandboxtest"
 )
 
@@ -145,6 +146,8 @@ func newEnvNamed(t *testing.T, mode, argv0 string) *env {
 		e.mu.Lock()
 		defer e.mu.Unlock()
 		switch {
+		case c.Name == "mkfs.ext4" && len(c.Args) == 1 && c.Args[0] == "-V":
+			return []byte("mke2fs 1.47.4 (6-Mar-2025)\n"), nil
 		case c.Name == "ip" && len(c.Args) > 1 && c.Args[0] == "tuntap":
 			e.taps[c.Args[3]] = true
 		case c.Name == "ip" && len(c.Args) > 2 && c.Args[0] == "link" && c.Args[1] == "del":
@@ -537,7 +540,7 @@ func TestExecDiskIsKeyedByExecutableHash(t *testing.T) {
 		t.Fatal("exec disk rebuilt for the same executable")
 	}
 	for _, c := range e.run.Calls[n:] {
-		if c.Name == "mkfs.ext4" {
+		if c.Name == "mkfs.ext4" && !(len(c.Args) == 1 && c.Args[0] == "-V") {
 			t.Fatal("mkfs run again for an unchanged executable")
 		}
 	}
@@ -964,7 +967,7 @@ func TestMakeScratchRefusesSymlinksAndExistingFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	run := &cmdrun.Fake{}
-	if err := makeScratch(context.Background(), run, link, 8, -1); err == nil {
+	if err := disk.CreateScratch(context.Background(), run, link, 8, -1); err == nil {
 		t.Fatal("a planted symlink must be refused")
 	}
 	if b, _ := os.ReadFile(target); string(b) != "precious" {
@@ -974,13 +977,13 @@ func TestMakeScratchRefusesSymlinksAndExistingFiles(t *testing.T) {
 		t.Fatalf("mkfs must not run: %v", run.Lines())
 	}
 	ok := filepath.Join(dir, "fresh.ext4")
-	if err := makeScratch(context.Background(), run, ok, 8, os.Getuid()); err != nil {
+	if err := disk.CreateScratch(context.Background(), run, ok, 8, os.Getuid()); err != nil {
 		t.Fatal(err)
 	}
 	if st, err := os.Stat(ok); err != nil || st.Size() != 8<<20 || st.Mode().Perm() != 0o600 {
 		t.Fatalf("%v %v", st, err)
 	}
-	if err := makeScratch(context.Background(), run, ok, 8, -1); err == nil {
+	if err := disk.CreateScratch(context.Background(), run, ok, 8, -1); err == nil {
 		t.Fatal("an existing file must be refused (O_EXCL)")
 	}
 }

@@ -3,8 +3,14 @@
 // Package container is the container sandbox, for hosts without KVM: one
 // container per job with its own Docker daemon inside (the sysbox runtime when
 // the daemon lists it, else a privileged container), on its own bridge network
-// and with its own scratch volume. Everything Docker-side carries the label
-// sandbox.LabelJob so that Reap finds it after a crash.
+// and with its own scratch disk. The scratch disk is a sparse ext4 file of
+// ERMITE_RUNNER_JOB_DISK, loop-mounted on the host (so it needs root, like the
+// rest of this mode) and bind-mounted at /scratch: the nested dockerd keeps its
+// data root there and the job workspace is a directory of it, so a job cannot
+// write more than its disk size to the host (the container's own writable layer
+// stays small: nothing big is written outside /scratch and /home/runner/work).
+// Everything Docker-side carries the label sandbox.LabelJob so that Reap finds
+// it after a crash.
 //
 // The executor stream is a Unix socket in a per-job directory of the runner's
 // state directory, bind-mounted into the container. The runner executable is
@@ -21,6 +27,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -29,6 +36,7 @@ import (
 	"bnema.dev/ermite-runner/internal/cmdrun"
 	"bnema.dev/ermite-runner/internal/netpolicy"
 	"bnema.dev/ermite-runner/internal/sandbox"
+	"bnema.dev/ermite-runner/internal/sandbox/disk"
 	"bnema.dev/ermite-runner/internal/sandbox/netsetup"
 )
 
@@ -52,6 +60,10 @@ type Options struct {
 	// ConnectTimeout bounds container start + init + executor connection
 	// (default 90 s).
 	ConnectTimeout time.Duration
+	// Mounter overrides the loop mounts (tests).
+	Mounter *disk.Mounter
+	// FreeSpace overrides statfs for the free-space warning (tests).
+	FreeSpace func(string) (int64, error)
 }
 
 // Driver implements sandbox.Driver for containers.
@@ -60,6 +72,8 @@ type Driver struct {
 	opt        Options
 	eng        engine
 	net        netsetup.Plumbing
+	mnt        disk.Mounter
+	lock       *sandbox.HostLock
 	image      string
 	runtime    string // "" when privileged
 	privileged bool
@@ -69,8 +83,11 @@ type Driver struct {
 	slots *sandbox.Slots
 }
 
-// New connects to the Docker daemon (DOCKER_HOST honoured) and checks it: not
-// rootless, the job image present (pulled if missing), the runtime decided.
+// New takes the host-wide lock, connects to the Docker daemon (DOCKER_HOST
+// honoured) and checks it: not rootless, the job image present (pulled if
+// missing), the runtime decided (sysbox when listed; else privileged, unless
+// ERMITE_RUNNER_DENY_PRIVILEGED=1, which refuses). IPv4 forwarding is enabled
+// host-wide and stays on (see the README).
 func New(ctx context.Context, cfg sandbox.Config, opt Options) (*Driver, error) {
 	if opt.Run == nil {
 		opt.Run = cmdrun.Exec{}
@@ -78,25 +95,39 @@ func New(ctx context.Context, cfg sandbox.Config, opt Options) (*Driver, error) 
 	if opt.ConnectTimeout == 0 {
 		opt.ConnectTimeout = 90 * time.Second
 	}
+	d := &Driver{cfg: cfg, opt: opt, image: cfg.OCIImage(), slots: sandbox.NewSlots(cfg.Capacity)}
+	if opt.Mounter != nil {
+		d.mnt = *opt.Mounter
+	} else {
+		d.mnt = disk.Mounter{Run: opt.Run}
+	}
+	exe, err := cfg.ExecutablePath()
+	if err != nil {
+		return nil, err
+	}
+	if err := sandbox.CheckStatic(exe); err != nil {
+		return nil, err
+	}
+	d.exe = exe
+
+	if d.lock, err = sandbox.AcquireHostLock(cfg.LockFile); err != nil {
+		return nil, err
+	}
 	eng := opt.engine
 	if eng == nil {
 		e, err := newDockerEngine()
 		if err != nil {
+			_ = d.lock.Release()
 			return nil, err
 		}
 		eng = e
 	}
-	d := &Driver{cfg: cfg, opt: opt, eng: eng, image: cfg.OCIImage(), slots: sandbox.NewSlots(cfg.Capacity)}
-	fail := func(err error) (*Driver, error) { _ = eng.Close(); return nil, err }
-
-	exe, err := cfg.ExecutablePath()
-	if err != nil {
-		return fail(err)
+	d.eng = eng
+	fail := func(err error) (*Driver, error) {
+		_ = eng.Close()
+		_ = d.lock.Release()
+		return nil, err
 	}
-	if err := sandbox.CheckStatic(exe); err != nil {
-		return fail(err)
-	}
-	d.exe = exe
 
 	info, err := eng.Info(ctx)
 	if err != nil {
@@ -113,9 +144,19 @@ func New(ctx context.Context, cfg sandbox.Config, opt Options) (*Driver, error) 
 		d.runtime = SysboxRuntime
 		log.Info().Str("runtime", SysboxRuntime).Msg("container isolation: using the sysbox runtime")
 	} else {
+		if cfg.DenyPrivileged {
+			return fail(fmt.Errorf("the sysbox runtime is not available and %s=1 forbids privileged containers (install sysbox, or unset the setting to accept host-root-equivalent jobs)", sandbox.EnvDenyPrivileged))
+		}
 		d.privileged = true
-		log.Warn().Msg("container isolation: sysbox-runc not available, jobs run in PRIVILEGED containers, which is host-root equivalent; their network policy is best effort. Prefer vm isolation or install sysbox")
+		log.Warn().Msg(privilegedWarning)
 	}
+	if err := disk.CheckMkfs(ctx, opt.Run); err != nil {
+		return fail(err)
+	}
+	if err := os.MkdirAll(cfg.StateDir, 0o755); err != nil {
+		return fail(fmt.Errorf("state directory: %w", err))
+	}
+	sandbox.WarnIfLowSpace(ctx, cfg.StateDir, cfg.Capacity, cfg.JobDiskMiB, opt.FreeSpace)
 	if err := eng.EnsureImage(ctx, d.image); err != nil {
 		return fail(err)
 	}
@@ -129,8 +170,23 @@ func New(ctx context.Context, cfg sandbox.Config, opt Options) (*Driver, error) 
 	return d, nil
 }
 
+// maxSockPath is the longest Unix socket path Linux accepts (108 with the NUL).
+const maxSockPath = 107
+
+// privilegedWarning is logged when the driver starts and again at every job
+// start: a privileged container is host-root equivalent.
+const privilegedWarning = "privileged container: host-root equivalent, network policy best effort"
+
 // Mode implements sandbox.Driver.
 func (d *Driver) Mode() sandbox.Mode { return sandbox.Container }
+
+// Isolation implements sandbox.Driver.
+func (d *Driver) Isolation() sandbox.Isolation {
+	if d.privileged {
+		return sandbox.IsolationContainerPrivileged
+	}
+	return sandbox.IsolationContainerSysbox
+}
 
 // Privileged reports whether jobs run privileged (no sysbox).
 func (d *Driver) Privileged() bool { return d.privileged }
@@ -140,18 +196,23 @@ func (d *Driver) Close() error {
 	if d.net != nil {
 		d.net.Close()
 	}
-	return d.eng.Close()
+	err := d.eng.Close()
+	return errors.Join(err, d.lock.Release())
 }
 
 // New implements sandbox.Driver.
 func (d *Driver) New() (sandbox.Sandbox, error) {
+	id, err := sandbox.NewID()
+	if err != nil {
+		return nil, err
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	slot, err := d.slots.Acquire()
 	if err != nil {
 		return nil, err
 	}
-	return &containerSandbox{d: d, slot: slot}, nil
+	return &containerSandbox{d: d, slot: slot, id: id}, nil
 }
 
 func (d *Driver) release(slot int) {
@@ -160,19 +221,44 @@ func (d *Driver) release(slot int) {
 	d.mu.Unlock()
 }
 
+func (d *Driver) markLeaked(slot int) {
+	d.mu.Lock()
+	d.slots.MarkLeaked(slot)
+	d.mu.Unlock()
+}
+
 func (d *Driver) runDir(id string) string { return filepath.Join(d.cfg.StateDir, "containers", id) }
+
+// sockDir holds only the executor socket: it is the one directory of the job
+// that is bind-mounted (as /run/ermite), so the job never sees the scratch disk
+// file, nor the other host paths of its own sandbox.
+func (d *Driver) sockDir(id string) string { return filepath.Join(d.runDir(id), "sock") }
+
+// scratchDir is where the loop-mounted scratch disk of a job is mounted.
+func (d *Driver) scratchDir(id string) string { return filepath.Join(d.runDir(id), "scratch") }
+
+// workDir is the job workspace, a directory of the scratch disk.
+func (d *Driver) workDir(id string) string { return filepath.Join(d.scratchDir(id), "work") }
+
+// Where the job workspace and its temporary files appear in the container.
+const (
+	containerWorkspace = "/home/runner/work"
+	containerTmp       = "/tmp"
+)
 
 type containerSandbox struct {
 	d    *Driver
 	slot int
+	id   string
+	gate sandbox.BootGate
 
 	mu        sync.Mutex
 	started   bool
 	stopped   bool
-	id        string
+	leakErr   error
 	netID     string
-	volume    string
 	container string
+	mounted   bool
 	listener  net.Listener
 	conn      net.Conn
 	iface     string
@@ -180,8 +266,18 @@ type containerSandbox struct {
 	attached  bool
 }
 
+// ID implements sandbox.Sandbox.
+func (s *containerSandbox) ID() string { return s.id }
+
 // Start implements sandbox.Sandbox.
 func (s *containerSandbox) Start(ctx context.Context, spec sandbox.JobSpec) (sandbox.Conn, error) {
+	// A Stop from another goroutine aborts the boot through the gate.
+	bootCtx, err := s.gate.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("container sandbox: %w", err)
+	}
+	defer s.gate.End()
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.started || s.stopped {
@@ -191,14 +287,12 @@ func (s *containerSandbox) Start(ctx context.Context, spec sandbox.JobSpec) (san
 	d := s.d
 	log := zerowrap.FromCtx(ctx)
 	spec = d.cfg.Resolve(spec)
-
-	id, err := sandbox.NewID()
-	if err != nil {
-		s.releaseLocked()
-		return nil, err
+	if d.privileged {
+		// At every job start, not just at driver start: the job log and the
+		// operator's logs must say what kind of isolation this job got.
+		log.Warn().Str("job", spec.JobID).Str("container", s.id).Msg(privilegedWarning)
 	}
-	s.id = id
-	conn, err := s.run(ctx, spec)
+	conn, err := s.run(bootCtx, spec)
 	if err != nil {
 		var tail string
 		if s.container != "" {
@@ -214,25 +308,54 @@ func (s *containerSandbox) Start(ctx context.Context, spec sandbox.JobSpec) (san
 	return conn, nil
 }
 
+// run runs the boot stages in order; each records what it created for cleanup.
 func (s *containerSandbox) run(ctx context.Context, spec sandbox.JobSpec) (sandbox.Conn, error) {
-	d := s.d
-	netw, err := netpolicy.Subnet(d.cfg.Network, s.slot)
+	netw, err := netpolicy.Subnet(s.d.cfg.Network, s.slot)
 	if err != nil {
 		return nil, err
 	}
+	accepted, err := s.runSocket()
+	if err != nil {
+		return nil, err
+	}
+	if err := s.runScratch(ctx, spec); err != nil {
+		return nil, err
+	}
 	labels := map[string]string{sandbox.LabelJob: spec.JobID}
-	name := "ermite-" + s.id
+	if err := s.runNetwork(ctx, netw, labels); err != nil {
+		return nil, err
+	}
+	exited, err := s.runContainer(ctx, spec, netw, labels)
+	if err != nil {
+		return nil, err
+	}
+	return s.waitExecutor(ctx, accepted, exited)
+}
 
-	// Per-job directory with the executor socket. It is created before anything
-	// on the Docker side so that a crash leaves a recognisable directory.
-	dir := d.runDir(s.id)
-	if err := os.MkdirAll(dir, 0o711); err != nil {
-		return nil, err
+type acceptResult struct {
+	c   net.Conn
+	err error
+}
+
+// runSocket creates the per-job directory and listens on the executor socket in
+// it. The directory exists before anything on the Docker side, so a crash
+// leaves a recognisable one.
+func (s *containerSandbox) runSocket() (<-chan acceptResult, error) {
+	d := s.d
+	for _, dir := range []string{d.runDir(s.id), d.sockDir(s.id)} {
+		if err := os.MkdirAll(dir, 0o711); err != nil {
+			return nil, err
+		}
+		if err := os.Chmod(dir, 0o711); err != nil {
+			return nil, err
+		}
 	}
-	if err := os.Chmod(dir, 0o711); err != nil {
-		return nil, err
-	}
+	dir := d.sockDir(s.id)
 	sock := filepath.Join(dir, sandbox.ContainerSocket)
+	// sockaddr_un.sun_path holds 108 bytes: say so instead of "invalid argument".
+	if len(sock) > maxSockPath {
+		return nil, fmt.Errorf("executor socket path %q is %d bytes, over the %d-byte limit of a Unix socket: use a shorter %s", sock, len(sock), maxSockPath, sandbox.EnvStateDir)
+	}
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
 		return nil, fmt.Errorf("listen executor socket: %w", err)
@@ -243,55 +366,79 @@ func (s *containerSandbox) run(ctx context.Context, spec sandbox.JobSpec) (sandb
 	if err := os.Chmod(sock, 0o666); err != nil {
 		return nil, err
 	}
-	accepted := make(chan struct {
-		c   net.Conn
-		err error
-	}, 1)
+	accepted := make(chan acceptResult, 1)
 	go func() {
 		c, err := ln.Accept()
-		accepted <- struct {
-			c   net.Conn
-			err error
-		}{c, err}
+		accepted <- acceptResult{c, err}
 	}()
+	return accepted, nil
+}
 
+// runScratch creates the sparse ext4 scratch disk (ERMITE_RUNNER_JOB_DISK) and
+// loop-mounts it; the workspace directory lives on it.
+func (s *containerSandbox) runScratch(ctx context.Context, spec sandbox.JobSpec) error {
+	d := s.d
+	file := filepath.Join(d.runDir(s.id), "scratch.ext4")
+	if err := disk.CreateScratch(ctx, d.opt.Run, file, spec.DiskMiB, -1); err != nil {
+		return err
+	}
+	mnt := d.scratchDir(s.id)
+	if err := os.MkdirAll(mnt, 0o755); err != nil {
+		return err
+	}
+	if err := d.mnt.Mount(ctx, file, mnt); err != nil {
+		return err
+	}
+	s.mounted = true
+	// Workspace, temp and the nested dockerd's data root on the scratch disk. The
+	// executor (phase G) sets the job layout and ownership inside the sandbox.
+	for _, sub := range []string{"work", "tmp", "docker"} {
+		if err := os.MkdirAll(filepath.Join(mnt, sub), 0o755); err != nil {
+			return err
+		}
+	}
+	return os.Chmod(filepath.Join(mnt, "tmp"), 0o1777)
+}
+
+// runNetwork creates the job's bridge and installs the firewall policy.
+func (s *containerSandbox) runNetwork(ctx context.Context, netw netpolicy.Net, labels map[string]string) error {
+	d := s.d
 	s.iface = fmt.Sprintf("%s%d", bridgePrefix, s.slot)
 	s.gateway = netw.Gateway
-	netID, err := d.eng.CreateNetwork(ctx, networkSpec{Name: name, Bridge: s.iface, Subnet: netw.Prefix, Gateway: netw.Gateway, Labels: labels})
+	netID, err := d.eng.CreateNetwork(ctx, networkSpec{Name: "ermite-" + s.id, Bridge: s.iface, Subnet: netw.Prefix, Gateway: netw.Gateway, Labels: labels})
 	if err != nil {
-		return nil, err
+		return err
 	}
 	s.netID = netID
 	s.attached = true
-	if err := d.net.Attach(ctx, netpolicy.Guest{Iface: s.iface, Gateway: netw.Gateway, Addr: netw.Guest}); err != nil {
-		return nil, err
-	}
+	return d.net.Attach(ctx, netpolicy.Guest{Iface: s.iface, Gateway: netw.Gateway, Addr: netw.Guest})
+}
 
-	s.volume = name
-	if err := d.eng.CreateVolume(ctx, name, labels); err != nil {
-		s.volume = ""
-		return nil, fmt.Errorf("create volume: %w", err)
-	}
-
+// runContainer creates and starts the container.
+func (s *containerSandbox) runContainer(ctx context.Context, spec sandbox.JobSpec, netw netpolicy.Net, labels map[string]string) (<-chan exitResult, error) {
+	d := s.d
 	entry := sandbox.GuestExecDir + "/" + sandbox.GuestExecName
 	cid, err := d.eng.CreateContainer(ctx, containerSpec{
-		Name:       name,
+		Name:       "ermite-" + s.id,
 		Image:      d.image,
 		Entrypoint: []string{entry, "init"},
 		Env:        []string{"ERMITE_CONNECT=unix:" + sandbox.ContainerRunDir + "/" + sandbox.ContainerSocket},
 		Labels:     labels,
 		Runtime:    d.runtime,
 		Privileged: d.privileged,
-		Network:    name,
+		Network:    "ermite-" + s.id,
 		IPv4:       netw.Guest,
 		DNS:        netw.Gateway,
 		Binds: []bindMount{
 			{Source: d.exe, Target: entry, ReadOnly: true},
-			{Source: dir, Target: sandbox.ContainerRunDir},
+			{Source: d.sockDir(s.id), Target: sandbox.ContainerRunDir},
+			{Source: d.scratchDir(s.id), Target: sandbox.GuestScratch},
+			{Source: d.workDir(s.id), Target: containerWorkspace},
+			{Source: filepath.Join(d.scratchDir(s.id), "tmp"), Target: containerTmp},
 		},
-		Volumes:   []volumeMount{{Name: name, Target: sandbox.GuestScratch}},
 		MemoryMiB: spec.MemoryMiB,
 		CPUs:      spec.CPUs,
+		Pids:      d.cfg.JobPids,
 	})
 	if err != nil {
 		return nil, err
@@ -301,8 +448,14 @@ func (s *containerSandbox) run(ctx context.Context, spec sandbox.JobSpec) (sandb
 	if err := d.eng.StartContainer(ctx, cid); err != nil {
 		return nil, fmt.Errorf("start container: %w", err)
 	}
+	return exited, nil
+}
 
-	timer := time.NewTimer(d.opt.ConnectTimeout)
+// waitExecutor waits for the executor to connect. Only ctx (the caller's
+// context, or Stop through the boot gate), the container exiting, and the
+// timeout end the wait.
+func (s *containerSandbox) waitExecutor(ctx context.Context, accepted <-chan acceptResult, exited <-chan exitResult) (sandbox.Conn, error) {
+	timer := time.NewTimer(s.d.opt.ConnectTimeout)
 	defer timer.Stop()
 	select {
 	case r := <-accepted:
@@ -312,20 +465,25 @@ func (s *containerSandbox) run(ctx context.Context, spec sandbox.JobSpec) (sandb
 		s.conn = r.c
 		return r.c, nil
 	case ex := <-exited:
+		if ex.Err != nil {
+			return nil, fmt.Errorf("waiting for the container: %w", ex.Err)
+		}
 		return nil, fmt.Errorf("container exited (code %d) before the executor connected", ex.Code)
 	case <-timer.C:
-		return nil, fmt.Errorf("executor did not connect within %s", d.opt.ConnectTimeout)
+		return nil, fmt.Errorf("executor did not connect within %s", s.d.opt.ConnectTimeout)
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return nil, context.Cause(ctx)
 	}
 }
 
 // Stop implements sandbox.Sandbox.
 func (s *containerSandbox) Stop(ctx context.Context) error {
+	// Abort a boot in progress first: Start holds s.mu for its whole duration.
+	s.gate.Abort()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.stopped {
-		return nil
+		return s.leakErr
 	}
 	if !s.started {
 		s.releaseLocked()
@@ -339,10 +497,11 @@ func (s *containerSandbox) releaseLocked() {
 	s.d.release(s.slot)
 }
 
-// cleanupLocked removes the container, then its network, volume, firewall rules
-// and directory, continuing after errors. The slot is released only when
-// everything is gone (so its bridge name and subnet are not reused while the
-// old ones still exist); leftovers are reaped by label at the next start.
+// cleanupLocked removes the container first; only when it is confirmed gone are
+// the firewall policy, the network, the scratch mount and the files removed. A
+// container that may still run keeps its policy and bridge: tearing the policy
+// down under it would remove the isolation it relies on. Failures mark the
+// sandbox as leaked (sandbox.ErrLeaked): its slot stays taken until Reap.
 func (s *containerSandbox) cleanupLocked(ctx context.Context) error {
 	d := s.d
 	var errs []error
@@ -361,45 +520,59 @@ func (s *containerSandbox) cleanupLocked(ctx context.Context) error {
 			s.container = ""
 		}
 	}
-	if s.attached {
-		if err := d.net.Detach(ctx, s.iface, s.gateway); err != nil {
-			errs = append(errs, err)
-		} else {
-			s.attached = false
+	if s.container == "" {
+		if s.attached {
+			if err := d.net.Detach(ctx, s.iface, s.gateway); err != nil {
+				errs = append(errs, err)
+			} else {
+				s.attached = false
+			}
 		}
-	}
-	if s.netID != "" && s.container == "" {
-		if err := d.eng.RemoveNetwork(ctx, s.netID); err != nil {
-			errs = append(errs, fmt.Errorf("remove network: %w", err))
-		} else {
-			s.netID = ""
+		if s.netID != "" {
+			if err := d.eng.RemoveNetwork(ctx, s.netID); err != nil {
+				errs = append(errs, fmt.Errorf("remove network: %w", err))
+			} else {
+				s.netID = ""
+			}
 		}
-	}
-	if s.volume != "" && s.container == "" {
-		if err := d.eng.RemoveVolume(ctx, s.volume); err != nil {
-			errs = append(errs, fmt.Errorf("remove volume: %w", err))
-		} else {
-			s.volume = ""
+		if s.mounted {
+			if err := d.mnt.Unmount(ctx, d.scratchDir(s.id)); err != nil {
+				errs = append(errs, err)
+			} else {
+				s.mounted = false
+			}
 		}
-	}
-	if err := os.RemoveAll(d.runDir(s.id)); err != nil {
-		errs = append(errs, err)
+		// Never delete files below a mount that is still there.
+		if !s.mounted {
+			if err := os.RemoveAll(d.runDir(s.id)); err != nil {
+				errs = append(errs, err)
+			}
+		}
 	}
 	if len(errs) == 0 {
 		s.releaseLocked()
 		return nil
 	}
 	s.stopped = true
-	err := errors.Join(errs...)
+	d.markLeaked(s.slot)
+	s.leakErr = fmt.Errorf("%w: container sandbox %s: %w", sandbox.ErrLeaked, s.id, errors.Join(errs...))
 	log := zerowrap.FromCtx(ctx)
-	log.Error().Err(err).Str("job", s.id).Msg("container cleanup incomplete; the next runner start will retry")
-	return err
+	log.Error().Err(s.leakErr).Str("job", s.id).Msg("container cleanup incomplete; call Reap to finish it")
+	return s.leakErr
 }
 
-// Reap implements sandbox.Driver: remove every container, network and volume
-// carrying the job label, the nftables table, and the per-job directories.
+// Reap implements sandbox.Driver: remove every container and network carrying
+// the job label, the nftables table, the scratch mounts and the per-job
+// directories, and free the slots of leaked sandboxes. It returns ErrBusy while
+// a sandbox is running.
 func (d *Driver) Reap(ctx context.Context) error {
 	log := zerowrap.FromCtx(ctx)
+	d.mu.Lock()
+	busy := d.slots.Busy()
+	d.mu.Unlock()
+	if busy > 0 {
+		return fmt.Errorf("%w (%d running)", sandbox.ErrBusy, busy)
+	}
 	var errs []error
 	ids, err := d.eng.ListContainers(ctx, sandbox.LabelJob)
 	if err != nil {
@@ -421,27 +594,44 @@ func (d *Driver) Reap(ctx context.Context) error {
 			errs = append(errs, err)
 		}
 	}
-	vols, err := d.eng.ListVolumes(ctx, sandbox.LabelJob)
-	if err != nil {
-		errs = append(errs, fmt.Errorf("list volumes: %w", err))
-	}
-	for _, v := range vols {
-		log.Warn().Str("volume", v).Msg("removing leftover job volume")
-		if err := d.eng.RemoveVolume(ctx, v); err != nil {
-			errs = append(errs, err)
-		}
-	}
 	if err := d.net.Reset(ctx); err != nil {
 		errs = append(errs, fmt.Errorf("reset nftables table: %w", err))
 	}
+	// Unmount before deleting: a directory with a live mount below it must not
+	// be removed (and EBUSY would be the best case).
 	root := filepath.Join(d.cfg.StateDir, "containers")
+	mounts, merr := d.mnt.MountPoints()
+	if merr != nil {
+		errs = append(errs, fmt.Errorf("read mounts: %w", merr))
+	}
+	stuck := map[string]bool{}
+	for _, mp := range mounts {
+		rel, ok := strings.CutPrefix(mp, root+"/")
+		if !ok {
+			continue
+		}
+		id, _, _ := strings.Cut(rel, "/")
+		if !sandbox.ValidID(id) {
+			continue
+		}
+		log.Warn().Str("mount", mp).Msg("unmounting leftover scratch disk")
+		if err := d.mnt.Unmount(ctx, mp); err != nil {
+			stuck[id] = true
+			errs = append(errs, err)
+		}
+	}
 	ents, _ := os.ReadDir(root)
 	for _, e := range ents {
-		if sandbox.ValidID(e.Name()) {
+		if sandbox.ValidID(e.Name()) && !stuck[e.Name()] {
 			if err := os.RemoveAll(filepath.Join(root, e.Name())); err != nil {
 				errs = append(errs, err)
 			}
 		}
+	}
+	if len(errs) == 0 {
+		d.mu.Lock()
+		d.slots.ReleaseLeaked()
+		d.mu.Unlock()
 	}
 	return errors.Join(errs...)
 }

@@ -10,7 +10,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"syscall"
 
 	"bnema.dev/ermite-runner/internal/cmdrun"
 	"bnema.dev/ermite-runner/internal/sandbox"
@@ -81,36 +80,6 @@ func ensureExecDisk(ctx context.Context, run cmdrun.Runner, exe, stateDir string
 		return "", err
 	}
 	return dest, nil
-}
-
-// makeScratch creates the per-job sparse scratch disk of sizeMiB and formats it.
-// The file is created exclusively without following symlinks and handed to
-// owner (fchown on the open descriptor, never by path) when owner >= 0.
-func makeScratch(ctx context.Context, run cmdrun.Runner, path string, sizeMiB, owner int) error {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
-	if err != nil {
-		return err
-	}
-	if owner >= 0 {
-		if err := f.Chown(owner, owner); err != nil {
-			_ = f.Close()
-			return fmt.Errorf("chown scratch disk: %w", err)
-		}
-	}
-	if err := f.Truncate(int64(sizeMiB) << 20); err != nil {
-		_ = f.Close()
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	// No journal and no reserved blocks: it is a throw-away disk. Lazy table
-	// initialisation keeps creation instant and the file sparse.
-	if _, err := run.Run(ctx, nil, "mkfs.ext4", "-q", "-F", "-L", "ermite-scratch", "-m", "0",
-		"-O", "^has_journal,^resize_inode", "-E", "lazy_itable_init=1,nodiscard", path); err != nil {
-		return fmt.Errorf("format scratch disk: %w", err)
-	}
-	return nil
 }
 
 func hashFile(path string) (sum string, size int64, err error) {

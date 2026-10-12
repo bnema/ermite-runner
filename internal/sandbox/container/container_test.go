@@ -3,6 +3,7 @@
 package container
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -16,9 +17,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bnema/zerowrap"
+	"github.com/moby/moby/api/types/container"
+
+	"bnema.dev/ermite-runner/internal/cmdrun"
 	"bnema.dev/ermite-runner/internal/execstream"
 	"bnema.dev/ermite-runner/internal/execstream/execpb"
 	"bnema.dev/ermite-runner/internal/sandbox"
+	"bnema.dev/ermite-runner/internal/sandbox/disk"
 	"bnema.dev/ermite-runner/internal/sandbox/sandboxtest"
 )
 
@@ -30,7 +36,6 @@ type fakeEngine struct {
 	infoErr    error
 	imageErr   error
 	networks   map[string]networkSpec
-	volumes    map[string]map[string]string
 	containers map[string]containerSpec
 	failStart  error
 	noConnect  bool
@@ -45,7 +50,6 @@ func newFake() *fakeEngine {
 	return &fakeEngine{
 		info:       daemonInfo{OSType: "linux", Runtimes: []string{"runc"}},
 		networks:   map[string]networkSpec{},
-		volumes:    map[string]map[string]string{},
 		containers: map[string]containerSpec{},
 		waiters:    map[string]chan exitResult{},
 	}
@@ -78,27 +82,6 @@ func (f *fakeEngine) ListNetworks(context.Context, string) ([]string, error) {
 		if _, ok := n.Labels[sandbox.LabelJob]; ok {
 			out = append(out, id)
 		}
-	}
-	return out, nil
-}
-func (f *fakeEngine) CreateVolume(_ context.Context, name string, labels map[string]string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.volumes[name] = labels
-	return nil
-}
-func (f *fakeEngine) RemoveVolume(_ context.Context, name string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	delete(f.volumes, name)
-	return nil
-}
-func (f *fakeEngine) ListVolumes(context.Context, string) ([]string, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	var out []string
-	for n := range f.volumes {
-		out = append(out, n)
 	}
 	return out, nil
 }
@@ -189,37 +172,92 @@ func (f *fakeEngine) objects() []string {
 	for id := range f.networks {
 		out = append(out, "network "+id)
 	}
-	for n := range f.volumes {
-		out = append(out, "volume "+n)
-	}
 	return out
 }
 
+// fakeMounts plays mount/umount: it records mounts and writes a mountinfo file
+// that disk.Mounter reads.
+type fakeMounts struct {
+	mu      sync.Mutex
+	mounted map[string]bool
+	file    string
+	failUm  error
+}
+
+func (m *fakeMounts) sync() {
+	var b strings.Builder
+	for d := range m.mounted {
+		fmt.Fprintf(&b, "40 28 7:0 / %s rw - ext4 /dev/loop0 rw\n", d)
+	}
+	_ = os.WriteFile(m.file, []byte(b.String()), 0o644)
+}
+
+func (m *fakeMounts) handle(c cmdrun.Call) ([]byte, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	switch c.Name {
+	case "mkfs.ext4":
+		if len(c.Args) == 1 && c.Args[0] == "-V" {
+			return []byte("mke2fs 1.47.4 (6-Mar-2025)\n"), nil
+		}
+	case "mount":
+		m.mounted[c.Args[len(c.Args)-1]] = true
+		m.sync()
+	case "umount":
+		if m.failUm != nil {
+			return nil, m.failUm
+		}
+		delete(m.mounted, c.Args[0])
+		m.sync()
+	}
+	return nil, nil
+}
+
+func (m *fakeMounts) count() int { m.mu.Lock(); defer m.mu.Unlock(); return len(m.mounted) }
+
 type cenv struct {
-	cfg   sandbox.Config
-	eng   *fakeEngine
-	plumb *sandboxtest.Plumbing
+	cfg    sandbox.Config
+	eng    *fakeEngine
+	plumb  *sandboxtest.Plumbing
+	mounts *fakeMounts
+	run    *cmdrun.Fake
 }
 
 func newCEnv(t *testing.T) *cenv {
 	t.Helper()
-	dir := t.TempDir()
+	// A short directory: the executor socket path is limited to 107 bytes and
+	// t.TempDir embeds the (long) test name.
+	dir, err := os.MkdirTemp("", "erc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	exe := filepath.Join(dir, "runner")
 	sandboxtest.WriteStaticELF(t, exe)
+	fm := &fakeMounts{mounted: map[string]bool{}, file: filepath.Join(dir, "mountinfo")}
+	fm.sync()
 	return &cenv{
-		eng:   newFake(),
-		plumb: sandboxtest.NewPlumbing(),
+		eng:    newFake(),
+		plumb:  sandboxtest.NewPlumbing(),
+		mounts: fm,
+		run:    &cmdrun.Fake{Handle: fm.handle},
 		cfg: sandbox.Config{
 			Isolation: sandbox.Container, StateDir: filepath.Join(dir, "state"), Capacity: 2,
 			JobCPUs: 2, JobMemoryMiB: 1024, JobDiskMiB: 1024, UIDBase: 900000,
 			Network: netip.MustParsePrefix("10.200.0.0/16"), Executable: exe, DNSPort: 0,
+			LockFile: filepath.Join(dir, "host.lock"), JobPids: 32768,
 		},
 	}
 }
 
+func (e *cenv) opts() Options {
+	return Options{engine: e.eng, Net: e.plumb, ConnectTimeout: 3 * time.Second, Run: e.run,
+		Mounter: &disk.Mounter{Run: e.run, Mountinfo: e.mounts.file}}
+}
+
 func (e *cenv) driver(t *testing.T) *Driver {
 	t.Helper()
-	d, err := New(context.Background(), e.cfg, Options{engine: e.eng, Net: e.plumb, ConnectTimeout: 3 * time.Second})
+	d, err := New(context.Background(), e.cfg, e.opts())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -227,8 +265,13 @@ func (e *cenv) driver(t *testing.T) *Driver {
 	return d
 }
 
+func withTimeout(o Options, d time.Duration) Options { o.ConnectTimeout = d; return o }
+
 func (e *cenv) leftovers() []string {
 	out := e.eng.objects()
+	if n := e.mounts.count(); n != 0 {
+		out = append(out, fmt.Sprintf("%d scratch mounts", n))
+	}
 	if n := e.plumb.Live(); n != 0 {
 		out = append(out, fmt.Sprintf("%d attached guests", n))
 	}
@@ -252,7 +295,7 @@ func stub(t *testing.T, conn sandbox.Conn) (string, int) {
 func TestRootlessDockerIsRefused(t *testing.T) {
 	e := newCEnv(t)
 	e.eng.info.Rootless = true
-	_, err := New(context.Background(), e.cfg, Options{engine: e.eng, Net: e.plumb})
+	_, err := New(context.Background(), e.cfg, e.opts())
 	if err == nil || !strings.Contains(err.Error(), "rootless") || !strings.Contains(err.Error(), "rootful") {
 		t.Fatalf("want a clear rootless error, got %v", err)
 	}
@@ -275,22 +318,22 @@ func TestRuntimeSelection(t *testing.T) {
 func TestNewErrors(t *testing.T) {
 	e := newCEnv(t)
 	e.eng.infoErr = errors.New("connection refused")
-	if _, err := New(context.Background(), e.cfg, Options{engine: e.eng, Net: e.plumb}); err == nil || !strings.Contains(err.Error(), "DOCKER_HOST") {
+	if _, err := New(context.Background(), e.cfg, e.opts()); err == nil || !strings.Contains(err.Error(), "DOCKER_HOST") {
 		t.Fatalf("got %v", err)
 	}
 	e = newCEnv(t)
 	e.eng.imageErr = errors.New("no such image")
-	if _, err := New(context.Background(), e.cfg, Options{engine: e.eng, Net: e.plumb}); err == nil {
+	if _, err := New(context.Background(), e.cfg, e.opts()); err == nil {
 		t.Fatal("missing image accepted")
 	}
 	e = newCEnv(t)
 	e.eng.info.OSType = "windows"
-	if _, err := New(context.Background(), e.cfg, Options{engine: e.eng, Net: e.plumb}); err == nil {
+	if _, err := New(context.Background(), e.cfg, e.opts()); err == nil {
 		t.Fatal("windows daemon accepted")
 	}
 	e = newCEnv(t)
 	e.cfg.Executable = "/bin/sh"
-	if _, err := New(context.Background(), e.cfg, Options{engine: e.eng, Net: e.plumb}); err == nil {
+	if _, err := New(context.Background(), e.cfg, e.opts()); err == nil {
 		t.Skip("/bin/sh is static")
 	}
 }
@@ -346,8 +389,19 @@ func TestStartRunStop(t *testing.T) {
 	if !roExe || !runDir {
 		t.Errorf("binds: %+v", spec.Binds)
 	}
-	if len(spec.Volumes) != 1 || spec.Volumes[0].Target != sandbox.GuestScratch {
-		t.Errorf("scratch volume: %+v", spec.Volumes)
+	var scratch, work, tmp bool
+	for _, b := range spec.Binds {
+		switch b.Target {
+		case sandbox.GuestScratch:
+			scratch = strings.HasSuffix(b.Source, "/scratch") && !b.ReadOnly
+		case "/home/runner/work":
+			work = strings.HasSuffix(b.Source, "/scratch/work")
+		case "/tmp":
+			tmp = strings.HasSuffix(b.Source, "/scratch/tmp")
+		}
+	}
+	if !scratch || !work || !tmp {
+		t.Errorf("scratch, workspace and /tmp must come from the loop-mounted disk: %+v", spec.Binds)
 	}
 	if spec.DNS.String() != "10.200.0.1" || spec.IPv4.String() != "10.200.0.2" || netSpec.Bridge != "erbr0" || netSpec.Subnet.String() != "10.200.0.0/30" {
 		t.Errorf("network: %+v %+v", spec, netSpec)
@@ -406,7 +460,7 @@ func TestStartFailuresCleanEverything(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			e := newCEnv(t)
 			setup(e)
-			d, err := New(context.Background(), e.cfg, Options{engine: e.eng, Net: e.plumb, ConnectTimeout: 300 * time.Millisecond})
+			d, err := New(context.Background(), e.cfg, withTimeout(e.opts(), 300*time.Millisecond))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -470,7 +524,6 @@ func TestReapRemovesLabelledObjectsOnly(t *testing.T) {
 	_, _ = e.eng.CreateContainer(ctx, containerSpec{Name: "old", Labels: map[string]string{sandbox.LabelJob: "x"}})
 	_, _ = e.eng.CreateNetwork(ctx, networkSpec{Name: "old", Labels: map[string]string{sandbox.LabelJob: "x"}})
 	_, _ = e.eng.CreateNetwork(ctx, networkSpec{Name: "mine", Labels: map[string]string{"app": "other"}})
-	_ = e.eng.CreateVolume(ctx, "old", map[string]string{sandbox.LabelJob: "x"})
 	_ = os.MkdirAll(filepath.Join(e.cfg.StateDir, "containers", "er00112233"), 0o700)
 	_ = os.MkdirAll(filepath.Join(e.cfg.StateDir, "containers", "keep-me"), 0o700)
 
@@ -554,3 +607,406 @@ func TestDoubleStartRefused(t *testing.T) {
 }
 
 func mustPrefix(s string) netip.Prefix { return netip.MustParsePrefix(s) }
+
+func logger(buf *bytes.Buffer) context.Context {
+	return zerowrap.WithCtx(context.Background(), zerowrap.New(zerowrap.Config{Level: "debug", Format: "json", Output: buf}))
+}
+
+// S4: the privileged fallback is allowed by default, warned about at the start
+// of EVERY job, reported as the effective isolation, and refused on demand.
+func TestPrivilegedWarnedAtEveryJobAndReportedAsIsolation(t *testing.T) {
+	e := newCEnv(t)
+	var buf bytes.Buffer
+	ctx := logger(&buf)
+	d, err := New(ctx, e.cfg, e.opts())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = d.Close() }()
+	if d.Isolation() != sandbox.IsolationContainerPrivileged || d.Mode() != sandbox.Container {
+		t.Fatalf("isolation %q", d.Isolation())
+	}
+	const msg = "privileged container: host-root equivalent, network policy best effort"
+	if n := strings.Count(buf.String(), msg); n != 1 {
+		t.Fatalf("one warning at driver start, got %d", n)
+	}
+	for i := range 3 {
+		sb, _ := d.New()
+		conn, err := sb.Start(ctx, sandbox.JobSpec{JobID: fmt.Sprint("job", i)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		stub(t, conn)
+		_ = sb.Stop(ctx)
+	}
+	if n := strings.Count(buf.String(), msg); n != 4 {
+		t.Fatalf("the warning must be logged at every job start (1 + 3), got %d:\n%s", n, buf.String())
+	}
+	if !strings.Contains(buf.String(), `"job":"job2"`) {
+		t.Fatal("the warning must name the job")
+	}
+}
+
+func TestSysboxIsReportedAndSilent(t *testing.T) {
+	e := newCEnv(t)
+	e.eng.info.Runtimes = []string{"runc", "sysbox-runc"}
+	var buf bytes.Buffer
+	ctx := logger(&buf)
+	d, err := New(ctx, e.cfg, e.opts())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = d.Close() }()
+	if d.Isolation() != sandbox.IsolationContainerSysbox {
+		t.Fatalf("isolation %q", d.Isolation())
+	}
+	sb, _ := d.New()
+	conn, _ := sb.Start(ctx, sandbox.JobSpec{JobID: "j"})
+	stub(t, conn)
+	_ = sb.Stop(ctx)
+	if strings.Contains(buf.String(), "host-root equivalent") {
+		t.Fatal("no privileged warning with sysbox")
+	}
+}
+
+func TestDenyPrivileged(t *testing.T) {
+	e := newCEnv(t)
+	e.cfg.DenyPrivileged = true
+	_, err := New(context.Background(), e.cfg, e.opts())
+	if err == nil || !strings.Contains(err.Error(), "ERMITE_RUNNER_DENY_PRIVILEGED") || !strings.Contains(err.Error(), "sysbox") {
+		t.Fatalf("got %v", err)
+	}
+	// The host lock must be free again after a refused start.
+	if l, err := sandbox.AcquireHostLock(e.cfg.LockFile); err != nil {
+		t.Fatalf("a failed New must release the host lock: %v", err)
+	} else {
+		_ = l.Release()
+	}
+	// With sysbox available the setting does nothing.
+	e2 := newCEnv(t)
+	e2.cfg.DenyPrivileged = true
+	e2.eng.info.Runtimes = []string{"sysbox-runc"}
+	d, err := New(context.Background(), e2.cfg, e2.opts())
+	if err != nil {
+		t.Fatalf("deny-privileged with sysbox must work: %v", err)
+	}
+	_ = d.Close()
+}
+
+// S5: pids limit from the config and no swap.
+func TestHostConfigPidsAndSwap(t *testing.T) {
+	hc := hostConfigFor(containerSpec{Network: "n", MemoryMiB: 2048, CPUs: 3, Pids: 4096, DNS: netip.MustParseAddr("10.200.0.1")})
+	if hc.Memory != 2048<<20 || hc.MemorySwap != hc.Memory {
+		t.Errorf("memory %d swap %d: swap must equal memory (no swap)", hc.Memory, hc.MemorySwap)
+	}
+	if hc.PidsLimit == nil || *hc.PidsLimit != 4096 {
+		t.Errorf("pids limit %v", hc.PidsLimit)
+	}
+	if hc.NanoCPUs != 3_000_000_000 {
+		t.Errorf("cpus %d", hc.NanoCPUs)
+	}
+	if hc.Sysctls["net.ipv6.conf.all.disable_ipv6"] != "1" {
+		t.Error("IPv6 must be disabled in the container")
+	}
+	if hostConfigFor(containerSpec{Network: "n"}).PidsLimit != nil {
+		t.Error("no pids limit configured: leave it unset")
+	}
+}
+
+func TestJobPidsFlowsFromConfig(t *testing.T) {
+	e := newCEnv(t)
+	e.cfg.JobPids = 777
+	d := e.driver(t)
+	sb, _ := d.New()
+	conn, err := sb.Start(context.Background(), sandbox.JobSpec{JobID: "j"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stub(t, conn)
+	defer func() { _ = sb.Stop(context.Background()) }()
+	e.eng.mu.Lock()
+	defer e.eng.mu.Unlock()
+	for _, s := range e.eng.containers {
+		if s.Pids != 777 {
+			t.Fatalf("spec pids %d", s.Pids)
+		}
+	}
+}
+
+// C4: the disk is enforced by a loop-mounted ext4 file of ERMITE_RUNNER_JOB_DISK,
+// mounted while the job runs and unmounted (before the files are removed) after.
+func TestScratchDiskIsLoopMountedAndSized(t *testing.T) {
+	e := newCEnv(t)
+	d := e.driver(t)
+	sb, _ := d.New()
+	conn, err := sb.Start(context.Background(), sandbox.JobSpec{JobID: "j", DiskMiB: 2048})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stub(t, conn)
+	if e.mounts.count() != 1 {
+		t.Fatalf("mounts: %d", e.mounts.count())
+	}
+	var mkfs, mount string
+	for _, l := range e.run.Lines() {
+		if strings.HasPrefix(l, "mkfs.ext4") && strings.Contains(l, "scratch.ext4") {
+			mkfs = l
+		}
+		if strings.HasPrefix(l, "mount ") {
+			mount = l
+		}
+	}
+	if !strings.Contains(mkfs, "ermite-scratch") || !strings.Contains(mount, "loop") || !strings.Contains(mount, "scratch.ext4") {
+		t.Fatalf("mkfs=%q mount=%q", mkfs, mount)
+	}
+	// The scratch file has the configured size (sparse) and is not visible to the job.
+	matches, _ := filepath.Glob(filepath.Join(e.cfg.StateDir, "containers", sb.ID(), "scratch.ext4"))
+	if len(matches) != 1 {
+		t.Fatal("no scratch file")
+	}
+	if st, _ := os.Stat(matches[0]); st.Size() != 2048<<20 {
+		t.Fatalf("size %d", st.Size())
+	}
+	e.eng.mu.Lock()
+	for _, s := range e.eng.containers {
+		for _, b := range s.Binds {
+			if strings.HasSuffix(b.Source, "scratch.ext4") || b.Source == filepath.Join(e.cfg.StateDir, "containers", sb.ID()) {
+				t.Errorf("the job must not see the disk file or the whole run directory: %+v", b)
+			}
+		}
+	}
+	e.eng.mu.Unlock()
+	if err := sb.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	// Order: umount comes before the directory removal (nothing below a mount is deleted).
+	lines := e.run.Lines()
+	if lines[len(lines)-1] != "umount "+filepath.Join(e.cfg.StateDir, "containers", sb.ID(), "scratch") {
+		t.Fatalf("last command: %s", lines[len(lines)-1])
+	}
+	if left := e.leftovers(); len(left) != 0 {
+		t.Fatalf("leftovers: %v", left)
+	}
+}
+
+// C5: when the container cannot be removed it may still run: keep the firewall
+// policy, the bridge, the mount and the files; report ErrLeaked; keep the slot;
+// let Reap finish.
+func TestStopKeepsPolicyWhenTheContainerMayStillRun(t *testing.T) {
+	e := newCEnv(t)
+	d := e.driver(t)
+	sb, _ := d.New()
+	conn, err := sb.Start(context.Background(), sandbox.JobSpec{JobID: "j"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stub(t, conn)
+	e.eng.removeErr = errors.New("daemon busy")
+	err = sb.Stop(context.Background())
+	if !errors.Is(err, sandbox.ErrLeaked) {
+		t.Fatalf("want ErrLeaked, got %v", err)
+	}
+	if e.plumb.Live() != 1 {
+		t.Fatal("the firewall policy must stay while the container may run")
+	}
+	e.eng.mu.Lock()
+	nets := len(e.eng.networks)
+	e.eng.mu.Unlock()
+	if nets != 1 || e.mounts.count() != 1 {
+		t.Fatalf("the bridge and the scratch mount must stay: nets=%d mounts=%d", nets, e.mounts.count())
+	}
+	if _, err := os.Stat(filepath.Join(e.cfg.StateDir, "containers", sb.ID(), "scratch.ext4")); err != nil {
+		t.Fatal("the scratch file must stay")
+	}
+	if err := sb.Stop(context.Background()); !errors.Is(err, sandbox.ErrLeaked) {
+		t.Fatalf("second Stop: %v", err)
+	}
+	// C8: the slot is taken, a new sandbox gets another slot, Reap is busy while it runs.
+	other, err := d.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Reap(context.Background()); !errors.Is(err, sandbox.ErrBusy) {
+		t.Fatalf("Reap while a sandbox exists: %v", err)
+	}
+	_ = other.Stop(context.Background())
+	e.eng.removeErr = nil
+	if err := d.Reap(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if left := e.leftovers(); len(left) != 0 {
+		t.Fatalf("leftovers after Reap: %v", left)
+	}
+	if d.slots.InUse() != 0 {
+		t.Fatal("Reap must free the leaked slot")
+	}
+}
+
+// A scratch disk that cannot be unmounted keeps its files: nothing is deleted
+// below a live mount.
+func TestStopNeverDeletesBelowALiveMount(t *testing.T) {
+	e := newCEnv(t)
+	d := e.driver(t)
+	sb, _ := d.New()
+	conn, err := sb.Start(context.Background(), sandbox.JobSpec{JobID: "j"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stub(t, conn)
+	e.mounts.failUm = errors.New("target is busy")
+	if err := sb.Stop(context.Background()); !errors.Is(err, sandbox.ErrLeaked) {
+		t.Fatalf("got %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(e.cfg.StateDir, "containers", sb.ID(), "scratch.ext4")); err != nil {
+		t.Fatal("files below a mount that is still there were deleted")
+	}
+	e.mounts.failUm = nil
+	if err := d.Reap(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if e.mounts.count() != 0 {
+		t.Fatal("Reap must unmount leftover scratch disks")
+	}
+	if left := e.leftovers(); len(left) != 0 {
+		t.Fatalf("leftovers: %v", left)
+	}
+}
+
+// C7: Stop aborts a boot in progress instead of waiting for the timeout.
+func TestStopAbortsABootInProgress(t *testing.T) {
+	e := newCEnv(t)
+	e.eng.noConnect = true
+	o := e.opts()
+	o.ConnectTimeout = time.Minute
+	d, err := New(context.Background(), e.cfg, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = d.Close() }()
+	sb, _ := d.New()
+	started := make(chan error, 1)
+	go func() { _, err := sb.Start(context.Background(), sandbox.JobSpec{JobID: "j"}); started <- err }()
+	time.Sleep(500 * time.Millisecond)
+	t0 := time.Now()
+	if err := sb.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-started:
+		if !errors.Is(err, sandbox.ErrAborted) {
+			t.Fatalf("Start must report the abort, got %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Start was not aborted")
+	}
+	if time.Since(t0) > 5*time.Second {
+		t.Fatalf("Stop took %v", time.Since(t0))
+	}
+	if left := e.leftovers(); len(left) != 0 {
+		t.Fatalf("leftovers: %v", left)
+	}
+}
+
+// C16: ID names the Docker objects.
+func TestSandboxIDNamesDockerObjects(t *testing.T) {
+	e := newCEnv(t)
+	d := e.driver(t)
+	sb, _ := d.New()
+	if !sandbox.ValidID(sb.ID()) {
+		t.Fatal(sb.ID())
+	}
+	conn, err := sb.Start(context.Background(), sandbox.JobSpec{JobID: "j"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stub(t, conn)
+	defer func() { _ = sb.Stop(context.Background()) }()
+	e.eng.mu.Lock()
+	defer e.eng.mu.Unlock()
+	for _, s := range e.eng.containers {
+		if s.Name != "ermite-"+sb.ID() {
+			t.Fatalf("container name %q", s.Name)
+		}
+	}
+}
+
+// S3: a second runner on the same host is refused whatever its state directory.
+func TestHostLockAcrossStateDirs(t *testing.T) {
+	e := newCEnv(t)
+	d := e.driver(t)
+	_ = d
+	e2 := newCEnv(t)
+	e2.cfg.LockFile = e.cfg.LockFile // same host, another state directory
+	_, err := New(context.Background(), e2.cfg, e2.opts())
+	if err == nil || !strings.Contains(err.Error(), "another ermite-runner is running on this host") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+// C10: a cancelled wait is reported as cancelled, never as a clean exit.
+func TestAwaitExit(t *testing.T) {
+	res := make(chan container.WaitResponse, 1)
+	errc := make(chan error, 1)
+	res <- container.WaitResponse{StatusCode: 3}
+	if r := <-awaitExit(context.Background(), res, errc); r.Code != 3 || r.Err != nil {
+		t.Fatalf("%+v", r)
+	}
+	errc <- errors.New("daemon gone")
+	if r := <-awaitExit(context.Background(), make(chan container.WaitResponse), errc); r.Code != -1 || r.Err == nil {
+		t.Fatalf("%+v", r)
+	}
+	// Both ready and the context already cancelled: the cancellation wins.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	for range 50 {
+		res2 := make(chan container.WaitResponse, 1)
+		res2 <- container.WaitResponse{StatusCode: 0}
+		if r := <-awaitExit(ctx, res2, make(chan error)); r.Err == nil || !errors.Is(r.Err, context.Canceled) || r.Code != -1 {
+			t.Fatalf("a cancelled wait must not look like a clean exit: %+v", r)
+		}
+	}
+}
+
+func TestFreeSpaceWarningInContainerMode(t *testing.T) {
+	e := newCEnv(t)
+	var buf bytes.Buffer
+	o := e.opts()
+	o.FreeSpace = func(string) (int64, error) { return 1, nil }
+	d, err := New(logger(&buf), e.cfg, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = d.Close() }()
+	if !strings.Contains(buf.String(), "less free space") {
+		t.Fatalf("no warning: %s", buf.String())
+	}
+}
+
+func TestMkfsTooOldRefusedAtStart(t *testing.T) {
+	e := newCEnv(t)
+	run := &cmdrun.Fake{Handle: func(c cmdrun.Call) ([]byte, error) {
+		if c.Name == "mkfs.ext4" {
+			return []byte("mke2fs 1.42.9 (4-Feb-2014)\n"), nil
+		}
+		return nil, nil
+	}}
+	o := e.opts()
+	o.Run = run
+	if _, err := New(context.Background(), e.cfg, o); err == nil || !strings.Contains(err.Error(), "1.43") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestSocketPathTooLongIsExplained(t *testing.T) {
+	e := newCEnv(t)
+	e.cfg.StateDir = filepath.Join(e.cfg.StateDir, strings.Repeat("d", 100))
+	d := e.driver(t)
+	sb, _ := d.New()
+	_, err := sb.Start(context.Background(), sandbox.JobSpec{JobID: "j"})
+	if err == nil || !strings.Contains(err.Error(), "108-byte limit") && !strings.Contains(err.Error(), "limit of a Unix socket") {
+		t.Fatalf("got %v", err)
+	}
+	if left := e.leftovers(); len(left) != 0 {
+		t.Fatalf("leftovers: %v", left)
+	}
+}

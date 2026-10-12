@@ -4,6 +4,7 @@ package container
 
 import (
 	"context"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,14 +12,16 @@ import (
 	"testing"
 	"time"
 
+	"bnema.dev/ermite-runner/internal/cmdrun"
 	"bnema.dev/ermite-runner/internal/execstream"
 	"bnema.dev/ermite-runner/internal/execstream/execpb"
 	"bnema.dev/ermite-runner/internal/sandbox"
+	"bnema.dev/ermite-runner/internal/sandbox/disk"
 	"bnema.dev/ermite-runner/internal/sandbox/sandboxtest"
 )
 
 // TestDockerAPIWiring runs the real Docker Engine calls (network with a named
-// bridge, labelled volume and container, bind mounts, wait, removal, reaping by
+// bridge, labelled container, bind mounts, wait, removal, reaping by
 // label) against whatever daemon DOCKER_HOST points at, including a rootless
 // one. It does not test isolation (a rootless daemon cannot run the nested
 // dockerd): the integration test in internal/sandbox/integration does.
@@ -52,9 +55,15 @@ func TestDockerAPIWiring(t *testing.T) {
 		Isolation: sandbox.Container, StateDir: filepath.Join(dir, "state"), Capacity: 1, Image: image,
 		JobCPUs: 1, JobMemoryMiB: 512, JobDiskMiB: 1024, UIDBase: 900000,
 		Network: mustPrefix("10.213.0.0/16"), Executable: helper, DNSPort: 0,
+		LockFile: filepath.Join(dir, "host.lock"), JobPids: 4096,
 	}
 	ctx := context.Background()
-	d, err := New(ctx, cfg, Options{Net: plumb, allowRootless: true, ConnectTimeout: 60 * time.Second})
+	// Loop mounts need root: replace them by plain directories (mkfs still runs).
+	run := noMountRunner{}
+	empty := filepath.Join(dir, "mountinfo")
+	_ = os.WriteFile(empty, nil, 0o644)
+	d, err := New(ctx, cfg, Options{Net: plumb, allowRootless: true, ConnectTimeout: 60 * time.Second, Run: run,
+		Mounter: &disk.Mounter{Run: run, Mountinfo: empty}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,9 +97,6 @@ func TestDockerAPIWiring(t *testing.T) {
 			if n := dockerLines(t, "network", "ls", "-q", "--filter", "label="+sandbox.LabelJob); len(n) != 1 {
 				t.Fatalf("expected one labelled network, got %v", n)
 			}
-			if v := dockerLines(t, "volume", "ls", "-q", "--filter", "label="+sandbox.LabelJob); len(v) != 1 {
-				t.Fatalf("expected one labelled volume, got %v", v)
-			}
 		}
 		if err := sb.Stop(ctx); err != nil {
 			t.Fatal(err)
@@ -99,7 +105,6 @@ func TestDockerAPIWiring(t *testing.T) {
 	for _, args := range [][]string{
 		{"ps", "-aq", "--filter", "label=" + sandbox.LabelJob},
 		{"network", "ls", "-q", "--filter", "label=" + sandbox.LabelJob},
-		{"volume", "ls", "-q", "--filter", "label=" + sandbox.LabelJob},
 	} {
 		if l := dockerLines(t, args...); len(l) != 0 {
 			t.Fatalf("docker %v left %v", args, l)
@@ -108,6 +113,17 @@ func TestDockerAPIWiring(t *testing.T) {
 	if plumb.Live() != 0 {
 		t.Fatal("firewall attachments leaked")
 	}
+}
+
+// noMountRunner runs real commands except mount and umount, which succeed
+// without doing anything.
+type noMountRunner struct{}
+
+func (noMountRunner) Run(ctx context.Context, in io.Reader, name string, args ...string) ([]byte, error) {
+	if name == "mount" || name == "umount" {
+		return nil, nil
+	}
+	return cmdrun.Exec{}.Run(ctx, in, name, args...)
 }
 
 func dockerLines(t *testing.T, args ...string) []string {

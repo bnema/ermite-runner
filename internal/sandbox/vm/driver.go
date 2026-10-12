@@ -30,6 +30,7 @@ import (
 	"bnema.dev/ermite-runner/internal/cmdrun"
 	"bnema.dev/ermite-runner/internal/netpolicy"
 	"bnema.dev/ermite-runner/internal/sandbox"
+	"bnema.dev/ermite-runner/internal/sandbox/disk"
 	"bnema.dev/ermite-runner/internal/sandbox/netsetup"
 )
 
@@ -127,6 +128,9 @@ func New(ctx context.Context, cfg sandbox.Config, opt Options) (*Driver, error) 
 		}
 	}
 	sandbox.WarnIfLowSpace(ctx, cfg.StateDir, cfg.Capacity, cfg.JobDiskMiB, opt.FreeSpace)
+	if err := disk.CheckMkfs(ctx, opt.Run); err != nil {
+		return fail(err)
+	}
 	if d.execDisk, err = ensureExecDisk(ctx, opt.Run, exe, cfg.StateDir); err != nil {
 		return fail(err)
 	}
@@ -362,7 +366,7 @@ func (s *vmSandbox) bootFiles(ctx context.Context, spec sandbox.JobSpec) (vmFile
 	if s.lay.jailed {
 		owner = s.lay.uid
 	}
-	return f, makeScratch(ctx, d.opt.Run, s.lay.host("scratch.ext4"), spec.DiskMiB, owner)
+	return f, disk.CreateScratch(ctx, d.opt.Run, s.lay.host("scratch.ext4"), spec.DiskMiB, owner)
 }
 
 // bootVsock listens on the host side of the vsock stream: Firecracker connects

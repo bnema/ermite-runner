@@ -27,9 +27,6 @@ type engine interface {
 	CreateNetwork(ctx context.Context, spec networkSpec) (string, error)
 	RemoveNetwork(ctx context.Context, id string) error
 	ListNetworks(ctx context.Context, labelKey string) ([]string, error)
-	CreateVolume(ctx context.Context, name string, labels map[string]string) error
-	RemoveVolume(ctx context.Context, name string) error
-	ListVolumes(ctx context.Context, labelKey string) ([]string, error)
 	CreateContainer(ctx context.Context, spec containerSpec) (string, error)
 	StartContainer(ctx context.Context, id string) error
 	// WaitExit returns a channel that yields the exit code once the container
@@ -72,17 +69,15 @@ type containerSpec struct {
 	IPv4       netip.Addr
 	DNS        netip.Addr
 	Binds      []bindMount
-	Volumes    []volumeMount
-	MemoryMiB  int
+	MemoryMiB  int // also the swap limit: no swap
 	CPUs       int
+	Pids       int // PidsLimit
 }
 
 type bindMount struct {
 	Source, Target string
 	ReadOnly       bool
 }
-
-type volumeMount struct{ Name, Target string }
 
 // dockerEngine implements engine with the moby client.
 type dockerEngine struct{ cli *client.Client }
@@ -171,29 +166,8 @@ func (e *dockerEngine) ListNetworks(ctx context.Context, key string) ([]string, 
 	return ids, nil
 }
 
-func (e *dockerEngine) CreateVolume(ctx context.Context, name string, labels map[string]string) error {
-	_, err := e.cli.VolumeCreate(ctx, client.VolumeCreateOptions{Name: name, Labels: labels})
-	return err
-}
-
-func (e *dockerEngine) RemoveVolume(ctx context.Context, name string) error {
-	_, err := e.cli.VolumeRemove(ctx, name, client.VolumeRemoveOptions{Force: true})
-	return ignoreNotFound(err)
-}
-
-func (e *dockerEngine) ListVolumes(ctx context.Context, key string) ([]string, error) {
-	r, err := e.cli.VolumeList(ctx, client.VolumeListOptions{Filters: client.Filters{}.Add("label", key)})
-	if err != nil {
-		return nil, err
-	}
-	var names []string
-	for _, v := range r.Items {
-		names = append(names, v.Name)
-	}
-	return names, nil
-}
-
-func (e *dockerEngine) CreateContainer(ctx context.Context, s containerSpec) (string, error) {
+// hostConfigFor builds the Docker host configuration of a job container.
+func hostConfigFor(s containerSpec) *container.HostConfig {
 	hc := &container.HostConfig{
 		NetworkMode:  container.NetworkMode(s.Network),
 		Privileged:   s.Privileged,
@@ -204,17 +178,24 @@ func (e *dockerEngine) CreateContainer(ctx context.Context, s containerSpec) (st
 	}
 	if s.MemoryMiB > 0 {
 		hc.Memory = int64(s.MemoryMiB) << 20
+		hc.MemorySwap = hc.Memory // swap = memory: the job cannot use swap
 	}
 	if s.CPUs > 0 {
 		hc.NanoCPUs = int64(s.CPUs) * 1_000_000_000
+	}
+	if s.Pids > 0 {
+		p := int64(s.Pids)
+		hc.PidsLimit = &p
 	}
 	for _, b := range s.Binds {
 		hc.Mounts = append(hc.Mounts, mount.Mount{Type: mount.TypeBind, Source: b.Source, Target: b.Target, ReadOnly: b.ReadOnly,
 			BindOptions: &mount.BindOptions{CreateMountpoint: true}})
 	}
-	for _, v := range s.Volumes {
-		hc.Mounts = append(hc.Mounts, mount.Mount{Type: mount.TypeVolume, Source: v.Name, Target: v.Target})
-	}
+	return hc
+}
+
+func (e *dockerEngine) CreateContainer(ctx context.Context, s containerSpec) (string, error) {
+	hc := hostConfigFor(s)
 	cfg := &container.Config{
 		Image:      s.Image,
 		Entrypoint: s.Entrypoint,
@@ -239,17 +220,29 @@ func (e *dockerEngine) StartContainer(ctx context.Context, id string) error {
 }
 
 func (e *dockerEngine) WaitExit(ctx context.Context, id string) <-chan exitResult {
-	out := make(chan exitResult, 1)
 	w := e.cli.ContainerWait(ctx, id, client.ContainerWaitOptions{Condition: container.WaitConditionNextExit})
+	return awaitExit(ctx, w.Result, w.Error)
+}
+
+// awaitExit turns the two channels of a Docker wait into one result. A context
+// that ended is reported as such (code -1, ctx.Err()), whichever channel the
+// select picked: a cancelled wait must never look like a clean exit.
+func awaitExit(ctx context.Context, result <-chan container.WaitResponse, errc <-chan error) <-chan exitResult {
+	out := make(chan exitResult, 1)
 	go func() {
+		var res exitResult
 		select {
-		case r := <-w.Result:
-			out <- exitResult{Code: int(r.StatusCode)}
-		case err := <-w.Error:
-			out <- exitResult{Code: -1, Err: err}
+		case r := <-result:
+			res = exitResult{Code: int(r.StatusCode)}
+		case err := <-errc:
+			res = exitResult{Code: -1, Err: err}
 		case <-ctx.Done():
-			out <- exitResult{Code: -1, Err: ctx.Err()}
+			res = exitResult{Code: -1, Err: ctx.Err()}
 		}
+		if err := ctx.Err(); err != nil {
+			res = exitResult{Code: -1, Err: err}
+		}
+		out <- res
 	}()
 	return out
 }
