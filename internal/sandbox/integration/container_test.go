@@ -21,10 +21,15 @@ func TestContainerStubExecutor(t *testing.T) {
 	ctx := ctxWithLog(t)
 	cfg := loadConfig(t, sandbox.Container)
 	// A rootless daemon is refused with a clear error: nothing to test there.
-	if _, err := drivers.Factories().Container(ctx, cfg); err != nil {
+	probe, err := drivers.Factories().Container(ctx, cfg)
+	if err != nil {
 		if strings.Contains(err.Error(), "rootless") {
 			t.Skipf("the Docker daemon is rootless, as designed the driver refuses it: %v", err)
 		}
+		t.Fatal(err)
+	}
+	// The probe holds the host-wide lock: release it before the scenario takes it.
+	if err := probe.Close(); err != nil {
 		t.Fatal(err)
 	}
 	scenario(t, ctx, cfg, sandbox.Container, func(t *testing.T, sb sandbox.Sandbox) {
