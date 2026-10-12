@@ -522,7 +522,7 @@ type JobSpec struct {
 	TimeoutMinutes int32                  `protobuf:"varint,7,opt,name=timeout_minutes,json=timeoutMinutes,proto3" json:"timeout_minutes,omitempty"`
 	RunnerName     string                 `protobuf:"bytes,8,opt,name=runner_name,json=runnerName,proto3" json:"runner_name,omitempty"`
 	RunnerVersion  string                 `protobuf:"bytes,9,opt,name=runner_version,json=runnerVersion,proto3" json:"runner_version,omitempty"`
-	// runner_environment is the runner.environment value ("self-hosted").
+	// runner_environment is the runner.environment value ("github-hosted" or "self-hosted").
 	RunnerEnvironment string `protobuf:"bytes,10,opt,name=runner_environment,json=runnerEnvironment,proto3" json:"runner_environment,omitempty"`
 	Debug             bool   `protobuf:"varint,11,opt,name=debug,proto3" json:"debug,omitempty"` // ACTIONS_STEP_DEBUG
 	// deadline_ms is what is left of the job timeout when the host sends this

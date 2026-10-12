@@ -634,7 +634,7 @@ func (j *jobRun) drive(conn sandbox.Conn, rt *Runner) (*execpb.Exit, error) {
 		WorkflowPath: j.job.WorkflowPath, WorkflowYaml: j.job.WorkflowYaml, JobKey: j.job.JobKey,
 		Matrix: j.job.Matrix, Contexts: j.job.Contexts, Repo: j.job.Repo, TimeoutMinutes: int32(j.timeoutMinutes()),
 		DeadlineMs: max(1, time.Until(j.deadline()).Milliseconds()),
-		RunnerName: rt.Cfg.Name, RunnerVersion: rt.Cfg.Version, RunnerEnvironment: "self-hosted",
+		RunnerName: rt.Cfg.Name, RunnerVersion: rt.Cfg.Version, RunnerEnvironment: rt.Cfg.environment(),
 	}}
 	_, exit, err := execstream.DriveJob(conn, run, j.cancelCh, execstream.JobHandler{
 		StepStarted: j.stepStarted, StepCompleted: j.stepCompleted,

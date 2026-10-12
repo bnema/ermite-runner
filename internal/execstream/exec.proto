@@ -57,7 +57,7 @@ message JobSpec {
   int32 timeout_minutes = 7;
   string runner_name = 8;
   string runner_version = 9;
-  // runner_environment is the runner.environment value ("self-hosted").
+  // runner_environment is the runner.environment value ("github-hosted" or "self-hosted").
   string runner_environment = 10;
   bool debug = 11; // ACTIONS_STEP_DEBUG
   // deadline_ms is what is left of the job timeout when the host sends this

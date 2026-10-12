@@ -20,13 +20,22 @@ import (
 // (ERMITE_RUNNER_ISOLATION, _CAPACITY, _IMAGE, _JOB_*) are read by package
 // sandbox.
 const (
-	EnvURL           = "ERMITE_RUNNER_URL"
-	EnvName          = "ERMITE_RUNNER_NAME"
-	EnvLabels        = "ERMITE_RUNNER_LABELS"
+	EnvURL    = "ERMITE_RUNNER_URL"
+	EnvName   = "ERMITE_RUNNER_NAME"
+	EnvLabels = "ERMITE_RUNNER_LABELS"
+	// EnvEnvironment is the runner.environment value that jobs see: see
+	// Config.Environment.
+	EnvEnvironment   = "ERMITE_RUNNER_ENVIRONMENT"
 	EnvRegisterToken = "ERMITE_RUNNER_REGISTER_TOKEN"
 	// EnvInsecureHTTP allows a plain http server URL that is not loopback. The
 	// runner token and the job tokens then travel in clear: tests only.
 	EnvInsecureHTTP = "ERMITE_RUNNER_INSECURE_HTTP"
+)
+
+// The values of Config.Environment, as GitHub spells them.
+const (
+	EnvGitHubHosted = "github-hosted"
+	EnvSelfHosted   = "self-hosted"
 )
 
 // Config is the host part of the runner configuration.
@@ -43,6 +52,14 @@ type Config struct {
 	Capacity int
 	// Version is the version of the runner binary.
 	Version string
+	// Environment is the "runner.environment" value of the jobs and what decides
+	// whether "Set up job" prints the runner and machine name: EnvGitHubHosted
+	// (the default) or EnvSelfHosted. The runners of ermite stand in for the
+	// GitHub-hosted ones: workflows written for github.com test
+	// runner.environment == 'github-hosted' and the recordings of github.com
+	// (ermite-conformance) carry that value, so it is the default; an operator
+	// who wants jobs to see a self-hosted runner sets ERMITE_RUNNER_ENVIRONMENT.
+	Environment string
 	// InsecureHTTP allows a non-loopback http URL (ERMITE_RUNNER_INSECURE_HTTP=1).
 	InsecureHTTP bool
 }
@@ -55,6 +72,15 @@ func (c Config) Client(url, token string) ermiteconnect.RunnerServiceClient {
 	return NewClient(url, token, http.DefaultTransport)
 }
 
+// environment is Environment, the default when a Config was built without
+// LoadConfig.
+func (c Config) environment() string {
+	if c.Environment == "" {
+		return EnvGitHubHosted
+	}
+	return c.Environment
+}
+
 var nameRe = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 
 // LoadConfig reads the host settings. hostname is the default runner name.
@@ -64,6 +90,14 @@ func LoadConfig(getenv func(string) string, hostname, stateDir string, capacity 
 	c := Config{URL: strings.TrimSpace(getenv(EnvURL)), Name: strings.TrimSpace(getenv(EnvName)), StateDir: stateDir, Capacity: capacity, Version: version}
 	if c.Name == "" {
 		c.Name = sanitizeName(hostname)
+	}
+	switch v := strings.ToLower(strings.TrimSpace(getenv(EnvEnvironment))); v {
+	case "":
+		c.Environment = EnvGitHubHosted
+	case EnvGitHubHosted, EnvSelfHosted:
+		c.Environment = v
+	default:
+		return c, fmt.Errorf("%s: %q is not %s or %s", EnvEnvironment, getenv(EnvEnvironment), EnvGitHubHosted, EnvSelfHosted)
 	}
 	switch strings.ToLower(strings.TrimSpace(getenv(EnvInsecureHTTP))) {
 	case "", "0", "false", "no":
