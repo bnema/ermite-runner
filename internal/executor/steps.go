@@ -123,7 +123,6 @@ type job struct {
 	baseEnv     []string
 	lookupPath  string
 	before      map[string]bool
-	outputsSet  bool
 }
 
 func (j *job) now() time.Time {
@@ -287,7 +286,7 @@ func (j *job) evalMap(m *template.Mapping, env *ordered) ([]Pair, error) {
 	var out []Pair
 	for _, p := range d.Pairs() {
 		if k := p.Value.Kind(); k == expr.KindArray || k == expr.KindDictionary {
-			return nil, fmt.Errorf("Unexpected type '%s' encountered while reading 'environment value'. The type 'StringToken' was expected.", k)
+			return nil, ghErrorf("Unexpected type '%s' encountered while reading 'environment value'. The type 'StringToken' was expected.", k)
 		}
 		out = append(out, Pair{p.Key, expr.CoerceString(p.Value)})
 	}
@@ -313,11 +312,11 @@ func (j *job) setUp() ([]*workflow.Step, error) {
 		for _, e := range errs {
 			msgs = append(msgs, e.Error())
 		}
-		return nil, fmt.Errorf("The workflow is not valid. %s", strings.Join(msgs, "\n"))
+		return nil, ghErrorf("The workflow is not valid. %s", strings.Join(msgs, "\n"))
 	}
 	jb := wf.Job(cfg.JobKey)
 	if jb == nil {
-		return nil, fmt.Errorf("The workflow has no job '%s'.", cfg.JobKey)
+		return nil, ghErrorf("The workflow has no job '%s'.", cfg.JobKey)
 	}
 	j.wf, j.jb = wf, jb
 
@@ -446,15 +445,13 @@ func envValue(env []string, key string) string {
 // stepRun is the state of one step being run; it implements Sink and
 // commandHost.
 type stepRun struct {
-	j               *job
-	num             int
-	st              *workflow.Step
-	env             *ordered // the step's environment: job env + step env
-	result          *stepResult
-	cmdResult       *stepResult
-	outcome         *stepResult
-	cmds            *commandManager
-	secretEnvLogged bool
+	j         *job
+	num       int
+	st        *workflow.Step
+	env       *ordered // the step's environment: job env + step env
+	cmdResult *stepResult
+	outcome   *stepResult
+	cmds      *commandManager
 }
 
 func (s *stepRun) Out(text string)        { s.j.out(s.num, text) }

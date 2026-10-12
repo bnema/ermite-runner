@@ -79,6 +79,86 @@ func (w *lineWriter) Flush() {
 	}
 }
 
+// dispatchBatchDelay is how long the dispatcher lets lines pile up after the
+// first one before it hands a batch over. The official runner hands over
+// whatever its reader threads queued when its loop wakes up (a thread-pool
+// wake-up, about a millisecond); Go wakes in microseconds, so without this
+// pause the interleaving of a fast script's stdout and stderr would differ
+// from the official runner's more often.
+const dispatchBatchDelay = 2 * time.Millisecond
+
+// dispatcher reproduces how ProcessInvoker delivers output: stdout and stderr
+// are read by two readers into two queues, and a loop that wakes up on a
+// signal hands over all queued stderr lines first and then all queued stdout
+// lines (ProcessInvoker.ProcessOutput, ProcessInvoker.cs:392-436). Within a
+// stream the order is kept; between the streams a batch puts stderr first,
+// which is visible with `bash -x` (the corpus recording of shell-custom).
+type dispatcher struct {
+	fn       func(string)
+	mu       sync.Mutex
+	outQ     []string
+	errQ     []string
+	signal   chan struct{}
+	closed   chan struct{}
+	finished chan struct{}
+	out, err *lineWriter
+}
+
+func newDispatcher(fn func(string)) *dispatcher {
+	d := &dispatcher{fn: fn, signal: make(chan struct{}, 1), closed: make(chan struct{}), finished: make(chan struct{})}
+	push := func(q *[]string) func(string) {
+		return func(line string) {
+			d.mu.Lock()
+			*q = append(*q, line)
+			d.mu.Unlock()
+			select {
+			case d.signal <- struct{}{}:
+			default:
+			}
+		}
+	}
+	d.out = &lineWriter{fn: push(&d.outQ)}
+	d.err = &lineWriter{fn: push(&d.errQ)}
+	go d.loop()
+	return d
+}
+
+func (d *dispatcher) drain() {
+	d.mu.Lock()
+	errs, outs := d.errQ, d.outQ
+	d.errQ, d.outQ = nil, nil
+	d.mu.Unlock()
+	for _, l := range errs {
+		d.fn(l)
+	}
+	for _, l := range outs {
+		d.fn(l)
+	}
+}
+
+func (d *dispatcher) loop() {
+	defer close(d.finished)
+	for {
+		select {
+		case <-d.signal:
+			time.Sleep(dispatchBatchDelay)
+			d.drain()
+		case <-d.closed:
+			d.drain()
+			return
+		}
+	}
+}
+
+// Close flushes the readers and delivers what is left. Call it once the
+// process and its pipes are done.
+func (d *dispatcher) Close() {
+	d.err.Flush()
+	d.out.Flush()
+	close(d.closed)
+	<-d.finished
+}
+
 // procSpec describes one process to run.
 type procSpec struct {
 	Argv []string
@@ -86,7 +166,8 @@ type procSpec struct {
 	Env  []string
 	// Credential, when set, is the user the process runs as.
 	Credential *syscall.Credential
-	// OnLine receives the lines of stdout and stderr (one stream, in order).
+	// OnLine receives the lines of stdout and stderr, one call at a time, in
+	// the order of dispatcher.
 	OnLine func(line string)
 	// Cancel starts the SIGINT, SIGTERM, SIGKILL escalation when closed.
 	Cancel <-chan struct{}
@@ -124,8 +205,8 @@ func runProcess(spec procSpec) (procResult, error) {
 	cmd.Dir = spec.Dir
 	cmd.Env = spec.Env
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Credential: spec.Credential}
-	lw := &lineWriter{fn: spec.OnLine}
-	cmd.Stdout, cmd.Stderr = lw, lw // the same writer: one pipe, order kept
+	disp := newDispatcher(spec.OnLine)
+	cmd.Stdout, cmd.Stderr = disp.out, disp.err
 	cmd.WaitDelay = spec.WaitDelay
 	if err := cmd.Start(); err != nil {
 		return procResult{}, err
@@ -177,7 +258,7 @@ func runProcess(spec procSpec) (procResult, error) {
 	mu.Unlock()
 	close(stopWatch)
 	<-watchDone
-	lw.Flush()
+	disp.Close()
 
 	res := procResult{Cancelled: was}
 	var ee *exec.ExitError

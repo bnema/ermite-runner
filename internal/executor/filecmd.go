@@ -9,7 +9,6 @@ package executor
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -58,6 +57,14 @@ const stepSummaryLimit = 1024 * 1024
 
 // setEnvBlockList is SetEnvFileCommand._setEnvBlockList (FileCommandManager.cs:215).
 var setEnvBlockList = []string{"NODE_OPTIONS"}
+
+// msgError is an error whose text is GitHub's own message, capitalised and
+// punctuated like the official runner's.
+type msgError string
+
+func (e msgError) Error() string { return string(e) }
+
+func ghErrorf(format string, a ...any) error { return msgError(fmt.Sprintf(format, a...)) }
 
 // Pair is one name and value read from an environment-style file.
 type Pair struct{ Key, Value string }
@@ -280,23 +287,23 @@ func ParseEnvFile(text string) ([]Pair, error) {
 				// an empty variable name is useless: we reject it.
 				k, v, _ := strings.Cut(line, "=")
 				if k == "" {
-					return out, fmt.Errorf("Invalid format '%s'. Name must not be empty", line)
+					return out, ghErrorf("Invalid format '%s'. Name must not be empty", line)
 				}
 				key, output = k, v
 			case heredoc >= 0 && (equals < 0 || heredoc < equals):
 				k, delim, _ := strings.Cut(line, "<<")
 				if k == "" || delim == "" {
-					return out, fmt.Errorf("Invalid format '%s'. Name must not be empty and delimiter must not be empty", line)
+					return out, ghErrorf("Invalid format '%s'. Name must not be empty and delimiter must not be empty", line)
 				}
 				key = k
 				start, end := index, index
 				temp, newline, tok := readLine(text, &index)
 				for temp != delim || !tok {
 					if !tok {
-						return out, fmt.Errorf("Invalid value. Matching delimiter not found '%s'", delim)
+						return out, ghErrorf("Invalid value. Matching delimiter not found '%s'", delim)
 					}
 					if newline == "" {
-						return out, errors.New("Invalid value. EOF marker missing new line.")
+						return out, ghErrorf("Invalid value. EOF marker missing new line.")
 					}
 					end = index - len(newline)
 					temp, newline, tok = readLine(text, &index)
@@ -305,7 +312,7 @@ func ParseEnvFile(text string) ([]Pair, error) {
 					output = text[start:end]
 				}
 			default:
-				return out, fmt.Errorf("Invalid format '%s'", line)
+				return out, ghErrorf("Invalid format '%s'", line)
 			}
 			out = append(out, Pair{key, output})
 		}

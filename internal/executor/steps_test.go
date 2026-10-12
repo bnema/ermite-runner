@@ -1,0 +1,477 @@
+// SPDX-License-Identifier: MIT
+
+package executor
+
+import (
+	"strings"
+	"syscall"
+	"testing"
+	"time"
+)
+
+const wfHead = "on: push\njobs:\n  j:\n    runs-on: x\n"
+
+func logOf(s *recStep) string { return strings.Join(s.Log, "\n") }
+
+func TestImplicitStepsAndNumbering(t *testing.T) {
+	needTools(t, "bash")
+	rec, res := runLocal(t, wfHead+"    steps:\n      - run: echo hi\n      - name: second\n        run: echo two\n", "j", nil)
+	if res.Conclusion != ConclusionSuccess || !rec.done {
+		t.Fatalf("%+v", res)
+	}
+	want := []string{"Set up job", "Run echo hi", "second", "Complete job"}
+	if got := rec.names(); strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("steps %v", got)
+	}
+	for i, s := range rec.steps {
+		if s.Num != i+1 || s.Conclusion != ConclusionSuccess {
+			t.Errorf("%+v", s)
+		}
+	}
+	setup := logOf(rec.steps[0])
+	for _, w := range []string{"Current runner version: 'test'", "Runner name: 'test-runner'", "Prepare workflow directory", "Prepare all required actions", "Complete job name: j"} {
+		if !strings.Contains(setup, w) {
+			t.Errorf("Set up job lacks %q:\n%s", w, setup)
+		}
+	}
+	if got := logOf(rec.steps[3]); got != "Cleaning up orphan processes" {
+		t.Errorf("Complete job: %q", got)
+	}
+	if got := logOf(rec.steps[1]); !strings.HasSuffix(got, "##[endgroup]\nhi") {
+		t.Errorf("log %q", got)
+	}
+}
+
+func TestFailureSkipsAndStatusFunctions(t *testing.T) {
+	needTools(t, "bash")
+	rec, res := runLocal(t, wfHead+`    steps:
+      - id: boom
+        run: exit 3
+      - name: skipped by default success()
+        run: echo NO
+      - name: always
+        if: always()
+        run: echo ran-always
+      - name: failure
+        if: failure()
+        run: echo ran-failure
+      - name: cancelled
+        if: cancelled()
+        run: echo NO
+      - name: outcome
+        if: always() && steps.boom.outcome == 'failure' && steps.boom.conclusion == 'failure'
+        run: echo ran-outcome
+`, "j", nil)
+	if res.Conclusion != ConclusionFailure {
+		t.Fatalf("%+v", res)
+	}
+	for name, c := range map[string]Conclusion{
+		"Run exit 3": ConclusionFailure, "skipped by default success()": ConclusionSkipped, "always": ConclusionSuccess,
+		"failure": ConclusionSuccess, "cancelled": ConclusionSkipped, "outcome": ConclusionSuccess,
+	} {
+		if got := rec.step(t, name).Conclusion; got != c {
+			t.Errorf("%s: %s, want %s", name, got, c)
+		}
+	}
+	if got := logOf(rec.step(t, "Run exit 3")); !strings.HasSuffix(got, "##[error]Process completed with exit code 3.") {
+		t.Errorf("%q", got)
+	}
+	if len(rec.step(t, "skipped by default success()").Log) != 0 {
+		t.Error("a skipped step logs nothing")
+	}
+}
+
+func TestEnvPrecedenceAndExpressions(t *testing.T) {
+	needTools(t, "bash")
+	rec, res := runLocal(t, `on: push
+env:
+  A: wf
+  B: ${{ github.event_name }}
+jobs:
+  j:
+    runs-on: x
+    env:
+      A: job
+      C: ${{ github.ref_type }}-c
+    steps:
+      - env:
+          D: ${{ env.A }}-${{ env.C }}
+          A: step
+        run: echo "A=$A B=$B C=$C D=$D"
+      - run: echo "A=$A D=${D-unset}"
+`, "j", nil)
+	if res.Conclusion != ConclusionSuccess {
+		t.Fatalf("%+v", res)
+	}
+	// The step env sees the job env (env.A is "job", not "step"), and the
+	// workflow and job env are evaluated before the steps.
+	if got := logOf(rec.steps[1]); !strings.HasSuffix(got, "A=step B=push C=branch-c D=job-branch-c") {
+		t.Errorf("first step:\n%s", got)
+	}
+	if got := logOf(rec.steps[2]); !strings.HasSuffix(got, "A=job D=unset") {
+		t.Errorf("second step:\n%s", got)
+	}
+}
+
+func TestWorkflowCommands(t *testing.T) {
+	needTools(t, "bash")
+	rec, res := runLocal(t, wfHead+`    steps:
+      - id: s
+        run: |
+          echo "::group::My group"
+          echo inside
+          echo "::endgroup::"
+          echo "::warning file=a.txt,line=1::careful"
+          echo "::error::broken"
+          echo "::debug::hidden"
+          echo "::set-output name=old::v"
+          echo "::add-mask::secret"
+          echo "::not-a-command::x"
+      - run: echo "old=${{ steps.s.outputs.old }}"
+`, "j", nil)
+	if res.Conclusion != ConclusionSuccess {
+		t.Fatalf("%+v", res)
+	}
+	got := logOf(rec.steps[1])
+	for _, w := range []string{"##[group]My group\ninside\n##[endgroup]", "##[warning]careful", "##[error]broken", "##[warning]The `set-output` command is deprecated", "::not-a-command::x"} {
+		if !strings.Contains(got, w) {
+			t.Errorf("log lacks %q:\n%s", w, got)
+		}
+	}
+	_, body, _ := strings.Cut(got, "##[endgroup]\n") // after the header, which echoes the script
+	if strings.Contains(body, "hidden") || strings.Contains(body, "::add-mask") || strings.Contains(body, "secret") {
+		t.Errorf("debug and add-mask must not show:\n%s", body)
+	}
+	if !strings.HasSuffix(logOf(rec.steps[2]), "old=v") {
+		t.Errorf("legacy output not visible: %s", logOf(rec.steps[2]))
+	}
+}
+
+func TestCommandFailureFailsTheStep(t *testing.T) {
+	needTools(t, "bash")
+	rec, res := runLocal(t, wfHead+"    steps:\n      - run: |\n          echo '::set-env name=X::1'\n", "j", nil)
+	if res.Conclusion != ConclusionFailure {
+		t.Fatalf("%+v", res)
+	}
+	got := logOf(rec.steps[1])
+	if !strings.Contains(got, "##[error]Unable to process command '::set-env name=X::1' successfully.") || !strings.Contains(got, "The `set-env` command is disabled.") {
+		t.Errorf("%s", got)
+	}
+}
+
+func TestJobOutputs(t *testing.T) {
+	needTools(t, "bash")
+	rec, res := runLocal(t, `on: push
+jobs:
+  j:
+    runs-on: x
+    outputs:
+      a: ${{ steps.one.outputs.v }}
+      empty: ${{ steps.one.outputs.none }}
+      lit: fixed
+      env: ${{ env.E }}
+    env:
+      E: from-env
+    steps:
+      - id: one
+        run: echo "v=1" >> "$GITHUB_OUTPUT"
+      - run: exit 1
+`, "j", nil)
+	if res.Conclusion != ConclusionFailure {
+		t.Fatalf("%+v", res)
+	}
+	// Outputs are collected even after a failure; empty ones are dropped.
+	if len(res.Outputs) != 3 || res.Outputs["a"] != "1" || res.Outputs["lit"] != "fixed" || res.Outputs["env"] != "from-env" {
+		t.Fatalf("%v", res.Outputs)
+	}
+	_ = rec
+}
+
+func TestNotSupportedYet(t *testing.T) {
+	needTools(t, "bash")
+	rec, res := runLocal(t, wfHead+`    steps:
+      - uses: actions/checkout@v4
+      - name: after
+        if: always()
+        run: echo still-runs
+      - run: echo skipped
+`, "j", nil)
+	if res.Conclusion != ConclusionFailure {
+		t.Fatalf("%+v", res)
+	}
+	u := rec.step(t, "Run actions/checkout@v4")
+	if u.Conclusion != ConclusionFailure || !strings.Contains(logOf(u), "##[error]not supported yet: uses (actions/checkout@v4)") {
+		t.Fatalf("%+v", u)
+	}
+	if rec.step(t, "after").Conclusion != ConclusionSuccess {
+		t.Error("always() steps still run after a failure")
+	}
+	for _, f := range []string{"container: alpine", "services:\n      s:\n        image: x"} {
+		rec2, res2 := runLocal(t, wfHead+"    "+f+"\n    steps:\n      - run: echo hi\n", "j", nil)
+		if res2.Conclusion != ConclusionFailure || res2.Error == "" || !strings.Contains(logOf(rec2.steps[0]), "not supported yet") {
+			t.Errorf("%q: %+v %v", f, res2, rec2.names())
+		}
+	}
+}
+
+func TestInvalidWorkflowAndUnknownJob(t *testing.T) {
+	rec, res := runLocal(t, "on: push\njobs: [", "j", nil)
+	if res.Conclusion != ConclusionFailure || !strings.Contains(res.Error, "The workflow is not valid") || len(rec.steps) != 1 || !rec.done {
+		t.Fatalf("%+v %v", res, rec.names())
+	}
+	_, res = runLocal(t, wfHead+"    steps: [{run: a}]\n", "nope", nil)
+	if res.Conclusion != ConclusionFailure || !strings.Contains(res.Error, "no job 'nope'") {
+		t.Fatalf("%+v", res)
+	}
+}
+
+func TestShellVariants(t *testing.T) {
+	needTools(t, "bash", "sh", "python3")
+	rec, res := runLocal(t, wfHead+`    steps:
+      - shell: python3 {0}
+        run: print("py-ok")
+      - shell: bash {0}
+        run: echo "no-e $-"
+      - shell: sh
+        run: echo sh-ok
+      - shell: nonexistent-shell {0}
+        run: echo NO
+`, "j", nil)
+	if res.Conclusion != ConclusionFailure {
+		t.Fatalf("%+v", res)
+	}
+	if !strings.HasSuffix(logOf(rec.steps[1]), "py-ok") || !strings.Contains(logOf(rec.steps[2]), "shell: ") {
+		t.Errorf("%s | %s", logOf(rec.steps[1]), logOf(rec.steps[2]))
+	}
+	last := rec.steps[4]
+	if last.Conclusion != ConclusionFailure || !strings.Contains(logOf(last), "##[error]nonexistent-shell: command not found") {
+		t.Errorf("%+v", last)
+	}
+}
+
+func TestGithubPathAndEnvReachNextSteps(t *testing.T) {
+	needTools(t, "bash")
+	rec, _ := runLocal(t, wfHead+`    steps:
+      - run: |
+          mkdir -p "$RUNNER_TEMP/bin1" "$RUNNER_TEMP/bin2"
+          printf '#!/bin/sh\necho tool-1\n' > "$RUNNER_TEMP/bin1/tool-ermite"; chmod +x "$RUNNER_TEMP/bin1/tool-ermite"
+          printf '#!/bin/sh\necho tool-2\n' > "$RUNNER_TEMP/bin2/tool-ermite"; chmod +x "$RUNNER_TEMP/bin2/tool-ermite"
+          echo "$RUNNER_TEMP/bin1" >> "$GITHUB_PATH"
+          echo "$RUNNER_TEMP/bin2" >> "$GITHUB_PATH"
+          echo "MULTI<<X" >> "$GITHUB_ENV"; echo "a" >> "$GITHUB_ENV"; echo "b" >> "$GITHUB_ENV"; echo "X" >> "$GITHUB_ENV"
+      - run: |
+          tool-ermite
+          printf 'MULTI=<%s>\n' "$MULTI"
+          echo "ci=$CI actions=$GITHUB_ACTIONS ws=${GITHUB_WORKSPACE##*/} cwd=${PWD##*/}"
+`, "j", nil)
+	got := logOf(rec.steps[2])
+	if !strings.HasSuffix(got, "tool-2\nMULTI=<a\nb>\nci=true actions=true ws=hello cwd=hello") {
+		t.Errorf("%s", got)
+	}
+}
+
+// ---- cancellation and timeouts
+
+func TestCancelSendsSIGINTThenStopsTheJob(t *testing.T) {
+	needTools(t, "bash")
+	c := NewCanceller()
+	started := make(chan struct{})
+	go func() {
+		<-started
+		time.Sleep(300 * time.Millisecond)
+		c.Cancel(CancelUser)
+	}()
+	rec := newRecorder()
+	rep := &signalReporter{recorder: rec, started: started, match: "ready"}
+	home := t.TempDir()
+	layout := NewLayout(home, "hello", home+"/tc")
+	res := Run(c, Config{
+		WorkflowYAML: []byte(wfHead + `    steps:
+      - run: |
+          trap 'echo got-int; exit 130' INT
+          echo ready
+          while :; do sleep 0.05; done
+      - name: after
+        run: echo NO
+      - name: cleanup
+        if: always()
+        run: echo cleanup-ran
+`), JobKey: "j", ContextsJSON: testGitHubContext("j"), Layout: &layout, Reporter: rep,
+		BaseEnv:   []string{"PATH=" + envPath(), "HOME=" + home},
+		TermAfter: 300 * time.Millisecond, KillAfter: 300 * time.Millisecond,
+	})
+	if res.Conclusion != ConclusionCancelled || res.RunnerShutdown {
+		t.Fatalf("%+v", res)
+	}
+	run := rec.steps[1]
+	if run.Conclusion != ConclusionCancelled || !strings.Contains(logOf(run), "got-int") || !strings.Contains(logOf(run), "##[error]The operation was canceled.") {
+		t.Fatalf("%s %s", run.Conclusion, logOf(run))
+	}
+	if rec.step(t, "after").Conclusion != ConclusionSkipped {
+		t.Error("after must be skipped")
+	}
+	if got := rec.step(t, "cleanup"); got.Conclusion != ConclusionSuccess || !strings.HasSuffix(logOf(got), "cleanup-ran") {
+		t.Errorf("always() step must run after a cancel: %+v", got)
+	}
+}
+
+// signalReporter closes started when a log line equals match.
+type signalReporter struct {
+	*recorder
+	started chan struct{}
+	match   string
+	once    bool
+}
+
+func (r *signalReporter) Log(n int, at time.Time, line string) {
+	r.recorder.Log(n, at, line)
+	if !r.once && line == r.match {
+		r.once = true
+		close(r.started)
+	}
+}
+
+func TestCancelEscalatesToTermAndKill(t *testing.T) {
+	needTools(t, "bash")
+	c := NewCanceller()
+	var mu = make(chan struct{}, 8)
+	var got []syscall.Signal
+	started := make(chan struct{})
+	rec := newRecorder()
+	rep := &signalReporter{recorder: rec, started: started, match: "ready"}
+	go func() { <-started; c.Cancel(CancelUser) }()
+	home := t.TempDir()
+	layout := NewLayout(home, "hello", home+"/tc")
+	t0 := time.Now()
+	var times []time.Duration
+	res := Run(c, Config{
+		WorkflowYAML: []byte(wfHead + "    steps:\n      - run: |\n          trap '' INT TERM\n          echo ready\n          while :; do sleep 0.05; done\n"),
+		JobKey:       "j", ContextsJSON: testGitHubContext("j"), Layout: &layout, Reporter: rep,
+		BaseEnv:   []string{"PATH=" + envPath(), "HOME=" + home},
+		TermAfter: 250 * time.Millisecond, KillAfter: 250 * time.Millisecond,
+		Signal: func(pgid int, sig syscall.Signal) {
+			got = append(got, sig)
+			times = append(times, time.Since(t0))
+			_ = syscall.Kill(-pgid, sig)
+			mu <- struct{}{}
+		},
+	})
+	if res.Conclusion != ConclusionCancelled {
+		t.Fatalf("%+v", res)
+	}
+	if len(got) != 3 || got[0] != syscall.SIGINT || got[1] != syscall.SIGTERM || got[2] != syscall.SIGKILL {
+		t.Fatalf("signals %v", got)
+	}
+	if d := times[2] - times[0]; d < 450*time.Millisecond || d > 2*time.Second {
+		t.Errorf("kill came %v after the interrupt, want about 500ms", d)
+	}
+}
+
+func TestShutdownCancelSkipsRemainingSteps(t *testing.T) {
+	needTools(t, "bash")
+	c := NewCanceller()
+	started := make(chan struct{})
+	rec := newRecorder()
+	rep := &signalReporter{recorder: rec, started: started, match: "ready"}
+	go func() { <-started; c.Cancel(CancelShutdown) }()
+	home := t.TempDir()
+	layout := NewLayout(home, "hello", home+"/tc")
+	res := Run(c, Config{
+		WorkflowYAML: []byte(wfHead + "    steps:\n      - run: |\n          echo ready\n          sleep 30\n      - if: always()\n        run: echo NO\n"),
+		JobKey:       "j", ContextsJSON: testGitHubContext("j"), Layout: &layout, Reporter: rep,
+		BaseEnv: []string{"PATH=" + envPath(), "HOME=" + home}, TermAfter: 200 * time.Millisecond, KillAfter: 200 * time.Millisecond,
+	})
+	if res.Conclusion != ConclusionCancelled || !res.RunnerShutdown {
+		t.Fatalf("%+v", res)
+	}
+	// On runner shutdown conditions are not evaluated (StepsRunner.cs:205-208):
+	// even always() steps are skipped.
+	if got := rec.steps[2]; got.Conclusion != ConclusionSkipped {
+		t.Errorf("%+v", got)
+	}
+}
+
+func TestJobTimeout(t *testing.T) {
+	needTools(t, "bash")
+	home := t.TempDir()
+	layout := NewLayout(home, "hello", home+"/tc")
+	rec := newRecorder()
+	cfg := Config{
+		WorkflowYAML: []byte(wfHead + "    steps:\n      - run: sleep 30\n"),
+		JobKey:       "j", ContextsJSON: testGitHubContext("j"), Layout: &layout, Reporter: rec,
+		BaseEnv: []string{"PATH=" + envPath(), "HOME=" + home}, TermAfter: 100 * time.Millisecond, KillAfter: 100 * time.Millisecond,
+	}
+	c := NewCanceller()
+	// A one-minute job timeout cannot be waited for: fire it as the timer does.
+	time.AfterFunc(300*time.Millisecond, func() { c.Cancel(CancelTimeout) })
+	res := Run(c, cfg)
+	if res.Conclusion != ConclusionTimedOut || !strings.Contains(res.Error, "maximum execution time of 360 minutes") {
+		t.Fatalf("%+v", res)
+	}
+	if rec.steps[1].Conclusion != ConclusionCancelled {
+		t.Errorf("%+v", rec.steps[1])
+	}
+}
+
+func TestStartErrorsAndOrphans(t *testing.T) {
+	needTools(t, "bash")
+	rec, res := runLocal(t, wfHead+`    steps:
+      - run: (sleep 60 &) ; echo started-background
+`, "j", nil)
+	if res.Conclusion != ConclusionSuccess {
+		t.Fatalf("%+v", res)
+	}
+	last := logOf(rec.steps[len(rec.steps)-1])
+	if !strings.Contains(last, "Cleaning up orphan processes") || !strings.Contains(last, "Terminate orphan process: pid (") || !strings.Contains(last, ") (sleep)") {
+		t.Errorf("orphan cleanup: %q", last)
+	}
+}
+
+func TestLineWriter(t *testing.T) {
+	var got []string
+	w := &lineWriter{fn: func(l string) { got = append(got, l) }}
+	for _, chunk := range []string{"a\nb\r", "\nc\rd", "\ne\xff", "f\n", "tail"} {
+		_, _ = w.Write([]byte(chunk))
+	}
+	w.Flush()
+	want := []string{"a", "b", "c", "d", "e\ufffdf", "tail"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("%q", got)
+	}
+}
+
+func TestParseCommands(t *testing.T) {
+	reg := func(s string) bool { return s == "set-output" || s == "group" || s == "warning" }
+	c, ok := parseCommandV2("::set-output name=a%2Cb,x=y::v%0Aw%25", reg)
+	if !ok || c.Name != "set-output" || c.prop("name") != "a,b" || c.Data != "v\nw%" {
+		t.Fatalf("%+v %v", c, ok)
+	}
+	if c, ok = parseCommandV2("  ::group::title", reg); !ok || c.Data != "title" {
+		t.Fatalf("leading space: %+v", c)
+	}
+	if _, ok = parseCommandV2("::unknown::x", reg); ok {
+		t.Fatal("unregistered command")
+	}
+	if _, ok = parseCommandV2("x ::group::t", reg); ok {
+		t.Fatal("V2 must start the line")
+	}
+	c, ok = parseCommandV1("text ##[set-output name=n;k=v%3Bz]data%5D", reg)
+	if !ok || c.prop("name") != "n" || c.prop("k") != "v;z" || c.Data != "data]" {
+		t.Fatalf("v1: %+v %v", c, ok)
+	}
+}
+
+func TestStopCommands(t *testing.T) {
+	needTools(t, "bash")
+	rec, _ := runLocal(t, wfHead+`    steps:
+      - run: |
+          echo "::stop-commands::tok12345"
+          echo "::warning::not-processed"
+          echo "::tok12345::"
+          echo "::warning::processed"
+`, "j", nil)
+	got := logOf(rec.steps[1])
+	if !strings.Contains(got, "::warning::not-processed") || !strings.Contains(got, "##[warning]processed") || !strings.Contains(got, "::stop-commands::tok12345") {
+		t.Errorf("%s", got)
+	}
+}

@@ -3,7 +3,6 @@
 package executor
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -71,7 +70,7 @@ func ParseShellOption(shell string) (command, args string) {
 
 // ErrInvalidShell is the error of a shell whose argument format has no {0}
 // (ScriptHandler.cs:245).
-var ErrInvalidShell = errors.New("Invalid shell option. Shell must be a valid built-in (bash, sh, cmd, powershell, pwsh) or a format string containing '{0}'")
+var ErrInvalidShell error = msgError("Invalid shell option. Shell must be a valid built-in (bash, sh, cmd, powershell, pwsh) or a format string containing '{0}'")
 
 // Lookup finds executables like WhichUtil.Which (Runner.Sdk/Util/WhichUtil.cs):
 // in PATH with the directories added by GITHUB_PATH in front.
@@ -203,18 +202,18 @@ func FormatArguments(format, scriptPath string) (string, error) {
 		case c == '{':
 			end := strings.IndexByte(format[i:], '}')
 			if end < 0 {
-				return "", errors.New("Input string was not in a correct format.")
+				return "", ghErrorf("Input string was not in a correct format.")
 			}
 			spec := format[i+1 : i+end]
 			index, _, _ := strings.Cut(spec, ",")
 			index, _, _ = strings.Cut(index, ":")
 			if strings.TrimSpace(index) != "0" {
-				return "", errors.New("Index (zero based) must be greater than or equal to zero and less than the size of the argument list.")
+				return "", ghErrorf("Index (zero based) must be greater than or equal to zero and less than the size of the argument list.")
 			}
 			b.WriteString(path)
 			i += end
 		case c == '}':
-			return "", errors.New("Input string was not in a correct format.")
+			return "", ghErrorf("Input string was not in a correct format.")
 		default:
 			b.WriteByte(c)
 		}

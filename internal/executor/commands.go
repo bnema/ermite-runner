@@ -219,7 +219,7 @@ func (m *commandManager) fail(input string, omitEcho bool, err error) {
 func (m *commandManager) validateStopToken(token string) error {
 	invalid := m.isRegistered(token) || token == "" || strings.EqualFold(token, "pause-logging")
 	if invalid && !m.host.EnvFlag("ACTIONS_ALLOW_UNSECURE_STOPCOMMAND_TOKENS") {
-		return fmt.Errorf("%s", unsupportedStopTokenDisabled)
+		return msgError(unsupportedStopTokenDisabled)
 	}
 	return nil
 }
@@ -239,7 +239,7 @@ func (m *commandManager) run(name string, c *actionCommand) error {
 		h.Tagged("##["+name+"]", c.Data)
 	case "echo":
 		if c.Data == "" {
-			return fmt.Errorf("Value cannot be null or empty. (Parameter 'value')")
+			return ghErrorf("Value cannot be null or empty. (Parameter 'value')")
 		}
 		switch strings.ToUpper(strings.TrimSpace(c.Data)) {
 		case "ON":
@@ -249,13 +249,13 @@ func (m *commandManager) run(name string, c *actionCommand) error {
 			m.echo = false
 			h.Debug("Setting echo command value to 'off'")
 		default:
-			return fmt.Errorf("Invalid echo command value. Possible values can be: 'on', 'off'. Current value is: '%s'.", c.Data)
+			return ghErrorf("Invalid echo command value. Possible values can be: 'on', 'off'. Current value is: '%s'.", c.Data)
 		}
 	case "set-output":
 		h.Tagged("##[warning]", fmt.Sprintf(unsupportedCommandMessage, name))
 		n := c.prop("name")
 		if n == "" {
-			return fmt.Errorf("Required field 'name' is missing in ##[set-output] command.")
+			return ghErrorf("Required field 'name' is missing in ##[set-output] command.")
 		}
 		h.SetOutput(n, c.Data)
 		h.Debug(fmt.Sprintf("steps.<id>.outputs.%s='%s'", n, c.Data))
@@ -263,17 +263,17 @@ func (m *commandManager) run(name string, c *actionCommand) error {
 		h.Tagged("##[warning]", fmt.Sprintf(unsupportedCommandMessage, name))
 		n := c.prop("name")
 		if n == "" {
-			return fmt.Errorf("Required field 'name' is missing in ##[save-state] command.")
+			return ghErrorf("Required field 'name' is missing in ##[save-state] command.")
 		}
 		h.SaveState(n, c.Data)
 		h.Debug(fmt.Sprintf("Save intra-action state %s = %s", n, c.Data))
 	case "set-env":
 		if !h.EnvFlag("ACTIONS_ALLOW_UNSECURE_COMMANDS") {
-			return fmt.Errorf(unsupportedCommandMessageDisabled, name)
+			return ghErrorf(unsupportedCommandMessageDisabled, name)
 		}
 		n := c.prop("name")
 		if n == "" {
-			return fmt.Errorf("Required field 'name' is missing in ##[set-env] command.")
+			return ghErrorf("Required field 'name' is missing in ##[set-env] command.")
 		}
 		if b := blockedEnvName(n); b != "" {
 			h.Tagged("##[error]", fmt.Sprintf("Can't update %s environment variable using ::set-env:: command.", b))
@@ -283,10 +283,10 @@ func (m *commandManager) run(name string, c *actionCommand) error {
 		h.Debug(fmt.Sprintf("%s='%s'", n, c.Data))
 	case "add-path":
 		if !h.EnvFlag("ACTIONS_ALLOW_UNSECURE_COMMANDS") {
-			return fmt.Errorf(unsupportedCommandMessageDisabled, name)
+			return ghErrorf(unsupportedCommandMessageDisabled, name)
 		}
 		if c.Data == "" {
-			return fmt.Errorf("Value cannot be null or empty. (Parameter 'path')")
+			return ghErrorf("Value cannot be null or empty. (Parameter 'path')")
 		}
 		h.AddPath(c.Data)
 	case "add-mask", "add-matcher", "remove-matcher":
