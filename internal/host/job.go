@@ -13,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	"connectrpc.com/connect"
+	"github.com/bnema/zerowrap"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
@@ -41,7 +42,7 @@ type jobRun struct {
 	job    *ermite.Job
 	client jobClient
 	t      Timing
-	logf   func(string, ...any)
+	log    zerowrap.Logger // with job_id, run_id and attempt
 
 	// ctx lives until the job is finished or abandoned. Shutdown does not end
 	// it: a shutdown is a cancellation that the job reports.
@@ -132,7 +133,7 @@ func (j *jobRun) ack(ctx context.Context) bool {
 			j.abandon(err)
 			return false
 		}
-		j.logf("first heartbeat failed, retrying: %v", err)
+		j.log.Warn().Err(err).Msg("first heartbeat failed, retrying")
 		if !sleep(ctx, j.t.HeartbeatRetry) {
 			return false
 		}
@@ -163,7 +164,7 @@ func (j *jobRun) heartbeats(ctx context.Context) {
 				j.abandon(err)
 				return
 			}
-			j.logf("heartbeat failed, retrying in %s: %v", j.t.HeartbeatRetry, err)
+			j.log.Warn().Err(err).Dur("retry_in", j.t.HeartbeatRetry).Msg("heartbeat failed")
 			wait = j.t.HeartbeatRetry
 			continue
 		}
@@ -200,7 +201,7 @@ func (j *jobRun) watch(ctx context.Context) {
 				j.abandon(err)
 				return
 			}
-			j.logf("WatchJob: %v", err)
+			j.log.Warn().Err(err).Msg("WatchJob failed, reopening")
 		}
 		if !sleep(ctx, j.t.WatchRetry) {
 			return
@@ -246,7 +247,7 @@ func (j *jobRun) violate(format string, a ...any) {
 	j.violation = fmt.Sprintf(format, a...)
 	msg := j.violation
 	j.mu.Unlock()
-	j.logf("the executor broke the protocol: %s", msg)
+	j.log.Error().Str("violation", msg).Msg("the executor broke the protocol")
 	j.sandboxError("The runner stopped the job: the executor broke the protocol: " + msg)
 	if j.hard != nil {
 		j.hard()
@@ -423,7 +424,7 @@ func (j *jobRun) run(rt *Runner, shutdown <-chan struct{}) {
 
 	// 1. The acknowledgement comes first, before anything else.
 	if !j.ack(ctx) {
-		j.logf("job %s: assignment lost before it started", j.job.JobId)
+		j.log.Warn().Msg("the assignment was lost before the job started")
 		return
 	}
 	var bg sync.WaitGroup
@@ -433,7 +434,7 @@ func (j *jobRun) run(rt *Runner, shutdown <-chan struct{}) {
 	// The context is cancelled first, so that the heartbeat and watch loops end.
 	defer func() { j.cancel(nil); bg.Wait() }()
 
-	j.outbox = newOutbox(j.client, j.job.JobId, j.t, func(err error) { j.abandon(err) }, j.logf)
+	j.outbox = newOutbox(j.client, j.job.JobId, j.t, func(err error) { j.abandon(err) }, j.log)
 	j.outbox.start(ctx)
 
 	// Two reasons to stop the job from the host, each a cancellation followed
@@ -467,7 +468,7 @@ func (j *jobRun) run(rt *Runner, shutdown <-chan struct{}) {
 		case <-ctx.Done():
 			return
 		}
-		j.logf("the job timeout of %d minutes has passed", j.timeoutMinutes())
+		j.log.Warn().Int("timeout_minutes", j.timeoutMinutes()).Msg("the job timeout has passed")
 		j.requestCancel("the job timeout has passed", execpb.CancelKind_CANCEL_KIND_TIMEOUT)
 		select {
 		case <-time.After(j.t.TimeoutGrace):
@@ -480,7 +481,7 @@ func (j *jobRun) run(rt *Runner, shutdown <-chan struct{}) {
 
 	// 2. Nothing more is sent to a job that is over.
 	if err := j.abandoned(); err != nil {
-		j.logf("job %s: not reporting a result: %v", j.job.JobId, err)
+		j.log.Warn().Err(err).Msg("the server ended the job: no result is reported")
 		return
 	}
 	// The report is made even when the runner is shutting down: it uses its own
@@ -517,7 +518,7 @@ func (j *jobRun) execute(ctx context.Context, rt *Runner, stopHard <-chan struct
 		sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
 		defer cancel()
 		if err := sb.Stop(sctx); err != nil {
-			j.logf("job %s: stopping the sandbox: %v", j.job.JobId, err)
+			j.log.Error().Err(err).Msg("stopping the sandbox")
 			if errors.Is(err, sandbox.ErrLeaked) {
 				rt.markLeaked()
 			}
@@ -580,7 +581,7 @@ func (j *jobRun) execute(ctx context.Context, rt *Runner, stopHard <-chan struct
 			c = ermite.CiConclusion_CI_CONCLUSION_FAILURE
 		}
 		if res.Error != "" {
-			j.logf("job %s: %s", j.job.JobId, res.Error)
+			j.log.Info().Str("error", res.Error).Msg("the job reported an error")
 		}
 		return c, res.Outputs, res.RunnerShutdown && c == ermite.CiConclusion_CI_CONCLUSION_CANCELLED
 	case j.cancelRequested() || ctx.Err() != nil:
@@ -653,6 +654,30 @@ func (j *jobRun) complete(ctx context.Context, conclusion ermite.CiConclusion, o
 		RunnerShutdown: shutdown && conclusion == ermite.CiConclusion_CI_CONCLUSION_CANCELLED,
 		Steps:          j.finalSteps(conclusion),
 	}
+	err := j.sendComplete(ctx, req, conclusion)
+	if err == nil || ctx.Err() != nil || classify(err) != kindPermanent {
+		return
+	}
+	// The server refused the result itself (invalid_argument, or
+	// failed_precondition that is not the end of the job). CompleteJob is
+	// "applied whole or not at all", so the job is still open: say why in the
+	// log, then report a plain failure without outputs and with steps that are
+	// valid by construction. Without this the job would stay running until the
+	// heartbeat deadline of the server and then be reported as a lost runner.
+	j.errorLog(ctx, fmt.Sprintf("The runner could not report the result of the job: %s. The job is reported as failed.", connect.CodeOf(err)))
+	j.log.Error().Err(err).Msg("CompleteJob refused: retrying as a failure without outputs")
+	req = &ermite.CompleteJobRequest{
+		JobId: j.job.JobId, Conclusion: ermite.CiConclusion_CI_CONCLUSION_FAILURE,
+		Steps: j.rebuiltSteps(),
+	}
+	if err := j.sendComplete(ctx, req, req.Conclusion); err != nil && ctx.Err() == nil {
+		j.log.Error().Err(err).Msg("CompleteJob refused again, giving up")
+	}
+}
+
+// sendComplete sends the request until the server answers: success, the end of
+// the job, a lost assignment, or a refusal (returned).
+func (j *jobRun) sendComplete(ctx context.Context, req *ermite.CompleteJobRequest, conclusion ermite.CiConclusion) error {
 	b := backoff{min: j.t.BackoffMin, max: j.t.BackoffMax}
 	for {
 		cctx, cancel := context.WithTimeout(ctx, j.t.CallTimeout)
@@ -660,26 +685,74 @@ func (j *jobRun) complete(ctx context.Context, conclusion ermite.CiConclusion, o
 		cancel()
 		if err == nil {
 			if resp.Msg.Conclusion != conclusion {
-				j.logf("job %s: ended as %s, the server holds %s", j.job.JobId, conclusion, resp.Msg.Conclusion)
+				j.log.Warn().Str("reported", conclusion.String()).Str("stored", resp.Msg.Conclusion.String()).Msg("the server holds another conclusion")
 			}
-			return
+			return nil
 		}
 		if ctx.Err() != nil {
-			j.logf("job %s: could not report the result: %v", j.job.JobId, ctx.Err())
-			return
+			j.log.Error().Err(ctx.Err()).Msg("could not report the result")
+			return err
 		}
 		switch classify(err) {
 		case kindEnded, kindAbandoned:
-			return
+			return nil
 		case kindPermanent:
-			j.logf("job %s: CompleteJob refused: %v", j.job.JobId, err)
-			return
+			return err
 		}
-		j.logf("CompleteJob failed, retrying: %v", err)
+		j.log.Warn().Err(err).Msg("CompleteJob failed, retrying")
 		if !sleep(ctx, b.next()) {
-			return
+			return err
 		}
 	}
+}
+
+// errorLog appends a line to the log after the outbox is closed.
+func (j *jobRun) errorLog(ctx context.Context, msg string) {
+	j.mu.Lock()
+	var last int32 = 1
+	for n := range j.steps {
+		last = max(last, n)
+	}
+	j.mu.Unlock()
+	j.outbox.AppendNow(ctx, logLine{step: last, unixNano: time.Now().UnixNano(), text: "##[error]" + msg})
+}
+
+// rebuiltSteps returns every known step as a valid, completed snapshot: number
+// in 1..maxSteps, a name of at most 1,024 bytes, a conclusion the server
+// accepts (success, failure, cancelled, skipped), both times set, and no step
+// that finished before it began. A step that was running is failed.
+func (j *jobRun) rebuiltSteps() []*ermite.StepUpdate {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	now := timestamppb.Now()
+	var out []*ermite.StepUpdate
+	for n, u := range j.steps {
+		if n < 1 || n > maxSteps {
+			continue
+		}
+		c := proto.Clone(u).(*ermite.StepUpdate)
+		c.Name = cutName(c.Name)
+		if c.StartedAt == nil {
+			c.StartedAt = now
+		}
+		if c.State != ermite.StepState_STEP_STATE_COMPLETED {
+			c.Conclusion = ermite.CiConclusion_CI_CONCLUSION_FAILURE
+			c.CompletedAt = now
+		}
+		switch c.Conclusion {
+		case ermite.CiConclusion_CI_CONCLUSION_SUCCESS, ermite.CiConclusion_CI_CONCLUSION_FAILURE,
+			ermite.CiConclusion_CI_CONCLUSION_CANCELLED, ermite.CiConclusion_CI_CONCLUSION_SKIPPED:
+		default:
+			c.Conclusion = ermite.CiConclusion_CI_CONCLUSION_FAILURE
+		}
+		c.State = ermite.StepState_STEP_STATE_COMPLETED
+		if c.CompletedAt == nil || c.CompletedAt.AsTime().Before(c.StartedAt.AsTime()) {
+			c.CompletedAt = c.StartedAt
+		}
+		out = append(out, c)
+	}
+	sort.Slice(out, func(a, b int) bool { return out[a].Number < out[b].Number })
+	return out
 }
 
 // Limits of CompleteJobRequest.outputs.

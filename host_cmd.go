@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"strings"
 
 	"github.com/bnema/zerowrap"
 
@@ -120,8 +119,6 @@ func runCmd(ctx context.Context) int {
 		Job: func(tok string) ermiteconnect.RunnerServiceClient {
 			return host.NewClient(url, tok, http.DefaultTransport)
 		},
-		Logf:    func(format string, args ...any) { log.Info().Msg(strings.TrimSpace(fmt.Sprintf(format, args...))) },
-		JobSpec: nil,
 	}
 	r.Cfg.URL = url
 	if err := r.Run(ctx); err != nil {

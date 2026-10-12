@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"github.com/bnema/zerowrap"
 
 	ermite "bnema.dev/ermite-api/gen/ermite"
 	"bnema.dev/ermite-api/gen/ermite/ermiteconnect"
@@ -301,7 +302,8 @@ type fakeDriver struct {
 	stopErr    error
 	capacity   int
 	live       int
-	blockStart chan struct{} // when set, Start waits on it
+	blockStart chan struct{}     // when set, Start waits on it
+	specs      []sandbox.JobSpec // what each Start was asked for
 	iso        sandbox.Isolation
 }
 
@@ -333,8 +335,11 @@ type fakeSandbox struct {
 }
 
 func (s *fakeSandbox) ID() string { return "er00000000" }
-func (s *fakeSandbox) Start(ctx context.Context, _ sandbox.JobSpec) (sandbox.Conn, error) {
+func (s *fakeSandbox) Start(ctx context.Context, spec sandbox.JobSpec) (sandbox.Conn, error) {
 	d := s.d
+	d.mu.Lock()
+	d.specs = append(d.specs, spec)
+	d.mu.Unlock()
 	if d.blockStart != nil {
 		select {
 		case <-d.blockStart:
@@ -467,17 +472,26 @@ type harness struct {
 	logs   *logBuf
 }
 
+// logBuf collects what the runner logs (zerowrap, console format without
+// colors), so that tests can look at it.
 type logBuf struct {
 	mu sync.Mutex
 	b  strings.Builder
 }
 
-func (l *logBuf) logf(f string, a ...any) {
+func (l *logBuf) Write(p []byte) (int, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.b.WriteString(strings.TrimSpace(sprintf(f, a...)) + "\n")
+	return l.b.Write(p)
 }
+
 func (l *logBuf) String() string { l.mu.Lock(); defer l.mu.Unlock(); return l.b.String() }
+
+// ctx returns a context with a logger that writes to the buffer (JSON, one
+// event per line, debug level).
+func (l *logBuf) ctx() context.Context {
+	return zerowrap.WithCtx(context.Background(), zerowrap.New(zerowrap.Config{Level: "debug", Format: "json", Output: l}))
+}
 
 func newHarness(t *testing.T, sc script) *harness {
 	t.Helper()
@@ -498,7 +512,7 @@ func newHarness(t *testing.T, sc script) *harness {
 		Driver: drv,
 		Poll:   NewClient(url, "ermiterun_tok", http.DefaultTransport),
 		Job:    func(tok string) ermiteconnect.RunnerServiceClient { return NewClient(url, tok, http.DefaultTransport) },
-		Timing: fastTiming(), Logf: lb.logf,
+		Timing: fastTiming(),
 	}
 	return h
 }
@@ -506,7 +520,7 @@ func newHarness(t *testing.T, sc script) *harness {
 // run starts the loop; stop cancels it and waits for Run to return.
 func (h *harness) run(t *testing.T) (stop func() error) {
 	t.Helper()
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(h.logs.ctx())
 	done := make(chan error, 1)
 	go func() { done <- h.runner.Run(ctx) }()
 	var once sync.Once

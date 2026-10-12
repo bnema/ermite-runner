@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bnema/zerowrap"
+
 	ermite "bnema.dev/ermite-api/gen/ermite"
 	"bnema.dev/ermite-api/gen/ermite/ermiteconnect"
 
@@ -164,9 +166,8 @@ func TestChainCorpus(t *testing.T) {
 			return host.NewClient(srv.URL, tok, http.DefaultTransport)
 		},
 		Timing: host.Timing{LogFlush: 20 * time.Millisecond, NoJobPause: 100 * time.Millisecond},
-		Logf:   func(f string, a ...any) { t.Logf(f, a...) },
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(zerowrap.WithCtx(context.Background(), zerowrap.New(zerowrap.Config{Level: "info", Format: "console", Output: testWriter{t}})))
 	done := make(chan error, 1)
 	go func() { done <- r.Run(ctx) }()
 	defer func() {
@@ -317,4 +318,11 @@ func checkProducerOutputs(t *testing.T, got hosttest.Result) {
 			t.Errorf("output %q = %q, want %q", k, got.Complete.Outputs[k], v)
 		}
 	}
+}
+
+type testWriter struct{ t *testing.T }
+
+func (w testWriter) Write(p []byte) (int, error) {
+	w.t.Log(strings.TrimRight(string(p), "\n"))
+	return len(p), nil
 }

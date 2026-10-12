@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"github.com/bnema/zerowrap"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	ermite "bnema.dev/ermite-api/gen/ermite"
@@ -50,7 +51,7 @@ type outbox struct {
 	// onEnded is called once when the server says the job is over (JobEnded)
 	// or the assignment is gone; the outbox then drops everything.
 	onEnded func(error)
-	logf    func(format string, args ...any)
+	log     zerowrap.Logger
 
 	mu      sync.Mutex
 	cond    *sync.Cond
@@ -69,8 +70,8 @@ type callClient interface {
 	AppendLog(context.Context, *connect.Request[ermite.AppendLogRequest]) (*connect.Response[ermite.AppendLogResponse], error)
 }
 
-func newOutbox(c callClient, jobID string, t Timing, onEnded func(error), logf func(string, ...any)) *outbox {
-	o := &outbox{client: c, jobID: jobID, t: t, onEnded: onEnded, logf: logf, done: make(chan struct{})}
+func newOutbox(c callClient, jobID string, t Timing, onEnded func(error), log zerowrap.Logger) *outbox {
+	o := &outbox{client: c, jobID: jobID, t: t, onEnded: onEnded, log: log, done: make(chan struct{})}
 	o.cond = sync.NewCond(&o.mu)
 	return o
 }
@@ -239,7 +240,7 @@ func (o *outbox) retry(ctx context.Context, what string, call func(context.Conte
 		case kindPermanent:
 			return err
 		}
-		o.logf("%s failed, retrying: %v", what, err)
+		o.log.Warn().Err(err).Str("call", what).Msg("call failed, retrying")
 		if !sleep(ctx, b.next()) {
 			return ctx.Err()
 		}
@@ -252,7 +253,7 @@ func (o *outbox) sendStep(ctx context.Context, s *ermite.StepUpdate) {
 		return err
 	})
 	if err != nil && ctx.Err() == nil && classify(err) == kindPermanent {
-		o.logf("UpdateJob refused step %d: %v", s.Number, err)
+		o.log.Error().Err(err).Int32("step", s.Number).Msg("UpdateJob refused")
 	}
 }
 
@@ -282,13 +283,20 @@ func (o *outbox) sendLines(ctx context.Context, batch []event) {
 		// so that the next offset is never a gap (out_of_range) and never a
 		// repeat of lines that would be skipped.
 		if want := req.Offset + int64(len(req.Lines)); next != want {
-			o.logf("AppendLog: the server holds %d lines, expected %d: continuing from %d", next, want, next)
+			o.log.Warn().Int64("server_lines", next).Int64("expected", want).Msg("AppendLog: the server holds another number of lines, continuing from its count")
 		}
 		o.offset = next
 		o.mu.Unlock()
 	case ctx.Err() == nil && classify(err) == kindPermanent:
 		// The server refused these lines; they are dropped and the offset stays
 		// where the server is.
-		o.logf("AppendLog refused %d lines of step %d: %v", len(req.Lines), req.Step, err)
+		o.log.Error().Err(err).Int("lines", len(req.Lines)).Int32("step", req.Step).Msg("AppendLog refused, the lines are dropped")
 	}
+}
+
+// AppendNow sends one line synchronously, after Close: the sender has stopped,
+// so nothing else uses the offset. It is for the last words of a job (an error
+// that explains why the result could not be reported).
+func (o *outbox) AppendNow(ctx context.Context, l logLine) {
+	o.sendLines(ctx, []event{{line: &l}})
 }

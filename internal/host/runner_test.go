@@ -4,6 +4,7 @@ package host
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -130,7 +131,7 @@ func TestPollRespectsRetryAfter(t *testing.T) {
 func TestPollRemovedRunnerStops(t *testing.T) {
 	h := newHarness(t, simpleScript("x"))
 	h.runner.Poll = NewClient(h.url, "ermiterun_wrong", http.DefaultTransport)
-	err := h.runner.Run(context.Background())
+	err := h.runner.Run(h.logs.ctx())
 	if !errors.Is(err, ErrRemoved) {
 		t.Fatalf("%v", err)
 	}
@@ -1040,7 +1041,135 @@ func TestAppendLogResyncsToTheServersCount(t *testing.T) {
 	if len(h.srv.lines) < 3 || h.srv.lines[0] != "planted" || h.srv.lines[len(h.srv.lines)-1] != "l3" {
 		t.Fatalf("%q", h.srv.lines)
 	}
-	if !strings.Contains(h.logs.String(), "continuing from") {
+	if !strings.Contains(h.logs.String(), "continuing from its count") {
 		t.Fatalf("no warning about the resync:\n%s", h.logs.String())
+	}
+}
+
+// ---- M4: the server refuses the result itself
+
+func TestCompleteJobRefusedIsRetriedAsAFailureWithoutOutputs(t *testing.T) {
+	h := newHarness(t, simpleScript("hello"))
+	h.srv.jobs = []*ermite.Job{testJob("j1")}
+	h.srv.completeHook = func(n int) (bool, error) {
+		if n == 1 { // e.g. an output the server's rules refuse
+			return false, connect.NewError(connect.CodeInvalidArgument, io.EOF)
+		}
+		return false, nil
+	}
+	h.run(t)
+	eventually(t, "two CompleteJob calls", func() bool { return h.srv.completeCount() == 2 })
+	time.Sleep(100 * time.Millisecond)
+	h.srv.mu.Lock()
+	defer h.srv.mu.Unlock()
+	if len(h.srv.completes) != 2 {
+		t.Fatalf("%d calls", len(h.srv.completes))
+	}
+	first, second := h.srv.completes[0], h.srv.completes[1]
+	if first.Conclusion != ermite.CiConclusion_CI_CONCLUSION_SUCCESS || first.Outputs["out"] != "v" {
+		t.Fatalf("first: %v %v", first.Conclusion, first.Outputs)
+	}
+	if second.Conclusion != ermite.CiConclusion_CI_CONCLUSION_FAILURE || len(second.Outputs) != 0 || second.RunnerShutdown {
+		t.Fatalf("second: %v %v", second.Conclusion, second.Outputs)
+	}
+	if len(second.Steps) != 3 {
+		t.Fatalf("steps %v", second.Steps)
+	}
+	for _, u := range second.Steps {
+		if u.State != ermite.StepState_STEP_STATE_COMPLETED || u.StartedAt == nil || u.CompletedAt == nil || u.CompletedAt.AsTime().Before(u.StartedAt.AsTime()) {
+			t.Errorf("invalid step %v", u)
+		}
+	}
+	last := h.srv.lines[len(h.srv.lines)-1]
+	if !strings.HasPrefix(last, "##[error]The runner could not report the result of the job: invalid_argument") {
+		t.Fatalf("last line %q", last)
+	}
+}
+
+func TestCompleteJobRefusedTwiceGivesUp(t *testing.T) {
+	h := newHarness(t, simpleScript("x"))
+	h.srv.jobs = []*ermite.Job{testJob("j1")}
+	h.srv.completeHook = func(int) (bool, error) {
+		return false, connect.NewError(connect.CodeFailedPrecondition, io.EOF) // not a JobEnded detail
+	}
+	h.run(t)
+	eventually(t, "two calls", func() bool { return h.srv.completeCount() == 2 })
+	time.Sleep(200 * time.Millisecond)
+	if n := h.srv.completeCount(); n != 2 {
+		t.Fatalf("%d calls: one retry only", n)
+	}
+	if !strings.Contains(h.logs.String(), `"level":"error"`) || !strings.Contains(h.logs.String(), "refused again") {
+		t.Fatalf("no error log:\n%s", h.logs.String())
+	}
+}
+
+// ---- G1: structured logs with the job's fields, warn for retries, error for refusals
+
+func TestLogsCarryTheJobFieldsAndLevels(t *testing.T) {
+	h := newHarness(t, simpleScript("x"))
+	h.srv.jobs = []*ermite.Job{testJob("j1")}
+	h.srv.appendHook = func(n int, _ *ermite.AppendLogRequest) (bool, error) {
+		if n == 1 {
+			return false, connect.NewError(connect.CodeUnavailable, io.EOF)
+		}
+		return false, nil
+	}
+	h.srv.beatHook = func(n int) error { return nil }
+	h.run(t)
+	eventually(t, "CompleteJob", func() bool { return h.srv.completeCount() == 1 })
+	var retry, assigned map[string]any
+	for _, l := range strings.Split(h.logs.String(), "\n") {
+		if l == "" {
+			continue
+		}
+		var m map[string]any
+		if err := json.Unmarshal([]byte(l), &m); err != nil {
+			t.Fatalf("not JSON: %q", l)
+		}
+		switch m["message"] {
+		case "call failed, retrying":
+			retry = m
+		case "job assigned":
+			assigned = m
+		}
+	}
+	for name, m := range map[string]map[string]any{"retry": retry, "assigned": assigned} {
+		if m == nil {
+			t.Fatalf("no %s event in\n%s", name, h.logs.String())
+		}
+		if m["job_id"] != "j1" || m["run_id"] != float64(7) || m["attempt"] != float64(1) {
+			t.Errorf("%s event lacks the job fields: %v", name, m)
+		}
+	}
+	if retry["level"] != "warn" || retry["call"] != "AppendLog" {
+		t.Errorf("a retry is a warning: %v", retry)
+	}
+}
+
+// The sizes of a sandbox come from ERMITE_RUNNER_JOB_CPUS, _JOB_MEMORY and
+// _JOB_DISK (sandbox.Config.Resolve, applied by the driver at Start): the host
+// asks for none, so that nothing in a job can change them.
+func TestSandboxSizesAreLeftToTheDriversConfiguration(t *testing.T) {
+	h := newHarness(t, simpleScript("x"))
+	h.srv.jobs = []*ermite.Job{testJob("j1")}
+	h.run(t)
+	eventually(t, "CompleteJob", func() bool { return h.srv.completeCount() == 1 })
+	h.driver.mu.Lock()
+	defer h.driver.mu.Unlock()
+	if len(h.driver.specs) != 1 {
+		t.Fatalf("%v", h.driver.specs)
+	}
+	if s := h.driver.specs[0]; s.JobID != "j1" || s.CPUs != 0 || s.MemoryMiB != 0 || s.DiskMiB != 0 {
+		t.Fatalf("%+v", s)
+	}
+	// And the configuration fills them (the real rule, in package sandbox).
+	cfg, err := sandbox.LoadConfig(func(k string) string {
+		return map[string]string{sandbox.EnvJobCPUs: "3", sandbox.EnvJobMemory: "2G", sandbox.EnvJobDisk: "10G"}[k]
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Resolve(h.driver.specs[0]); got.CPUs != 3 || got.MemoryMiB != 2048 || got.DiskMiB != 10240 {
+		t.Fatalf("%+v", got)
 	}
 }

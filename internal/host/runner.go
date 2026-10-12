@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"github.com/bnema/zerowrap"
 
 	ermite "bnema.dev/ermite-api/gen/ermite"
 	"bnema.dev/ermite-api/gen/ermite/ermiteconnect"
@@ -31,9 +32,6 @@ type Runner struct {
 	// Job builds the client of a job from its job token.
 	Job    func(jobToken string) ermiteconnect.RunnerServiceClient
 	Timing Timing
-	Logf   func(format string, args ...any)
-	// JobSpec sizes the sandbox of a job; the zero value takes the defaults.
-	JobSpec func(*ermite.Job) sandbox.JobSpec
 
 	// now returns the current time; tests replace it.
 	now func() time.Time
@@ -49,16 +47,12 @@ func (r *Runner) clock() time.Time {
 	return time.Now()
 }
 
-func (r *Runner) logf(format string, a ...any) {
-	if r.Logf != nil {
-		r.Logf(format, a...)
-	}
-}
-
+// spec is the sandbox request of a job. It names the job and leaves CPUs,
+// memory and disk at zero: the driver fills them from its configuration
+// (sandbox.Config.Resolve in Start), that is from ERMITE_RUNNER_JOB_CPUS,
+// _JOB_MEMORY and _JOB_DISK, so that the limits are one setting of the runner
+// and not something a job or this package can change.
 func (r *Runner) spec(j *ermite.Job) sandbox.JobSpec {
-	if r.JobSpec != nil {
-		return r.JobSpec(j)
-	}
 	return sandbox.JobSpec{JobID: j.JobId}
 }
 
@@ -84,6 +78,7 @@ func newPollID() string {
 // Capacity: a poll is made only when a slot is free. A lost response is retried
 // with the same poll_id, so that the server hands back the same assignment.
 func (r *Runner) Run(ctx context.Context) error {
+	log := zerowrap.FromCtx(ctx)
 	t := r.Timing.withDefaults()
 	shutdown := make(chan struct{})
 	slots := make(chan struct{}, max(1, r.Cfg.Capacity))
@@ -95,7 +90,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	}()
 
 	if err := r.Driver.Reap(ctx); err != nil && !errors.Is(err, sandbox.ErrBusy) {
-		r.logf("reaping what a previous run left: %v", err)
+		log.Error().Err(err).Msg("reaping what a previous run left")
 	}
 
 	var pollID string
@@ -109,7 +104,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		}
 		if r.leaked.Load() {
 			<-slots
-			if !r.recover(ctx, slots, t.ReapRetry) {
+			if !r.recover(ctx, log, slots, t.ReapRetry) {
 				return nil
 			}
 			continue
@@ -132,7 +127,7 @@ func (r *Runner) Run(ctx context.Context) error {
 				pollID = "" // our id was refused: a new one
 			}
 			d := bo.next()
-			r.logf("FetchJob failed, retrying in %s: %v", d, err)
+			log.Warn().Err(err).Dur("retry_in", d).Msg("FetchJob failed")
 			if !sleep(ctx, d) {
 				return nil
 			}
@@ -151,7 +146,7 @@ func (r *Runner) Run(ctx context.Context) error {
 			}
 			continue
 		}
-		r.startJob(ctx, resp.Msg.Job, t, shutdown, slots)
+		r.startJob(ctx, log, resp.Msg.Job, t, shutdown, slots)
 		if ra := resp.Msg.RetryAfter; ra != nil && ra.AsDuration() > 0 {
 			if !sleep(ctx, ra.AsDuration()) {
 				return nil
@@ -162,16 +157,16 @@ func (r *Runner) Run(ctx context.Context) error {
 }
 
 // recover waits until no job runs, then reaps. It returns false when ctx ends.
-func (r *Runner) recover(ctx context.Context, slots chan struct{}, retry time.Duration) bool {
-	r.logf("a sandbox could not be cleaned up: waiting for the running jobs, then reaping")
+func (r *Runner) recover(ctx context.Context, log zerowrap.Logger, slots chan struct{}, retry time.Duration) bool {
+	log.Error().Msg("a sandbox could not be cleaned up: no new job until the running ones end and the leftovers are reaped")
 	for ctx.Err() == nil {
 		if len(slots) == 0 {
 			if err := r.Driver.Reap(ctx); err == nil {
 				r.leaked.Store(false)
-				r.logf("reaped: taking jobs again")
+				log.Info().Msg("reaped: taking jobs again")
 				return true
 			} else if !errors.Is(err, sandbox.ErrBusy) {
-				r.logf("reap failed, retrying: %v", err)
+				log.Error().Err(err).Msg("reaping failed, retrying")
 			}
 		}
 		if !sleep(ctx, retry) {
@@ -181,20 +176,20 @@ func (r *Runner) recover(ctx context.Context, slots chan struct{}, retry time.Du
 	return false
 }
 
-func (r *Runner) startJob(ctx context.Context, job *ermite.Job, t Timing, shutdown <-chan struct{}, slots chan struct{}) {
+func (r *Runner) startJob(ctx context.Context, log zerowrap.Logger, job *ermite.Job, t Timing, shutdown <-chan struct{}, slots chan struct{}) {
 	jctx, cancel := context.WithCancelCause(context.WithoutCancel(ctx))
 	jr := &jobRun{
 		r: r, job: job, client: r.Job(job.JobToken), t: t, ctx: jctx, cancel: cancel,
-		logf:       func(f string, a ...any) { r.logf("job "+job.JobId+": "+f, a...) },
+		log:        zerowrap.Logger{Logger: log.With().Str("job_id", job.JobId).Int64("run_id", job.RunId).Int32("attempt", job.Attempt).Logger()},
 		receivedAt: r.clock(), cancelCh: make(chan *execpb.Cancel, 1), steps: map[int32]*ermite.StepUpdate{},
 	}
-	r.logf("job %s (run %d, attempt %d, %s) assigned", job.JobId, job.RunId, job.Attempt, job.JobKey)
+	jr.log.Info().Str("job_key", job.JobKey).Msg("job assigned")
 	r.active.Add(1)
 	go func() {
 		defer r.active.Done()
 		defer func() { <-slots }()
 		jr.run(r, shutdown)
-		r.logf("job %s finished", job.JobId)
+		jr.log.Info().Msg("job finished")
 	}()
 }
 
