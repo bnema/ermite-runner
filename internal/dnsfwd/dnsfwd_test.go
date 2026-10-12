@@ -5,6 +5,7 @@ package dnsfwd
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"io"
 	"net"
 	"net/netip"
@@ -12,6 +13,8 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -293,5 +296,147 @@ func TestResolversReload(t *testing.T) {
 	}
 	if got := NewResolvers(filepath.Join(t.TempDir(), "missing")).Addrs(); len(got) != 0 {
 		t.Fatal(got)
+	}
+}
+
+// S2: a listener holds at most MaxTCPConns connections; extra ones are closed
+// at once, and a free slot is usable again after a close.
+func TestTCPConnectionCapPerListener(t *testing.T) {
+	up := fakeUpstream(t, answer)
+	_, addr := start(t, up)
+	var held []net.Conn
+	for range MaxTCPConns {
+		c, err := net.Dial("tcp", addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		held = append(held, c)
+		defer func() { _ = c.Close() }()
+	}
+	// Let the accept loop register all of them.
+	time.Sleep(200 * time.Millisecond)
+	extra, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = extra.Close() }()
+	_ = extra.SetReadDeadline(time.Now().Add(3 * time.Second))
+	if _, err := extra.Read(make([]byte, 1)); err != io.EOF && !errors.Is(err, syscall.ECONNRESET) {
+		t.Fatalf("the connection over the cap must be closed by the server, got %v", err)
+	}
+	// Free one slot: a new connection is served.
+	_ = held[0].Close()
+	time.Sleep(200 * time.Millisecond)
+	c, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.Close() }()
+	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
+	q := query(3, "slot.test")
+	_, _ = c.Write(append([]byte{byte(len(q) >> 8), byte(len(q))}, q...))
+	var l [2]byte
+	if _, err := io.ReadFull(c, l[:]); err != nil {
+		t.Fatalf("a freed slot must serve again: %v", err)
+	}
+}
+
+// S2: the lifetime is absolute from accept: a client that keeps the connection
+// alive by trickling bytes still loses it.
+func TestTCPAbsoluteDeadline(t *testing.T) {
+	up := fakeUpstream(t, answer)
+	f := New(func() []string { return []string{up} }, 0)
+	f.Lifetime = 600 * time.Millisecond
+	ip := netip.MustParseAddr("127.0.0.1")
+	if err := f.Listen(context.Background(), ip); err != nil {
+		t.Skip(err)
+	}
+	t.Cleanup(f.CloseAll)
+	la, _ := f.Addr(ip)
+	addr := la.String()
+	c, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.Close() }()
+	start := time.Now()
+	closed := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(io.Discard, c) // returns when the server closes
+		close(closed)
+	}()
+	// Trickle one byte every 100 ms, never finishing a frame: only an idle
+	// timeout (10 s) would let this live; the absolute deadline must not.
+	go func() {
+		for i := 0; i < 40; i++ {
+			if _, err := c.Write([]byte{0}); err != nil {
+				return
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}()
+	select {
+	case <-closed:
+		if d := time.Since(start); d > 3*time.Second {
+			t.Fatalf("closed after %v, want about %v", d, f.Lifetime)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a trickling client kept its connection past the absolute deadline")
+	}
+}
+
+// S2/S9: a saturated listener drops UDP queries instead of blocking its read
+// loop, and another listener (another guest) keeps answering.
+func TestUDPSaturationDropsAndIsolatesListeners(t *testing.T) {
+	release := make(chan struct{})
+	slow := fakeUpstream(t, func(q []byte) []byte { <-release; return answer(q) })
+	fast := fakeUpstream(t, answer)
+	var useSlow atomic.Bool
+	useSlow.Store(true)
+	f := New(func() []string {
+		if useSlow.Load() {
+			return []string{slow}
+		}
+		return []string{fast}
+	}, 0)
+	a1, a2 := netip.MustParseAddr("127.0.0.1"), netip.MustParseAddr("127.0.0.2")
+	if err := f.Listen(context.Background(), a1); err != nil {
+		t.Skip(err)
+	}
+	if err := f.Listen(context.Background(), a2); err != nil {
+		t.Skip(err)
+	}
+	t.Cleanup(f.CloseAll)
+	t.Cleanup(func() { close(release) })
+	l1, _ := f.Addr(a1)
+	flood, err := net.Dial("udp", l1.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = flood.Close() }()
+	for i := 0; i < MaxInflight*3; i++ {
+		_, _ = flood.Write(query(uint16(i), "flood.test"))
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for f.Dropped(a1) == 0 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if f.Dropped(a1) == 0 {
+		t.Fatal("a saturated listener must drop queries")
+	}
+	// The other listener is unaffected: point the resolver at the fast upstream.
+	useSlow.Store(false)
+	l2, _ := f.Addr(a2)
+	c, err := net.Dial("udp", l2.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.Close() }()
+	_ = c.SetDeadline(time.Now().Add(4 * time.Second))
+	_, _ = c.Write(query(77, "other-guest.test"))
+	buf := make([]byte, 512)
+	n, err := c.Read(buf)
+	if err != nil || string(buf[n-6:n]) != "ANSWER" {
+		t.Fatalf("another listener must not be starved by the flood: n=%d err=%v", n, err)
 	}
 }

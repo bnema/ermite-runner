@@ -6,9 +6,12 @@
 // policy lets guests reach nothing else on the host. It does not parse queries
 // beyond what framing needs, so it supports every record type and EDNS.
 //
-// Abuse limits: at most MaxInflight concurrent upstream exchanges across all
-// listeners, a deadline on every upstream exchange, idle and total timeouts on
-// TCP connections, and a cap on TCP queries per connection.
+// Abuse limits, per listener (one listener per guest, so one guest cannot
+// starve another): at most MaxInflight concurrent upstream exchanges (UDP
+// queries beyond that are dropped, never queued), at most MaxTCPConns open TCP
+// connections, an absolute lifetime of TCPLifetime per TCP connection (a client
+// cannot hold a slot by trickling bytes), a deadline on every upstream
+// exchange, and a cap on queries per TCP connection.
 package dnsfwd
 
 import (
@@ -21,18 +24,24 @@ import (
 	"net/netip"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bnema/zerowrap"
 )
 
 const (
-	// MaxInflight bounds concurrent upstream exchanges.
-	MaxInflight = 256
+	// TCPLifetime is the absolute lifetime of a TCP connection, set at accept.
+	TCPLifetime = 30 * time.Second
 	// UpstreamTimeout is the deadline of one upstream attempt.
 	UpstreamTimeout = 3 * time.Second
 	// TCPIdleTimeout closes TCP client connections that stay silent.
 	TCPIdleTimeout = 10 * time.Second
+
+	// MaxInflight bounds concurrent upstream exchanges per listener.
+	MaxInflight = 32
+	// MaxTCPConns bounds open TCP connections per listener.
+	MaxTCPConns = 16
 	// TCPMaxQueries caps queries per TCP connection.
 	TCPMaxQueries = 64
 
@@ -44,7 +53,8 @@ const (
 type Forwarder struct {
 	upstreams func() []string
 	port      int
-	sem       chan struct{}
+	// Lifetime overrides TCPLifetime; set before Listen (tests).
+	Lifetime time.Duration
 
 	mu        sync.Mutex
 	listeners map[netip.Addr]*listener
@@ -55,6 +65,11 @@ type listener struct {
 	tcp    net.Listener
 	cancel context.CancelFunc
 	done   sync.WaitGroup
+	// inflight and conns are the per-listener limits (counting semaphores).
+	inflight chan struct{}
+	conns    chan struct{}
+	// Dropped counts UDP queries dropped because the listener was saturated.
+	dropped atomic.Int64
 }
 
 // New returns a Forwarder. upstreams returns the "host:port" resolvers to try
@@ -64,7 +79,7 @@ func New(upstreams func() []string, port int) *Forwarder {
 	return &Forwarder{
 		upstreams: upstreams,
 		port:      port,
-		sem:       make(chan struct{}, MaxInflight),
+		Lifetime:  TCPLifetime,
 		listeners: map[netip.Addr]*listener{},
 	}
 }
@@ -93,12 +108,12 @@ func (f *Forwarder) Listen(ctx context.Context, addr netip.Addr) error {
 		return fmt.Errorf("dnsfwd: listen tcp %s: %w", hp, err)
 	}
 	lctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
-	l := &listener{udp: pc, tcp: tl, cancel: cancel}
+	l := &listener{udp: pc, tcp: tl, cancel: cancel, inflight: make(chan struct{}, MaxInflight), conns: make(chan struct{}, MaxTCPConns)}
 	f.listeners[addr] = l
 	log := zerowrap.FromCtx(ctx)
 	l.done.Add(2)
-	go func() { defer l.done.Done(); f.serveUDP(lctx, pc, log) }()
-	go func() { defer l.done.Done(); f.serveTCP(lctx, tl, log) }()
+	go func() { defer l.done.Done(); f.serveUDP(lctx, l, log) }()
+	go func() { defer l.done.Done(); f.serveTCP(lctx, l, log) }()
 	return nil
 }
 
@@ -142,18 +157,19 @@ func (f *Forwarder) CloseAll() {
 	}
 }
 
-func (f *Forwarder) acquire(ctx context.Context) bool {
-	select {
-	case f.sem <- struct{}{}:
-		return true
-	case <-ctx.Done():
-		return false
+// Dropped returns how many UDP queries the listener on addr dropped because it
+// was saturated.
+func (f *Forwarder) Dropped(addr netip.Addr) int64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if l, ok := f.listeners[addr]; ok {
+		return l.dropped.Load()
 	}
+	return 0
 }
 
-func (f *Forwarder) release() { <-f.sem }
-
-func (f *Forwarder) serveUDP(ctx context.Context, pc net.PacketConn, log zerowrap.Logger) {
+func (f *Forwarder) serveUDP(ctx context.Context, l *listener, log zerowrap.Logger) {
+	pc := l.udp
 	buf := make([]byte, maxUDP)
 	for {
 		n, from, err := pc.ReadFrom(buf)
@@ -166,12 +182,17 @@ func (f *Forwarder) serveUDP(ctx context.Context, pc net.PacketConn, log zerowra
 		if n < hdrLen {
 			continue
 		}
-		q := append([]byte(nil), buf[:n]...)
-		if !f.acquire(ctx) {
-			return
+		select {
+		case l.inflight <- struct{}{}:
+		default:
+			// Saturated: drop. The client retries; blocking here would let one
+			// guest's flood stall the read loop.
+			l.dropped.Add(1)
+			continue
 		}
+		q := append([]byte(nil), buf[:n]...)
 		go func() {
-			defer f.release()
+			defer func() { <-l.inflight }()
 			resp := f.exchange(ctx, q, false)
 			if len(resp) > 0 {
 				_, _ = pc.WriteTo(resp, from)
@@ -180,36 +201,52 @@ func (f *Forwarder) serveUDP(ctx context.Context, pc net.PacketConn, log zerowra
 	}
 }
 
-func (f *Forwarder) serveTCP(ctx context.Context, l net.Listener, log zerowrap.Logger) {
+func (f *Forwarder) serveTCP(ctx context.Context, l *listener, log zerowrap.Logger) {
 	var wg sync.WaitGroup
 	defer wg.Wait()
 	for {
-		c, err := l.Accept()
+		c, err := l.tcp.Accept()
 		if err != nil {
 			if ctx.Err() == nil && !errors.Is(err, net.ErrClosed) {
 				log.Warn().Err(err).Msg("dns forwarder: tcp accept")
 			}
 			return
 		}
+		select {
+		case l.conns <- struct{}{}:
+		default:
+			_ = c.Close() // too many open connections on this listener
+			continue
+		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer func() { <-l.conns }()
 			defer func() { _ = c.Close() }()
 			stop := context.AfterFunc(ctx, func() { _ = c.Close() })
 			defer stop()
-			f.serveConn(ctx, c)
+			// Absolute deadline from accept: neither idle nor slow-loris
+			// connections keep their slot past TCPLifetime.
+			deadline := time.Now().Add(f.Lifetime)
+			_ = c.SetDeadline(deadline)
+			f.serveConn(ctx, l, c, deadline)
 		}()
 	}
 }
 
-func (f *Forwarder) serveConn(ctx context.Context, c net.Conn) {
+func (f *Forwarder) serveConn(ctx context.Context, l *listener, c net.Conn, deadline time.Time) {
 	for range TCPMaxQueries {
-		_ = c.SetReadDeadline(time.Now().Add(TCPIdleTimeout))
-		var l [2]byte
-		if _, err := io.ReadFull(c, l[:]); err != nil {
+		// The idle timeout can only shorten the absolute deadline.
+		dl := time.Now().Add(TCPIdleTimeout)
+		if deadline.Before(dl) {
+			dl = deadline
+		}
+		_ = c.SetReadDeadline(dl)
+		var lb [2]byte
+		if _, err := io.ReadFull(c, lb[:]); err != nil {
 			return
 		}
-		n := int(binary.BigEndian.Uint16(l[:]))
+		n := int(binary.BigEndian.Uint16(lb[:]))
 		if n < hdrLen {
 			return
 		}
@@ -217,18 +254,19 @@ func (f *Forwarder) serveConn(ctx context.Context, c net.Conn) {
 		if _, err := io.ReadFull(c, q); err != nil {
 			return
 		}
-		if !f.acquire(ctx) {
-			return
+		select {
+		case l.inflight <- struct{}{}:
+		default:
+			return // saturated: close, the client retries
 		}
 		resp := f.exchange(ctx, q, true)
-		f.release()
+		<-l.inflight
 		if len(resp) == 0 || len(resp) > 0xffff {
 			return
 		}
 		out := make([]byte, 2+len(resp))
 		binary.BigEndian.PutUint16(out, uint16(len(resp)))
 		copy(out[2:], resp)
-		_ = c.SetWriteDeadline(time.Now().Add(TCPIdleTimeout))
 		if _, err := c.Write(out); err != nil {
 			return
 		}
