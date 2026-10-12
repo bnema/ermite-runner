@@ -237,7 +237,7 @@ func runProcess(spec procSpec) (procResult, error) {
 		// is named "KillProcessTree" but does not kill the tree). What the shell
 		// started is left to the shell: bash forwards nothing to a foreground
 		// child it waits for, and the children that outlive the step are
-		// killed by "Complete job" (the orphan cleanup, JobExtension.cs:132).
+		// killed by "Complete job" (the orphan cleanup, JobExtension.cs:891-939).
 		// The step is still started in its own process group, so that a signal
 		// sent to the executor's group (init forwarding a SIGTERM) does not reach
 		// it before the executor decides.
@@ -280,7 +280,7 @@ func runProcess(spec procSpec) (procResult, error) {
 			return func() {
 				mu.Lock()
 				defer mu.Unlock()
-				if !done { // the group id could be reused once the shell is reaped
+				if !done {
 					spec.Signal(pid, sig)
 				}
 			}
@@ -394,7 +394,7 @@ func processTrackingValue(pid int) string {
 }
 
 // killOrphans kills the processes that carry the tracking id and were not
-// there before the job (JobExtension.FinalizeJob, JobExtension.cs:132-180).
+// there before the job (JobExtension.FinalizeJob, JobExtension.cs:891-939).
 // logf receives the "Terminate orphan process" lines.
 func killOrphans(id string, before map[string]bool, logf func(string)) {
 	self := os.Getpid()

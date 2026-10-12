@@ -24,6 +24,7 @@ func TestCheckURL(t *testing.T) {
 		{"https://ermite.example.org", false, ""},
 		{"https://ermite.example.org:8443/base", false, ""},
 		{"http://localhost:8080", false, ""},
+		{"http://LOCALHOST:8080", false, ""},
 		{"http://127.0.0.1:8080", false, ""},
 		{"http://[::1]:8080", false, ""},
 		{"http://ermite.example.org", false, "must be https"},

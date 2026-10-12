@@ -58,7 +58,8 @@ func CheckURL(raw string, allowInsecure bool) error {
 }
 
 func isLoopback(host string) bool {
-	if host == "localhost" {
+	// Host names are not case sensitive (LOCALHOST, Localhost).
+	if strings.EqualFold(host, "localhost") {
 		return true
 	}
 	ip, err := netip.ParseAddr(host)
