@@ -4,10 +4,10 @@
 // its own Firecracker micro-VM, or in its own container when the host has no
 // KVM, and executes workflows compatible with GitHub Actions.
 //
-// Subcommands: version; init and exec run inside a sandbox (guest PID 1, and
-// the executor); sandbox-check runs one stub job through the selected isolation
-// mode and prints its output (phase D of the CI-1 plan: the host loop that
-// fetches jobs from ermite comes later).
+// Subcommands: version; register stores a runner token obtained from ermite;
+// run fetches jobs from ermite and runs each in a sandbox; init and exec run
+// inside a sandbox (guest PID 1, and the executor); sandbox-check runs one stub
+// script through the selected isolation mode and prints its output.
 package main
 
 import (
@@ -49,13 +49,17 @@ func run(args []string) int {
 		return execCmd(ctx)
 	case "sandbox-check":
 		return sandboxCheck(ctx, args[1:])
+	case "register":
+		return registerCmd(ctx, args[1:])
+	case "run":
+		return runCmd(ctx)
 	}
 	usage()
 	return 2
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: ermite-runner version | sandbox-check [script]\n       (inside a sandbox: ermite-runner init | exec)")
+	fmt.Fprintln(os.Stderr, "usage: ermite-runner version | register [--token T] [--replace] | run | sandbox-check [script]\n       (inside a sandbox: ermite-runner init | exec)")
 }
 
 func envOr(key, def string) string {
@@ -65,7 +69,7 @@ func envOr(key, def string) string {
 	return def
 }
 
-// execCmd is `ermite-runner exec`, the stub executor.
+// execCmd is `ermite-runner exec`, the executor of a sandbox.
 func execCmd(ctx context.Context) int {
 	log := zerowrap.FromCtx(ctx)
 	target, err := guest.ParseTarget(os.Getenv("ERMITE_CONNECT"))
@@ -77,6 +81,9 @@ func execCmd(ctx context.Context) int {
 		Target:  target,
 		Sandbox: envOr("ERMITE_SANDBOX", "container"),
 		Version: envOr("ERMITE_VERSION", version),
+		// A test image without the user "runner" (ERMITE_RUNNER_ALLOW_ROOT_STEPS=1);
+		// a runner never sets it: the job refuses to start instead.
+		AllowRootSteps: os.Getenv("ERMITE_RUNNER_ALLOW_ROOT_STEPS") == "1",
 	})
 	if err != nil {
 		log.Error().Err(err).Msg("exec")

@@ -1,0 +1,109 @@
+# SPDX-License-Identifier: MIT
+#
+# systemd unit of the ermite runner. Install the static binary as
+# /usr/local/bin/ermite-runner, write the settings to /etc/ermite-runner/env
+# (mode 0600) and register the runner once; the README has the commands.
+#
+# The runner runs as root: it creates TAP devices and nftables rules (vm), loop
+# mounts and containers (container), and starts the jailer. Jobs never run as
+# root on the host: they run in a micro-VM or a container as user "runner".
+#
+# The sandboxing below is what can be added without breaking those jobs.
+# What is deliberately NOT set, and why, is listed at the end of the file and
+# in the README.
+[Unit]
+Description=ermite CI runner
+Documentation=https://git.bnema.dev/bnema/ermite-runner
+Wants=network-online.target
+After=network-online.target docker.service
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/ermite-runner/env
+ExecStart=/usr/local/bin/ermite-runner run
+Restart=on-failure
+RestartSec=5
+
+# SIGTERM cancels the running jobs with runner_shutdown, reports them and removes
+# their sandboxes. With the defaults that takes at most 90 s (30 s for the
+# executor to stop its steps, 30 s to destroy the sandbox, 30 s to report; the
+# jobs do this in parallel). A test checks that this value leaves 15 s of margin
+# over host.Timing.ShutdownBudget.
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=120
+
+# The state directory holds the runner token (0600), the VM images and the
+# per-job files; RuntimeDirectory is for the lock and sockets.
+StateDirectory=ermite-runner
+StateDirectoryMode=0700
+RuntimeDirectory=ermite-runner
+
+# Jobs are many processes.
+TasksMax=infinity
+LimitNOFILE=1048576
+
+# ---- sandboxing that leaves the unit in the host's mount namespace ----------
+# Only options that do not give the unit a mount namespace of its own: in
+# container mode the runner loop-mounts the scratch disk of a job, and the Docker
+# daemon, which lives in the host's namespace, must see that mount to bind it
+# into the container. See the end of the file.
+NoNewPrivileges=yes
+# The runner does not set the clock.
+ProtectClock=yes
+# No setuid/setgid files created by the runner or its children.
+RestrictSUIDSGID=yes
+LockPersonality=yes
+# The runner does not need real-time scheduling.
+RestrictRealtime=yes
+# Syscall architectures: native only.
+SystemCallArchitectures=native
+# Address families the runner and its children use: Unix sockets (Docker, the
+# executor stream), IPv4/IPv6 (the server, the DNS forwarder), netlink (ip, nft,
+# TAP devices), packet (none needed: left out), vsock (the executor stream in a
+# micro-VM).
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK AF_VSOCK
+
+[Install]
+WantedBy=multi-user.target
+
+# ---- deliberately absent -----------------------------------------------------
+#
+# PrivateTmp=, ProtectHome=, ProtectSystem=, ProtectKernelModules=,
+# ProtectKernelLogs=, ProtectKernelTunables=, ProtectControlGroups=,
+# PrivateDevices=, ReadOnlyPaths=, ReadWritePaths=, InaccessiblePaths=,
+# TemporaryFileSystem=, BindPaths=
+#                     Each of these puts the unit in a mount namespace of its own
+#                     (systemd sets one up for ProtectKernelModules and
+#                     ProtectKernelLogs too: it hides /usr/lib/modules and
+#                     /proc/kmsg with mounts). In container mode the runner
+#                     loop-mounts the scratch disk of a job below the state
+#                     directory, and the Docker daemon, in the host's namespace,
+#                     cannot see a mount made inside the unit's: the bind
+#                     sources of the container would be empty directories. The
+#                     micro-VM mode would tolerate them, but one unit serves both
+#                     modes and a second unit for VM-only hardening is not worth
+#                     it. test: internal/host TestUnitHasNoMountNamespaceOptions.
+#
+# Delegate=yes        The runner does not manage cgroups of its own. The jailer
+#                     creates the cgroups of the VMs below /sys/fs/cgroup itself
+#                     (it is root and writes there directly), and Docker has its
+#                     own. Delegation would hand a subtree to this unit that
+#                     nothing uses.
+# PrivateNetwork=, RestrictNamespaces=,
+# CapabilityBoundingSet=, MemoryDenyWriteExecute=, SystemCallFilter=
+#                     The runner creates network namespaces and devices (TAP,
+#                     veth, bridges) and mounts file systems, enables
+#                     net.ipv4.ip_forward (the jailer also writes cgroups, /dev/kvm, /dev/net/tun and
+#                     /dev/loop* are needed), hands capabilities to the jailer and
+#                     to Docker, and starts Firecracker (which maps guest memory
+#                     writable and executable). Each of these would break a path
+#                     that cannot be tested without a rootful host; the
+#                     boundary of a job is the micro-VM or the container, not
+#                     this unit.
+# UMask=0077          The state directory is made 0700 by the runner itself, and the
+#                     drivers create directories that the job's user must be able
+#                     to enter (the scratch disk's work and tmp directories are
+#                     made with mode 0755): a restrictive umask would turn them
+#                     into root-only directories, which cannot be tested without
+#                     a rootful host.

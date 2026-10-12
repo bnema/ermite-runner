@@ -8,7 +8,10 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
+	"bnema.dev/ermite-runner/internal/execstream"
+	"bnema.dev/ermite-runner/internal/execstream/execpb"
 	"bnema.dev/ermite-runner/internal/sandbox"
 	"bnema.dev/ermite-runner/internal/sandbox/drivers"
 )
@@ -100,4 +103,108 @@ ip -6 addr show scope global | grep -c inet6 || true
 	if !strings.Contains(r.out, "dns answered") {
 		t.Errorf("the DNS forwarder on the gateway must answer:\n%s", r.out)
 	}
+}
+
+// TestVMRunsAJob drives a job (not the stub script) through the executor in a
+// micro-VM: the runner user, the work layout, file commands, outputs, a failing
+// step and cancellation by SIGINT. The VM is rootful-free like the other VM
+// tests (user + network namespace, jailer off).
+func TestVMRunsAJob(t *testing.T) {
+	if os.Getenv("ERMITE_RUNNER_IT_VM") != "1" {
+		t.Skip("set ERMITE_RUNNER_IT_VM=1 (needs KVM, firecracker, a kernel and a base image; see README)")
+	}
+	need(t, "mkfs.ext4")
+	needNetAdmin(t)
+	ctx := ctxWithLog(t)
+	cfg := loadConfig(t, sandbox.VM)
+	if why := sandbox.VMUnavailable(cfg, sandbox.Prober{}); len(why) > 0 {
+		t.Fatalf("vm isolation is not available here: %s", strings.Join(why, "; "))
+	}
+	drv, err := sandbox.Select(ctx, cfg, drivers.Factories(), sandbox.Prober{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = drv.Close()
+		if d2, err := sandbox.Select(context.Background(), cfg, drivers.Factories(), sandbox.Prober{}); err == nil {
+			_ = d2.Reap(context.Background())
+			_ = d2.Close()
+		}
+	})
+	if err := drv.Reap(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	run := func(yaml string, cancelAfter time.Duration) (steps []string, logs []string, res *execpb.JobResult, exit *execpb.Exit) {
+		t.Helper()
+		sb, err := drv.New()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() {
+			if err := sb.Stop(ctx); err != nil {
+				t.Errorf("stop: %v", err)
+			}
+		}()
+		conn, err := sb.Start(ctx, sandbox.JobSpec{JobID: "vm-job"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var cancel chan *execpb.Cancel
+		if cancelAfter > 0 {
+			cancel = make(chan *execpb.Cancel, 1)
+			time.AfterFunc(cancelAfter, func() { cancel <- &execpb.Cancel{Reason: "test"} })
+		}
+		_, exit, err = execstream.DriveJob(conn, &execpb.Run{Job: &execpb.JobSpec{
+			WorkflowPath: ".github/workflows/ci.yml", WorkflowYaml: yaml, JobKey: "j", Repo: "hello", RunnerName: "it", RunnerVersion: "test",
+			RunnerEnvironment: "self-hosted", Matrix: "{}",
+			Contexts: `{"github":{"repository":"octo/hello","event_name":"push","job":"j","ref":"refs/heads/main","sha":"0123456789abcdef0123456789abcdef01234567"}}`,
+		}}, cancel, execstream.JobHandler{
+			StepStarted: func(s *execpb.StepStarted) { steps = append(steps, s.Name) },
+			Log:         func(l *execpb.Log) { logs = append(logs, l.Text) },
+			JobResult:   func(r *execpb.JobResult) { res = r },
+		})
+		if err != nil {
+			t.Fatalf("driving the job: %v", err)
+		}
+		return
+	}
+
+	_, logs, res, exit := run(`on: push
+jobs:
+  j:
+    runs-on: x
+    outputs:
+      who: ${{ steps.a.outputs.who }}
+    steps:
+      - id: a
+        run: |
+          echo "who=$(id -un):$(id -u)" >> "$GITHUB_OUTPUT"
+          echo "pwd=$PWD home=$HOME"
+          echo "FOO=bar" >> "$GITHUB_ENV"
+      - run: echo "FOO=$FOO CI=$CI"
+      - run: exit 3
+      - if: always()
+        run: echo still-here
+`, 0)
+	all := strings.Join(logs, "\n")
+	if res == nil || res.Conclusion != execpb.StepConclusion_STEP_CONCLUSION_FAILURE || exit.Code == 0 {
+		t.Fatalf("result %v exit %v\n%s", res, exit, all)
+	}
+	if res.Outputs["who"] != "runner:1001" {
+		t.Errorf("steps ran as %q\n%s", res.Outputs["who"], all)
+	}
+	for _, w := range []string{"pwd=/home/runner/work/hello/hello home=/home/runner", "FOO=bar CI=true", "##[error]Process completed with exit code 3.", "still-here"} {
+		if !strings.Contains(all, w) {
+			t.Errorf("log lacks %q\n%s", w, all)
+		}
+	}
+
+	start := time.Now()
+	_, logs, res, _ = run("on: push\njobs:\n  j:\n    runs-on: x\n    steps:\n      - run: |\n          trap 'echo got-int; exit 130' INT\n          echo ready\n          while :; do sleep 0.2; done\n", 8*time.Second)
+	all = strings.Join(logs, "\n")
+	if res == nil || res.Conclusion != execpb.StepConclusion_STEP_CONCLUSION_CANCELLED || !strings.Contains(all, "got-int") {
+		t.Fatalf("cancel: %v\n%s", res, all)
+	}
+	t.Logf("cancelled job ended %v after the start", time.Since(start))
 }

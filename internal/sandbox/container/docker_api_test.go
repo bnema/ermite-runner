@@ -62,7 +62,7 @@ func TestDockerAPIWiring(t *testing.T) {
 	run := noMountRunner{}
 	empty := filepath.Join(dir, "mountinfo")
 	_ = os.WriteFile(empty, nil, 0o644)
-	d, err := New(ctx, cfg, Options{Net: plumb, allowRootless: true, ConnectTimeout: 60 * time.Second, Run: run,
+	d, err := New(ctx, cfg, Options{Net: plumb, UnsafeAllowRootlessForTests: true, ConnectTimeout: 60 * time.Second, Run: run,
 		Mounter: &disk.Mounter{Run: run, Mountinfo: empty}})
 	if err != nil {
 		t.Fatal(err)

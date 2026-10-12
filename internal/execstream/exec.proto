@@ -21,6 +21,10 @@ message Frame {
     Output output = 3; // executor -> host
     Exit exit = 4;     // executor -> host, last frame
     Cancel cancel = 5; // host -> executor
+    StepStarted step_started = 6;     // executor -> host
+    StepCompleted step_completed = 7; // executor -> host
+    Log log = 8;                      // executor -> host
+    JobResult job_result = 9;         // executor -> host, before Exit
   }
 }
 
@@ -30,11 +34,38 @@ message Hello {
   string hostname = 3;
 }
 
-// Run asks the executor to run a script. CI-1 stub executor: the script is run
-// with `sh -c`; an empty script means the built-in diagnostics script.
+// Run asks the executor to run a script or a job. Without job it is the stub
+// executor of sandbox-check: the script is run with `sh -c`; an empty script
+// means the built-in diagnostics script. With job the executor runs the job
+// like a GitHub Actions runner and reports it with StepStarted, Log,
+// StepCompleted and JobResult frames, then Exit.
 message Run {
   string script = 1;
   map<string, string> env = 2;
+  JobSpec job = 3;
+}
+
+// JobSpec is the job to run: the fields of the job that ermite handed to the
+// host process, minus the tokens (the sandbox never sees them).
+message JobSpec {
+  string workflow_path = 1;
+  string workflow_yaml = 2;
+  string job_key = 3;
+  string matrix = 4;   // JSON object
+  string contexts = 5; // JSON object
+  string repo = 6;     // repository name
+  int32 timeout_minutes = 7;
+  string runner_name = 8;
+  string runner_version = 9;
+  // runner_environment is the runner.environment value ("self-hosted").
+  string runner_environment = 10;
+  bool debug = 11; // ACTIONS_STEP_DEBUG
+  // deadline_ms is what is left of the job timeout when the host sends this
+  // Run, in milliseconds: the timeout counts from the moment the host received
+  // the job (runner.proto: Job.timeout_minutes), not from the start of the
+  // executor, and booting the sandbox takes time. 0 means "use
+  // timeout_minutes from now".
+  int64 deadline_ms = 12;
 }
 
 enum StreamKind {
@@ -61,4 +92,56 @@ message Cancel {
   // reason is for the job log and diagnostics ("cancelled by the user",
   // "job timeout", ...); it never changes the behaviour.
   string reason = 1;
+  // kind tells the job executor how the job ends: cancelled, timed out, or
+  // cancelled because the runner shuts down. The stub executor ignores it.
+  CancelKind kind = 2;
+}
+
+enum CancelKind {
+  CANCEL_KIND_UNSPECIFIED = 0; // same as USER
+  CANCEL_KIND_USER = 1;
+  CANCEL_KIND_TIMEOUT = 2;
+  CANCEL_KIND_SHUTDOWN = 3;
+}
+
+// Steps are numbered like GitHub's log: "Set up job" is 1, the steps of the
+// workflow follow, "Complete job" is last.
+message StepStarted {
+  int32 number = 1;
+  string name = 2;
+  int64 unix_nano = 3;
+}
+
+message StepCompleted {
+  int32 number = 1;
+  string name = 2;
+  StepConclusion conclusion = 3;
+  int64 unix_nano = 4;
+}
+
+enum StepConclusion {
+  STEP_CONCLUSION_UNSPECIFIED = 0;
+  STEP_CONCLUSION_SUCCESS = 1;
+  STEP_CONCLUSION_FAILURE = 2;
+  STEP_CONCLUSION_CANCELLED = 3;
+  STEP_CONCLUSION_SKIPPED = 4;
+  STEP_CONCLUSION_TIMED_OUT = 5; // jobs only
+}
+
+// Log is one line of the job log, without terminator, valid UTF-8. A line of
+// more than 64 KiB is cut by the executor into pieces at character boundaries;
+// every piece but the first has continued set (the AppendLog rule).
+message Log {
+  int32 step = 1;
+  int64 unix_nano = 2;
+  string text = 3;
+  bool continued = 4;
+}
+
+// JobResult is the outcome of the job; Exit follows.
+message JobResult {
+  StepConclusion conclusion = 1;
+  map<string, string> outputs = 2;
+  string error = 3;
+  bool runner_shutdown = 4;
 }

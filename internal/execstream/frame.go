@@ -25,7 +25,9 @@ import (
 )
 
 // MaxFrame is the largest accepted serialized frame.
-const MaxFrame = 1 << 20
+// It leaves room for the largest job result: outputs of 1 MiB in total (the
+// limit of ermite) plus the overhead of the encoding.
+const MaxFrame = 2 << 20
 
 // ChunkSize is the largest output payload placed in one Output frame.
 const ChunkSize = 32 * 1024
@@ -100,6 +102,24 @@ func (c *Conn) Recv() (*execpb.Frame, error) {
 // a Cancel; the caller bounds that wait by stopping the sandbox, which closes
 // the stream and makes Drive return an error.
 func Drive(rw io.ReadWriter, run *execpb.Run, cancel <-chan *execpb.Cancel, onOutput func(*execpb.Output)) (*execpb.Hello, *execpb.Exit, error) {
+	return DriveJob(rw, run, cancel, JobHandler{Output: onOutput})
+}
+
+// JobHandler receives the frames of a session. Nil functions ignore their
+// frames. The functions are called from the goroutine of DriveJob, in the
+// order of the stream.
+type JobHandler struct {
+	Hello         func(*execpb.Hello)
+	Output        func(*execpb.Output)
+	StepStarted   func(*execpb.StepStarted)
+	StepCompleted func(*execpb.StepCompleted)
+	Log           func(*execpb.Log)
+	JobResult     func(*execpb.JobResult)
+}
+
+// DriveJob is Drive for a session that carries a job: besides Output frames it
+// delivers the step, log and result frames to h.
+func DriveJob(rw io.ReadWriter, run *execpb.Run, cancel <-chan *execpb.Cancel, h JobHandler) (*execpb.Hello, *execpb.Exit, error) {
 	c := NewConn(rw)
 	first, err := c.Recv()
 	if err != nil {
@@ -108,6 +128,9 @@ func Drive(rw io.ReadWriter, run *execpb.Run, cancel <-chan *execpb.Cancel, onOu
 	hello := first.GetHello()
 	if hello == nil {
 		return nil, nil, fmt.Errorf("execstream: first frame is not hello")
+	}
+	if h.Hello != nil {
+		h.Hello(hello)
 	}
 	if err := c.Send(&execpb.Frame{Body: &execpb.Frame_Run{Run: run}}); err != nil {
 		return hello, nil, fmt.Errorf("execstream: sending run: %w", err)
@@ -137,8 +160,24 @@ func Drive(rw io.ReadWriter, run *execpb.Run, cancel <-chan *execpb.Cancel, onOu
 		}
 		switch b := f.Body.(type) {
 		case *execpb.Frame_Output:
-			if onOutput != nil {
-				onOutput(b.Output)
+			if h.Output != nil {
+				h.Output(b.Output)
+			}
+		case *execpb.Frame_StepStarted:
+			if h.StepStarted != nil {
+				h.StepStarted(b.StepStarted)
+			}
+		case *execpb.Frame_StepCompleted:
+			if h.StepCompleted != nil {
+				h.StepCompleted(b.StepCompleted)
+			}
+		case *execpb.Frame_Log:
+			if h.Log != nil {
+				h.Log(b.Log)
+			}
+		case *execpb.Frame_JobResult:
+			if h.JobResult != nil {
+				h.JobResult(b.JobResult)
 			}
 		case *execpb.Frame_Exit:
 			return hello, b.Exit, nil

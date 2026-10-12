@@ -6,13 +6,28 @@ package sandboxtest
 import (
 	"context"
 	"encoding/binary"
+	"io"
 	"net/netip"
 	"os"
 	"sync"
 	"testing"
 
+	"bnema.dev/ermite-runner/internal/cmdrun"
 	"bnema.dev/ermite-runner/internal/netpolicy"
 )
+
+// NoMountRunner runs real commands except mount and umount, which succeed
+// without doing anything: loop mounts need root, and the tests that use it
+// replace them by plain directories (mkfs still runs).
+type NoMountRunner struct{}
+
+// Run implements cmdrun.Runner.
+func (NoMountRunner) Run(ctx context.Context, in io.Reader, name string, args ...string) ([]byte, error) {
+	if name == "mount" || name == "umount" {
+		return nil, nil
+	}
+	return cmdrun.Exec{}.Run(ctx, in, name, args...)
+}
 
 // WriteStaticELF writes a minimal statically linked ELF64 file (one PT_LOAD, no
 // PT_INTERP): enough for sandbox.CheckStatic, never executed.

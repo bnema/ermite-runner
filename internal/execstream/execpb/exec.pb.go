@@ -79,6 +79,116 @@ func (StreamKind) EnumDescriptor() ([]byte, []int) {
 	return file_exec_proto_rawDescGZIP(), []int{0}
 }
 
+type CancelKind int32
+
+const (
+	CancelKind_CANCEL_KIND_UNSPECIFIED CancelKind = 0 // same as USER
+	CancelKind_CANCEL_KIND_USER        CancelKind = 1
+	CancelKind_CANCEL_KIND_TIMEOUT     CancelKind = 2
+	CancelKind_CANCEL_KIND_SHUTDOWN    CancelKind = 3
+)
+
+// Enum value maps for CancelKind.
+var (
+	CancelKind_name = map[int32]string{
+		0: "CANCEL_KIND_UNSPECIFIED",
+		1: "CANCEL_KIND_USER",
+		2: "CANCEL_KIND_TIMEOUT",
+		3: "CANCEL_KIND_SHUTDOWN",
+	}
+	CancelKind_value = map[string]int32{
+		"CANCEL_KIND_UNSPECIFIED": 0,
+		"CANCEL_KIND_USER":        1,
+		"CANCEL_KIND_TIMEOUT":     2,
+		"CANCEL_KIND_SHUTDOWN":    3,
+	}
+)
+
+func (x CancelKind) Enum() *CancelKind {
+	p := new(CancelKind)
+	*p = x
+	return p
+}
+
+func (x CancelKind) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (CancelKind) Descriptor() protoreflect.EnumDescriptor {
+	return file_exec_proto_enumTypes[1].Descriptor()
+}
+
+func (CancelKind) Type() protoreflect.EnumType {
+	return &file_exec_proto_enumTypes[1]
+}
+
+func (x CancelKind) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use CancelKind.Descriptor instead.
+func (CancelKind) EnumDescriptor() ([]byte, []int) {
+	return file_exec_proto_rawDescGZIP(), []int{1}
+}
+
+type StepConclusion int32
+
+const (
+	StepConclusion_STEP_CONCLUSION_UNSPECIFIED StepConclusion = 0
+	StepConclusion_STEP_CONCLUSION_SUCCESS     StepConclusion = 1
+	StepConclusion_STEP_CONCLUSION_FAILURE     StepConclusion = 2
+	StepConclusion_STEP_CONCLUSION_CANCELLED   StepConclusion = 3
+	StepConclusion_STEP_CONCLUSION_SKIPPED     StepConclusion = 4
+	StepConclusion_STEP_CONCLUSION_TIMED_OUT   StepConclusion = 5 // jobs only
+)
+
+// Enum value maps for StepConclusion.
+var (
+	StepConclusion_name = map[int32]string{
+		0: "STEP_CONCLUSION_UNSPECIFIED",
+		1: "STEP_CONCLUSION_SUCCESS",
+		2: "STEP_CONCLUSION_FAILURE",
+		3: "STEP_CONCLUSION_CANCELLED",
+		4: "STEP_CONCLUSION_SKIPPED",
+		5: "STEP_CONCLUSION_TIMED_OUT",
+	}
+	StepConclusion_value = map[string]int32{
+		"STEP_CONCLUSION_UNSPECIFIED": 0,
+		"STEP_CONCLUSION_SUCCESS":     1,
+		"STEP_CONCLUSION_FAILURE":     2,
+		"STEP_CONCLUSION_CANCELLED":   3,
+		"STEP_CONCLUSION_SKIPPED":     4,
+		"STEP_CONCLUSION_TIMED_OUT":   5,
+	}
+)
+
+func (x StepConclusion) Enum() *StepConclusion {
+	p := new(StepConclusion)
+	*p = x
+	return p
+}
+
+func (x StepConclusion) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (StepConclusion) Descriptor() protoreflect.EnumDescriptor {
+	return file_exec_proto_enumTypes[2].Descriptor()
+}
+
+func (StepConclusion) Type() protoreflect.EnumType {
+	return &file_exec_proto_enumTypes[2]
+}
+
+func (x StepConclusion) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use StepConclusion.Descriptor instead.
+func (StepConclusion) EnumDescriptor() ([]byte, []int) {
+	return file_exec_proto_rawDescGZIP(), []int{2}
+}
+
 // Frame is the only message on the stream.
 type Frame struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -89,6 +199,10 @@ type Frame struct {
 	//	*Frame_Output
 	//	*Frame_Exit
 	//	*Frame_Cancel
+	//	*Frame_StepStarted
+	//	*Frame_StepCompleted
+	//	*Frame_Log
+	//	*Frame_JobResult
 	Body          isFrame_Body `protobuf_oneof:"body"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -176,6 +290,42 @@ func (x *Frame) GetCancel() *Cancel {
 	return nil
 }
 
+func (x *Frame) GetStepStarted() *StepStarted {
+	if x != nil {
+		if x, ok := x.Body.(*Frame_StepStarted); ok {
+			return x.StepStarted
+		}
+	}
+	return nil
+}
+
+func (x *Frame) GetStepCompleted() *StepCompleted {
+	if x != nil {
+		if x, ok := x.Body.(*Frame_StepCompleted); ok {
+			return x.StepCompleted
+		}
+	}
+	return nil
+}
+
+func (x *Frame) GetLog() *Log {
+	if x != nil {
+		if x, ok := x.Body.(*Frame_Log); ok {
+			return x.Log
+		}
+	}
+	return nil
+}
+
+func (x *Frame) GetJobResult() *JobResult {
+	if x != nil {
+		if x, ok := x.Body.(*Frame_JobResult); ok {
+			return x.JobResult
+		}
+	}
+	return nil
+}
+
 type isFrame_Body interface {
 	isFrame_Body()
 }
@@ -200,6 +350,22 @@ type Frame_Cancel struct {
 	Cancel *Cancel `protobuf:"bytes,5,opt,name=cancel,proto3,oneof"` // host -> executor
 }
 
+type Frame_StepStarted struct {
+	StepStarted *StepStarted `protobuf:"bytes,6,opt,name=step_started,json=stepStarted,proto3,oneof"` // executor -> host
+}
+
+type Frame_StepCompleted struct {
+	StepCompleted *StepCompleted `protobuf:"bytes,7,opt,name=step_completed,json=stepCompleted,proto3,oneof"` // executor -> host
+}
+
+type Frame_Log struct {
+	Log *Log `protobuf:"bytes,8,opt,name=log,proto3,oneof"` // executor -> host
+}
+
+type Frame_JobResult struct {
+	JobResult *JobResult `protobuf:"bytes,9,opt,name=job_result,json=jobResult,proto3,oneof"` // executor -> host, before Exit
+}
+
 func (*Frame_Hello) isFrame_Body() {}
 
 func (*Frame_Run) isFrame_Body() {}
@@ -209,6 +375,14 @@ func (*Frame_Output) isFrame_Body() {}
 func (*Frame_Exit) isFrame_Body() {}
 
 func (*Frame_Cancel) isFrame_Body() {}
+
+func (*Frame_StepStarted) isFrame_Body() {}
+
+func (*Frame_StepCompleted) isFrame_Body() {}
+
+func (*Frame_Log) isFrame_Body() {}
+
+func (*Frame_JobResult) isFrame_Body() {}
 
 type Hello struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -270,12 +444,16 @@ func (x *Hello) GetHostname() string {
 	return ""
 }
 
-// Run asks the executor to run a script. CI-1 stub executor: the script is run
-// with `sh -c`; an empty script means the built-in diagnostics script.
+// Run asks the executor to run a script or a job. Without job it is the stub
+// executor of sandbox-check: the script is run with `sh -c`; an empty script
+// means the built-in diagnostics script. With job the executor runs the job
+// like a GitHub Actions runner and reports it with StepStarted, Log,
+// StepCompleted and JobResult frames, then Exit.
 type Run struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Script        string                 `protobuf:"bytes,1,opt,name=script,proto3" json:"script,omitempty"`
 	Env           map[string]string      `protobuf:"bytes,2,rep,name=env,proto3" json:"env,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	Job           *JobSpec               `protobuf:"bytes,3,opt,name=job,proto3" json:"job,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -324,6 +502,153 @@ func (x *Run) GetEnv() map[string]string {
 	return nil
 }
 
+func (x *Run) GetJob() *JobSpec {
+	if x != nil {
+		return x.Job
+	}
+	return nil
+}
+
+// JobSpec is the job to run: the fields of the job that ermite handed to the
+// host process, minus the tokens (the sandbox never sees them).
+type JobSpec struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	WorkflowPath   string                 `protobuf:"bytes,1,opt,name=workflow_path,json=workflowPath,proto3" json:"workflow_path,omitempty"`
+	WorkflowYaml   string                 `protobuf:"bytes,2,opt,name=workflow_yaml,json=workflowYaml,proto3" json:"workflow_yaml,omitempty"`
+	JobKey         string                 `protobuf:"bytes,3,opt,name=job_key,json=jobKey,proto3" json:"job_key,omitempty"`
+	Matrix         string                 `protobuf:"bytes,4,opt,name=matrix,proto3" json:"matrix,omitempty"`     // JSON object
+	Contexts       string                 `protobuf:"bytes,5,opt,name=contexts,proto3" json:"contexts,omitempty"` // JSON object
+	Repo           string                 `protobuf:"bytes,6,opt,name=repo,proto3" json:"repo,omitempty"`         // repository name
+	TimeoutMinutes int32                  `protobuf:"varint,7,opt,name=timeout_minutes,json=timeoutMinutes,proto3" json:"timeout_minutes,omitempty"`
+	RunnerName     string                 `protobuf:"bytes,8,opt,name=runner_name,json=runnerName,proto3" json:"runner_name,omitempty"`
+	RunnerVersion  string                 `protobuf:"bytes,9,opt,name=runner_version,json=runnerVersion,proto3" json:"runner_version,omitempty"`
+	// runner_environment is the runner.environment value ("self-hosted").
+	RunnerEnvironment string `protobuf:"bytes,10,opt,name=runner_environment,json=runnerEnvironment,proto3" json:"runner_environment,omitempty"`
+	Debug             bool   `protobuf:"varint,11,opt,name=debug,proto3" json:"debug,omitempty"` // ACTIONS_STEP_DEBUG
+	// deadline_ms is what is left of the job timeout when the host sends this
+	// Run, in milliseconds: the timeout counts from the moment the host received
+	// the job (runner.proto: Job.timeout_minutes), not from the start of the
+	// executor, and booting the sandbox takes time. 0 means "use
+	// timeout_minutes from now".
+	DeadlineMs    int64 `protobuf:"varint,12,opt,name=deadline_ms,json=deadlineMs,proto3" json:"deadline_ms,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *JobSpec) Reset() {
+	*x = JobSpec{}
+	mi := &file_exec_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *JobSpec) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*JobSpec) ProtoMessage() {}
+
+func (x *JobSpec) ProtoReflect() protoreflect.Message {
+	mi := &file_exec_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use JobSpec.ProtoReflect.Descriptor instead.
+func (*JobSpec) Descriptor() ([]byte, []int) {
+	return file_exec_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *JobSpec) GetWorkflowPath() string {
+	if x != nil {
+		return x.WorkflowPath
+	}
+	return ""
+}
+
+func (x *JobSpec) GetWorkflowYaml() string {
+	if x != nil {
+		return x.WorkflowYaml
+	}
+	return ""
+}
+
+func (x *JobSpec) GetJobKey() string {
+	if x != nil {
+		return x.JobKey
+	}
+	return ""
+}
+
+func (x *JobSpec) GetMatrix() string {
+	if x != nil {
+		return x.Matrix
+	}
+	return ""
+}
+
+func (x *JobSpec) GetContexts() string {
+	if x != nil {
+		return x.Contexts
+	}
+	return ""
+}
+
+func (x *JobSpec) GetRepo() string {
+	if x != nil {
+		return x.Repo
+	}
+	return ""
+}
+
+func (x *JobSpec) GetTimeoutMinutes() int32 {
+	if x != nil {
+		return x.TimeoutMinutes
+	}
+	return 0
+}
+
+func (x *JobSpec) GetRunnerName() string {
+	if x != nil {
+		return x.RunnerName
+	}
+	return ""
+}
+
+func (x *JobSpec) GetRunnerVersion() string {
+	if x != nil {
+		return x.RunnerVersion
+	}
+	return ""
+}
+
+func (x *JobSpec) GetRunnerEnvironment() string {
+	if x != nil {
+		return x.RunnerEnvironment
+	}
+	return ""
+}
+
+func (x *JobSpec) GetDebug() bool {
+	if x != nil {
+		return x.Debug
+	}
+	return false
+}
+
+func (x *JobSpec) GetDeadlineMs() int64 {
+	if x != nil {
+		return x.DeadlineMs
+	}
+	return 0
+}
+
 type Output struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Stream        StreamKind             `protobuf:"varint,1,opt,name=stream,proto3,enum=ermite.runner.exec.v1.StreamKind" json:"stream,omitempty"`
@@ -335,7 +660,7 @@ type Output struct {
 
 func (x *Output) Reset() {
 	*x = Output{}
-	mi := &file_exec_proto_msgTypes[3]
+	mi := &file_exec_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -347,7 +672,7 @@ func (x *Output) String() string {
 func (*Output) ProtoMessage() {}
 
 func (x *Output) ProtoReflect() protoreflect.Message {
-	mi := &file_exec_proto_msgTypes[3]
+	mi := &file_exec_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -360,7 +685,7 @@ func (x *Output) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Output.ProtoReflect.Descriptor instead.
 func (*Output) Descriptor() ([]byte, []int) {
-	return file_exec_proto_rawDescGZIP(), []int{3}
+	return file_exec_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *Output) GetStream() StreamKind {
@@ -394,7 +719,7 @@ type Exit struct {
 
 func (x *Exit) Reset() {
 	*x = Exit{}
-	mi := &file_exec_proto_msgTypes[4]
+	mi := &file_exec_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -406,7 +731,7 @@ func (x *Exit) String() string {
 func (*Exit) ProtoMessage() {}
 
 func (x *Exit) ProtoReflect() protoreflect.Message {
-	mi := &file_exec_proto_msgTypes[4]
+	mi := &file_exec_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -419,7 +744,7 @@ func (x *Exit) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Exit.ProtoReflect.Descriptor instead.
 func (*Exit) Descriptor() ([]byte, []int) {
-	return file_exec_proto_rawDescGZIP(), []int{4}
+	return file_exec_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *Exit) GetCode() int32 {
@@ -443,14 +768,17 @@ type Cancel struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// reason is for the job log and diagnostics ("cancelled by the user",
 	// "job timeout", ...); it never changes the behaviour.
-	Reason        string `protobuf:"bytes,1,opt,name=reason,proto3" json:"reason,omitempty"`
+	Reason string `protobuf:"bytes,1,opt,name=reason,proto3" json:"reason,omitempty"`
+	// kind tells the job executor how the job ends: cancelled, timed out, or
+	// cancelled because the runner shuts down. The stub executor ignores it.
+	Kind          CancelKind `protobuf:"varint,2,opt,name=kind,proto3,enum=ermite.runner.exec.v1.CancelKind" json:"kind,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Cancel) Reset() {
 	*x = Cancel{}
-	mi := &file_exec_proto_msgTypes[5]
+	mi := &file_exec_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -462,7 +790,7 @@ func (x *Cancel) String() string {
 func (*Cancel) ProtoMessage() {}
 
 func (x *Cancel) ProtoReflect() protoreflect.Message {
-	mi := &file_exec_proto_msgTypes[5]
+	mi := &file_exec_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -475,7 +803,7 @@ func (x *Cancel) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Cancel.ProtoReflect.Descriptor instead.
 func (*Cancel) Descriptor() ([]byte, []int) {
-	return file_exec_proto_rawDescGZIP(), []int{5}
+	return file_exec_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *Cancel) GetReason() string {
@@ -485,43 +813,382 @@ func (x *Cancel) GetReason() string {
 	return ""
 }
 
+func (x *Cancel) GetKind() CancelKind {
+	if x != nil {
+		return x.Kind
+	}
+	return CancelKind_CANCEL_KIND_UNSPECIFIED
+}
+
+// Steps are numbered like GitHub's log: "Set up job" is 1, the steps of the
+// workflow follow, "Complete job" is last.
+type StepStarted struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Number        int32                  `protobuf:"varint,1,opt,name=number,proto3" json:"number,omitempty"`
+	Name          string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	UnixNano      int64                  `protobuf:"varint,3,opt,name=unix_nano,json=unixNano,proto3" json:"unix_nano,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StepStarted) Reset() {
+	*x = StepStarted{}
+	mi := &file_exec_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StepStarted) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StepStarted) ProtoMessage() {}
+
+func (x *StepStarted) ProtoReflect() protoreflect.Message {
+	mi := &file_exec_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StepStarted.ProtoReflect.Descriptor instead.
+func (*StepStarted) Descriptor() ([]byte, []int) {
+	return file_exec_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *StepStarted) GetNumber() int32 {
+	if x != nil {
+		return x.Number
+	}
+	return 0
+}
+
+func (x *StepStarted) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *StepStarted) GetUnixNano() int64 {
+	if x != nil {
+		return x.UnixNano
+	}
+	return 0
+}
+
+type StepCompleted struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Number        int32                  `protobuf:"varint,1,opt,name=number,proto3" json:"number,omitempty"`
+	Name          string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	Conclusion    StepConclusion         `protobuf:"varint,3,opt,name=conclusion,proto3,enum=ermite.runner.exec.v1.StepConclusion" json:"conclusion,omitempty"`
+	UnixNano      int64                  `protobuf:"varint,4,opt,name=unix_nano,json=unixNano,proto3" json:"unix_nano,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StepCompleted) Reset() {
+	*x = StepCompleted{}
+	mi := &file_exec_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StepCompleted) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StepCompleted) ProtoMessage() {}
+
+func (x *StepCompleted) ProtoReflect() protoreflect.Message {
+	mi := &file_exec_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StepCompleted.ProtoReflect.Descriptor instead.
+func (*StepCompleted) Descriptor() ([]byte, []int) {
+	return file_exec_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *StepCompleted) GetNumber() int32 {
+	if x != nil {
+		return x.Number
+	}
+	return 0
+}
+
+func (x *StepCompleted) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *StepCompleted) GetConclusion() StepConclusion {
+	if x != nil {
+		return x.Conclusion
+	}
+	return StepConclusion_STEP_CONCLUSION_UNSPECIFIED
+}
+
+func (x *StepCompleted) GetUnixNano() int64 {
+	if x != nil {
+		return x.UnixNano
+	}
+	return 0
+}
+
+// Log is one line of the job log, without terminator, valid UTF-8. A line of
+// more than 64 KiB is cut by the executor into pieces at character boundaries;
+// every piece but the first has continued set (the AppendLog rule).
+type Log struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Step          int32                  `protobuf:"varint,1,opt,name=step,proto3" json:"step,omitempty"`
+	UnixNano      int64                  `protobuf:"varint,2,opt,name=unix_nano,json=unixNano,proto3" json:"unix_nano,omitempty"`
+	Text          string                 `protobuf:"bytes,3,opt,name=text,proto3" json:"text,omitempty"`
+	Continued     bool                   `protobuf:"varint,4,opt,name=continued,proto3" json:"continued,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Log) Reset() {
+	*x = Log{}
+	mi := &file_exec_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Log) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Log) ProtoMessage() {}
+
+func (x *Log) ProtoReflect() protoreflect.Message {
+	mi := &file_exec_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Log.ProtoReflect.Descriptor instead.
+func (*Log) Descriptor() ([]byte, []int) {
+	return file_exec_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *Log) GetStep() int32 {
+	if x != nil {
+		return x.Step
+	}
+	return 0
+}
+
+func (x *Log) GetUnixNano() int64 {
+	if x != nil {
+		return x.UnixNano
+	}
+	return 0
+}
+
+func (x *Log) GetText() string {
+	if x != nil {
+		return x.Text
+	}
+	return ""
+}
+
+func (x *Log) GetContinued() bool {
+	if x != nil {
+		return x.Continued
+	}
+	return false
+}
+
+// JobResult is the outcome of the job; Exit follows.
+type JobResult struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	Conclusion     StepConclusion         `protobuf:"varint,1,opt,name=conclusion,proto3,enum=ermite.runner.exec.v1.StepConclusion" json:"conclusion,omitempty"`
+	Outputs        map[string]string      `protobuf:"bytes,2,rep,name=outputs,proto3" json:"outputs,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	Error          string                 `protobuf:"bytes,3,opt,name=error,proto3" json:"error,omitempty"`
+	RunnerShutdown bool                   `protobuf:"varint,4,opt,name=runner_shutdown,json=runnerShutdown,proto3" json:"runner_shutdown,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *JobResult) Reset() {
+	*x = JobResult{}
+	mi := &file_exec_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *JobResult) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*JobResult) ProtoMessage() {}
+
+func (x *JobResult) ProtoReflect() protoreflect.Message {
+	mi := &file_exec_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use JobResult.ProtoReflect.Descriptor instead.
+func (*JobResult) Descriptor() ([]byte, []int) {
+	return file_exec_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *JobResult) GetConclusion() StepConclusion {
+	if x != nil {
+		return x.Conclusion
+	}
+	return StepConclusion_STEP_CONCLUSION_UNSPECIFIED
+}
+
+func (x *JobResult) GetOutputs() map[string]string {
+	if x != nil {
+		return x.Outputs
+	}
+	return nil
+}
+
+func (x *JobResult) GetError() string {
+	if x != nil {
+		return x.Error
+	}
+	return ""
+}
+
+func (x *JobResult) GetRunnerShutdown() bool {
+	if x != nil {
+		return x.RunnerShutdown
+	}
+	return false
+}
+
 var File_exec_proto protoreflect.FileDescriptor
 
 const file_exec_proto_rawDesc = "" +
 	"\n" +
 	"\n" +
-	"exec.proto\x12\x15ermite.runner.exec.v1\"\x9a\x02\n" +
+	"exec.proto\x12\x15ermite.runner.exec.v1\"\xa5\x04\n" +
 	"\x05Frame\x124\n" +
 	"\x05hello\x18\x01 \x01(\v2\x1c.ermite.runner.exec.v1.HelloH\x00R\x05hello\x12.\n" +
 	"\x03run\x18\x02 \x01(\v2\x1a.ermite.runner.exec.v1.RunH\x00R\x03run\x127\n" +
 	"\x06output\x18\x03 \x01(\v2\x1d.ermite.runner.exec.v1.OutputH\x00R\x06output\x121\n" +
 	"\x04exit\x18\x04 \x01(\v2\x1b.ermite.runner.exec.v1.ExitH\x00R\x04exit\x127\n" +
-	"\x06cancel\x18\x05 \x01(\v2\x1d.ermite.runner.exec.v1.CancelH\x00R\x06cancelB\x06\n" +
+	"\x06cancel\x18\x05 \x01(\v2\x1d.ermite.runner.exec.v1.CancelH\x00R\x06cancel\x12G\n" +
+	"\fstep_started\x18\x06 \x01(\v2\".ermite.runner.exec.v1.StepStartedH\x00R\vstepStarted\x12M\n" +
+	"\x0estep_completed\x18\a \x01(\v2$.ermite.runner.exec.v1.StepCompletedH\x00R\rstepCompleted\x12.\n" +
+	"\x03log\x18\b \x01(\v2\x1a.ermite.runner.exec.v1.LogH\x00R\x03log\x12A\n" +
+	"\n" +
+	"job_result\x18\t \x01(\v2 .ermite.runner.exec.v1.JobResultH\x00R\tjobResultB\x06\n" +
 	"\x04body\"W\n" +
 	"\x05Hello\x12\x18\n" +
 	"\aversion\x18\x01 \x01(\tR\aversion\x12\x18\n" +
 	"\asandbox\x18\x02 \x01(\tR\asandbox\x12\x1a\n" +
-	"\bhostname\x18\x03 \x01(\tR\bhostname\"\x8c\x01\n" +
+	"\bhostname\x18\x03 \x01(\tR\bhostname\"\xbe\x01\n" +
 	"\x03Run\x12\x16\n" +
 	"\x06script\x18\x01 \x01(\tR\x06script\x125\n" +
-	"\x03env\x18\x02 \x03(\v2#.ermite.runner.exec.v1.Run.EnvEntryR\x03env\x1a6\n" +
+	"\x03env\x18\x02 \x03(\v2#.ermite.runner.exec.v1.Run.EnvEntryR\x03env\x120\n" +
+	"\x03job\x18\x03 \x01(\v2\x1e.ermite.runner.exec.v1.JobSpecR\x03job\x1a6\n" +
 	"\bEnvEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"t\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x8b\x03\n" +
+	"\aJobSpec\x12#\n" +
+	"\rworkflow_path\x18\x01 \x01(\tR\fworkflowPath\x12#\n" +
+	"\rworkflow_yaml\x18\x02 \x01(\tR\fworkflowYaml\x12\x17\n" +
+	"\ajob_key\x18\x03 \x01(\tR\x06jobKey\x12\x16\n" +
+	"\x06matrix\x18\x04 \x01(\tR\x06matrix\x12\x1a\n" +
+	"\bcontexts\x18\x05 \x01(\tR\bcontexts\x12\x12\n" +
+	"\x04repo\x18\x06 \x01(\tR\x04repo\x12'\n" +
+	"\x0ftimeout_minutes\x18\a \x01(\x05R\x0etimeoutMinutes\x12\x1f\n" +
+	"\vrunner_name\x18\b \x01(\tR\n" +
+	"runnerName\x12%\n" +
+	"\x0erunner_version\x18\t \x01(\tR\rrunnerVersion\x12-\n" +
+	"\x12runner_environment\x18\n" +
+	" \x01(\tR\x11runnerEnvironment\x12\x14\n" +
+	"\x05debug\x18\v \x01(\bR\x05debug\x12\x1f\n" +
+	"\vdeadline_ms\x18\f \x01(\x03R\n" +
+	"deadlineMs\"t\n" +
 	"\x06Output\x129\n" +
 	"\x06stream\x18\x01 \x01(\x0e2!.ermite.runner.exec.v1.StreamKindR\x06stream\x12\x12\n" +
 	"\x04data\x18\x02 \x01(\fR\x04data\x12\x1b\n" +
 	"\tunix_nano\x18\x03 \x01(\x03R\bunixNano\"0\n" +
 	"\x04Exit\x12\x12\n" +
 	"\x04code\x18\x01 \x01(\x05R\x04code\x12\x14\n" +
-	"\x05error\x18\x02 \x01(\tR\x05error\" \n" +
+	"\x05error\x18\x02 \x01(\tR\x05error\"W\n" +
 	"\x06Cancel\x12\x16\n" +
-	"\x06reason\x18\x01 \x01(\tR\x06reason*Y\n" +
+	"\x06reason\x18\x01 \x01(\tR\x06reason\x125\n" +
+	"\x04kind\x18\x02 \x01(\x0e2!.ermite.runner.exec.v1.CancelKindR\x04kind\"V\n" +
+	"\vStepStarted\x12\x16\n" +
+	"\x06number\x18\x01 \x01(\x05R\x06number\x12\x12\n" +
+	"\x04name\x18\x02 \x01(\tR\x04name\x12\x1b\n" +
+	"\tunix_nano\x18\x03 \x01(\x03R\bunixNano\"\x9f\x01\n" +
+	"\rStepCompleted\x12\x16\n" +
+	"\x06number\x18\x01 \x01(\x05R\x06number\x12\x12\n" +
+	"\x04name\x18\x02 \x01(\tR\x04name\x12E\n" +
+	"\n" +
+	"conclusion\x18\x03 \x01(\x0e2%.ermite.runner.exec.v1.StepConclusionR\n" +
+	"conclusion\x12\x1b\n" +
+	"\tunix_nano\x18\x04 \x01(\x03R\bunixNano\"h\n" +
+	"\x03Log\x12\x12\n" +
+	"\x04step\x18\x01 \x01(\x05R\x04step\x12\x1b\n" +
+	"\tunix_nano\x18\x02 \x01(\x03R\bunixNano\x12\x12\n" +
+	"\x04text\x18\x03 \x01(\tR\x04text\x12\x1c\n" +
+	"\tcontinued\x18\x04 \x01(\bR\tcontinued\"\x96\x02\n" +
+	"\tJobResult\x12E\n" +
+	"\n" +
+	"conclusion\x18\x01 \x01(\x0e2%.ermite.runner.exec.v1.StepConclusionR\n" +
+	"conclusion\x12G\n" +
+	"\aoutputs\x18\x02 \x03(\v2-.ermite.runner.exec.v1.JobResult.OutputsEntryR\aoutputs\x12\x14\n" +
+	"\x05error\x18\x03 \x01(\tR\x05error\x12'\n" +
+	"\x0frunner_shutdown\x18\x04 \x01(\bR\x0erunnerShutdown\x1a:\n" +
+	"\fOutputsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01*Y\n" +
 	"\n" +
 	"StreamKind\x12\x1b\n" +
 	"\x17STREAM_KIND_UNSPECIFIED\x10\x00\x12\x16\n" +
 	"\x12STREAM_KIND_STDOUT\x10\x01\x12\x16\n" +
-	"\x12STREAM_KIND_STDERR\x10\x02B4Z2bnema.dev/ermite-runner/internal/execstream/execpbb\x06proto3"
+	"\x12STREAM_KIND_STDERR\x10\x02*r\n" +
+	"\n" +
+	"CancelKind\x12\x1b\n" +
+	"\x17CANCEL_KIND_UNSPECIFIED\x10\x00\x12\x14\n" +
+	"\x10CANCEL_KIND_USER\x10\x01\x12\x17\n" +
+	"\x13CANCEL_KIND_TIMEOUT\x10\x02\x12\x18\n" +
+	"\x14CANCEL_KIND_SHUTDOWN\x10\x03*\xc6\x01\n" +
+	"\x0eStepConclusion\x12\x1f\n" +
+	"\x1bSTEP_CONCLUSION_UNSPECIFIED\x10\x00\x12\x1b\n" +
+	"\x17STEP_CONCLUSION_SUCCESS\x10\x01\x12\x1b\n" +
+	"\x17STEP_CONCLUSION_FAILURE\x10\x02\x12\x1d\n" +
+	"\x19STEP_CONCLUSION_CANCELLED\x10\x03\x12\x1b\n" +
+	"\x17STEP_CONCLUSION_SKIPPED\x10\x04\x12\x1d\n" +
+	"\x19STEP_CONCLUSION_TIMED_OUT\x10\x05B4Z2bnema.dev/ermite-runner/internal/execstream/execpbb\x06proto3"
 
 var (
 	file_exec_proto_rawDescOnce sync.Once
@@ -535,31 +1202,48 @@ func file_exec_proto_rawDescGZIP() []byte {
 	return file_exec_proto_rawDescData
 }
 
-var file_exec_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_exec_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
+var file_exec_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
+var file_exec_proto_msgTypes = make([]protoimpl.MessageInfo, 13)
 var file_exec_proto_goTypes = []any{
-	(StreamKind)(0), // 0: ermite.runner.exec.v1.StreamKind
-	(*Frame)(nil),   // 1: ermite.runner.exec.v1.Frame
-	(*Hello)(nil),   // 2: ermite.runner.exec.v1.Hello
-	(*Run)(nil),     // 3: ermite.runner.exec.v1.Run
-	(*Output)(nil),  // 4: ermite.runner.exec.v1.Output
-	(*Exit)(nil),    // 5: ermite.runner.exec.v1.Exit
-	(*Cancel)(nil),  // 6: ermite.runner.exec.v1.Cancel
-	nil,             // 7: ermite.runner.exec.v1.Run.EnvEntry
+	(StreamKind)(0),       // 0: ermite.runner.exec.v1.StreamKind
+	(CancelKind)(0),       // 1: ermite.runner.exec.v1.CancelKind
+	(StepConclusion)(0),   // 2: ermite.runner.exec.v1.StepConclusion
+	(*Frame)(nil),         // 3: ermite.runner.exec.v1.Frame
+	(*Hello)(nil),         // 4: ermite.runner.exec.v1.Hello
+	(*Run)(nil),           // 5: ermite.runner.exec.v1.Run
+	(*JobSpec)(nil),       // 6: ermite.runner.exec.v1.JobSpec
+	(*Output)(nil),        // 7: ermite.runner.exec.v1.Output
+	(*Exit)(nil),          // 8: ermite.runner.exec.v1.Exit
+	(*Cancel)(nil),        // 9: ermite.runner.exec.v1.Cancel
+	(*StepStarted)(nil),   // 10: ermite.runner.exec.v1.StepStarted
+	(*StepCompleted)(nil), // 11: ermite.runner.exec.v1.StepCompleted
+	(*Log)(nil),           // 12: ermite.runner.exec.v1.Log
+	(*JobResult)(nil),     // 13: ermite.runner.exec.v1.JobResult
+	nil,                   // 14: ermite.runner.exec.v1.Run.EnvEntry
+	nil,                   // 15: ermite.runner.exec.v1.JobResult.OutputsEntry
 }
 var file_exec_proto_depIdxs = []int32{
-	2, // 0: ermite.runner.exec.v1.Frame.hello:type_name -> ermite.runner.exec.v1.Hello
-	3, // 1: ermite.runner.exec.v1.Frame.run:type_name -> ermite.runner.exec.v1.Run
-	4, // 2: ermite.runner.exec.v1.Frame.output:type_name -> ermite.runner.exec.v1.Output
-	5, // 3: ermite.runner.exec.v1.Frame.exit:type_name -> ermite.runner.exec.v1.Exit
-	6, // 4: ermite.runner.exec.v1.Frame.cancel:type_name -> ermite.runner.exec.v1.Cancel
-	7, // 5: ermite.runner.exec.v1.Run.env:type_name -> ermite.runner.exec.v1.Run.EnvEntry
-	0, // 6: ermite.runner.exec.v1.Output.stream:type_name -> ermite.runner.exec.v1.StreamKind
-	7, // [7:7] is the sub-list for method output_type
-	7, // [7:7] is the sub-list for method input_type
-	7, // [7:7] is the sub-list for extension type_name
-	7, // [7:7] is the sub-list for extension extendee
-	0, // [0:7] is the sub-list for field type_name
+	4,  // 0: ermite.runner.exec.v1.Frame.hello:type_name -> ermite.runner.exec.v1.Hello
+	5,  // 1: ermite.runner.exec.v1.Frame.run:type_name -> ermite.runner.exec.v1.Run
+	7,  // 2: ermite.runner.exec.v1.Frame.output:type_name -> ermite.runner.exec.v1.Output
+	8,  // 3: ermite.runner.exec.v1.Frame.exit:type_name -> ermite.runner.exec.v1.Exit
+	9,  // 4: ermite.runner.exec.v1.Frame.cancel:type_name -> ermite.runner.exec.v1.Cancel
+	10, // 5: ermite.runner.exec.v1.Frame.step_started:type_name -> ermite.runner.exec.v1.StepStarted
+	11, // 6: ermite.runner.exec.v1.Frame.step_completed:type_name -> ermite.runner.exec.v1.StepCompleted
+	12, // 7: ermite.runner.exec.v1.Frame.log:type_name -> ermite.runner.exec.v1.Log
+	13, // 8: ermite.runner.exec.v1.Frame.job_result:type_name -> ermite.runner.exec.v1.JobResult
+	14, // 9: ermite.runner.exec.v1.Run.env:type_name -> ermite.runner.exec.v1.Run.EnvEntry
+	6,  // 10: ermite.runner.exec.v1.Run.job:type_name -> ermite.runner.exec.v1.JobSpec
+	0,  // 11: ermite.runner.exec.v1.Output.stream:type_name -> ermite.runner.exec.v1.StreamKind
+	1,  // 12: ermite.runner.exec.v1.Cancel.kind:type_name -> ermite.runner.exec.v1.CancelKind
+	2,  // 13: ermite.runner.exec.v1.StepCompleted.conclusion:type_name -> ermite.runner.exec.v1.StepConclusion
+	2,  // 14: ermite.runner.exec.v1.JobResult.conclusion:type_name -> ermite.runner.exec.v1.StepConclusion
+	15, // 15: ermite.runner.exec.v1.JobResult.outputs:type_name -> ermite.runner.exec.v1.JobResult.OutputsEntry
+	16, // [16:16] is the sub-list for method output_type
+	16, // [16:16] is the sub-list for method input_type
+	16, // [16:16] is the sub-list for extension type_name
+	16, // [16:16] is the sub-list for extension extendee
+	0,  // [0:16] is the sub-list for field type_name
 }
 
 func init() { file_exec_proto_init() }
@@ -573,14 +1257,18 @@ func file_exec_proto_init() {
 		(*Frame_Output)(nil),
 		(*Frame_Exit)(nil),
 		(*Frame_Cancel)(nil),
+		(*Frame_StepStarted)(nil),
+		(*Frame_StepCompleted)(nil),
+		(*Frame_Log)(nil),
+		(*Frame_JobResult)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_exec_proto_rawDesc), len(file_exec_proto_rawDesc)),
-			NumEnums:      1,
-			NumMessages:   7,
+			NumEnums:      3,
+			NumMessages:   13,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
