@@ -60,11 +60,18 @@ type jobState struct {
 	complete *ermite.CompleteJobRequest
 }
 
+// Mount serves a RunnerService handler where ermite does: under /-/api, so
+// that a client that forgets the prefix fails here as it would against ermite.
+func Mount(path string, h http.Handler) http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("/-/api"+path, http.StripPrefix("/-/api", h))
+	return mux
+}
+
 // New starts the server; Close stops it.
 func New() *Server {
 	s := &Server{jobs: map[string]*jobState{}, assigned: map[string]*ermite.Job{}, done: make(chan string, 256)}
-	_, h := ermiteconnect.NewRunnerServiceHandler(s)
-	s.srv = httptest.NewServer(h)
+	s.srv = httptest.NewServer(Mount(ermiteconnect.NewRunnerServiceHandler(s)))
 	s.URL = s.srv.URL
 	return s
 }

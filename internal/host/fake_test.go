@@ -273,8 +273,7 @@ func (s *fakeServer) WatchJob(ctx context.Context, r *connect.Request[ermite.Wat
 // start serves the handler over HTTP/1.1 on a local port (Connect streams server messages over it) and returns its URL.
 func (s *fakeServer) start(t *testing.T) string {
 	t.Helper()
-	_, h := ermiteconnect.NewRunnerServiceHandler(s)
-	srv := httptest.NewServer(h)
+	srv := httptest.NewServer(hosttest.Mount(ermiteconnect.NewRunnerServiceHandler(s)))
 	t.Cleanup(srv.Close)
 	return srv.URL
 }
