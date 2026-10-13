@@ -17,9 +17,20 @@ import (
 // base64 at the three byte offsets a prefix of one or two bytes can give
 // ("user:" + secret is base64-encoded as a whole), and its JSON and URI
 // escapes. Longer forms are replaced first.
+//
+// Bytes that follow the secret change the last, incomplete group of its base64
+// (`echo "$T" | base64` appends a newline), so each base64 form is also
+// registered without that group: only the characters the secret alone
+// determines. (The actions/runner sources are not in $CLONED_REPOS_HOME, so
+// this was not compared with its ValueEncoders.)
 type masker struct{ values []string }
 
 const maskedValue = "***"
+
+// minBase64Tail is the shortest base64 form, in characters, registered once its
+// incomplete last group is removed: a shorter one (3 bytes of the secret)
+// would mask ordinary text.
+const minBase64Tail = 8
 
 func newMasker(secrets ...string) *masker {
 	seen := map[string]bool{}
@@ -45,10 +56,14 @@ func secretEncodings(v string) []string {
 	var out []string
 	b := []byte(v)
 	for shift := range 3 {
-		if len(b) > shift {
-			out = append(out, base64.StdEncoding.EncodeToString(b[shift:]))
-		} else if shift == 0 {
-			out = append(out, base64.StdEncoding.EncodeToString(b))
+		if len(b) <= shift && shift != 0 {
+			continue
+		}
+		sub := b[shift:]
+		out = append(out, base64.StdEncoding.EncodeToString(sub))
+		// Whole groups only: 3 bytes give 4 characters that no later byte changes.
+		if n := len(sub) / 3 * 4; n >= minBase64Tail {
+			out = append(out, base64.StdEncoding.EncodeToString(sub[:len(sub)/3*3]))
 		}
 	}
 	if j, err := json.Marshal(v); err == nil && len(j) > 2 {

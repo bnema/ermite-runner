@@ -56,6 +56,41 @@ func TestMaskerForms(t *testing.T) {
 	}
 }
 
+// Bytes after the secret change the end of its base64 (`echo "$T" | base64`
+// appends a newline): the part the secret alone determines is still masked, at
+// the three offsets and whatever the length of the secret.
+func TestMaskerBase64FollowedByOtherBytes(t *testing.T) {
+	for _, secret := range []string{testToken, testToken + "4", testToken + "45", "ghs_0123456789abcdef"} {
+		m := newMasker(secret)
+		for shift := 0; shift < 3; shift++ {
+			prefix := strings.Repeat("p", shift)
+			for _, suffix := range []string{"\n", "!", "xy", " and more text"} {
+				enc := base64.StdEncoding.EncodeToString([]byte(prefix + secret + suffix))
+				text := "out: " + enc + " :end"
+				got := m.mask(text)
+				if !m.has(text) || got == text || !strings.Contains(got, "***") {
+					t.Errorf("secret %q, prefix %q, suffix %q: %q -> %q", secret, prefix, suffix, text, got)
+					continue
+				}
+				// the groups the secret alone determines are gone
+				if strings.Contains(got, enc[4:12]) {
+					t.Errorf("secret %q, prefix %q, suffix %q: %q still has the secret", secret, prefix, suffix, got)
+				}
+			}
+		}
+	}
+	// the exact case of the review
+	m := newMasker(testToken)
+	if got := m.mask("Z2hzX3Rlc3R0b2tlbjEyMwo="); got == "Z2hzX3Rlc3R0b2tlbjEyMwo=" {
+		t.Errorf("echo $T | base64 is not masked: %q", got)
+	}
+	// a short secret does not mask the base64 of a few common bytes
+	short := newMasker("abcd")
+	if got := short.mask("YWJj"); got != "YWJj" {
+		t.Errorf("a short tail is masked: %q", got)
+	}
+}
+
 // The name of a step that holds the token is masked before it reaches the
 // server (StepStarted and StepCompleted).
 func TestStepNameIsMasked(t *testing.T) {
