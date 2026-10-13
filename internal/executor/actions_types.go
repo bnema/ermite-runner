@@ -133,11 +133,7 @@ type node struct {
 	// postRegistered is Root.StepsWithPostRegistered / EmbeddedStepsWithPostRegistered.
 	postRegistered bool
 	postCond       string
-	// preScope is the random steps context of the pre stage of a composite.
-	preScope string
 }
-
-func (n *node) isRun() bool { return n.st.Run != nil }
 
 // setState keeps a value of the intra-action state: keys compare without case
 // (the runner's dictionary is OrdinalIgnoreCase) and keep the first spelling.

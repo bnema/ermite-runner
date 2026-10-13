@@ -374,7 +374,7 @@ runs:
 
 func TestCompositePostOfInnerStepsRunsInOuterPost(t *testing.T) {
 	tree := files{
-		"c/action.yml": "name: c\nruns:\n  using: composite\n  steps:\n    - uses: ./n1\n    - uses: ./n2\n",
+		"c/action.yml":  "name: c\nruns:\n  using: composite\n  steps:\n    - uses: ./n1\n    - uses: ./n2\n",
 		"n1/action.yml": "name: n1\nruns:\n  using: node20\n  main: m.sh\n  post: p.sh\n", "n1/m.sh": "echo main1\n", "n1/p.sh": "echo post1\n",
 		"n2/action.yml": "name: n2\nruns:\n  using: node20\n  main: m.sh\n  post: p.sh\n", "n2/m.sh": "echo main2\n", "n2/p.sh": "echo post2\n",
 	}

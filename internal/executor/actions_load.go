@@ -74,7 +74,7 @@ func (j *job) loadDef(num int, dir string) (*actionDef, error) {
 		case action.RunsDocker:
 			d.image = act.Runs.Image
 		case action.RunsPlugin:
-			return nil, fmt.Errorf("Unsupported action type: Plugin")
+			return nil, ghErrorf("Unsupported action type: Plugin")
 		}
 		return d, nil
 	}

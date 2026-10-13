@@ -164,11 +164,11 @@ func (j *job) runNode(s *stepRun, def *actionDef, in *inputSet, env *ordered, ca
 	}
 	fail := func(err error) stepResult { j.errorf(num, "%s", err.Error()); return resFailed }
 	if target == "" {
-		return fail(fmt.Errorf("Value cannot be null or empty. (Parameter 'target')"))
+		return fail(ghErrorf("Value cannot be null or empty. (Parameter 'target')"))
 	}
 	script := filepath.Join(def.dir, filepath.FromSlash(target))
 	if st, err := os.Stat(script); err != nil || st.IsDir() {
-		return fail(fmt.Errorf("File not found: '%s'", script))
+		return fail(ghErrorf("File not found: '%s'", script))
 	}
 	j.mu.Lock()
 	wd := j.state.GitHub("workspace")

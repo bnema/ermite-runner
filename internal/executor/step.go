@@ -37,24 +37,14 @@ type stepRun struct {
 	// fork for an embedded one.
 	fc *FileCommands
 	// actEnv, when set, is the environment of the process of an action step
-	// (env context, STATE_ and INPUT_); rawEnv replaces the whole environment
-	// of the process (docker, whose -e options read it).
-	actEnv, rawEnv *ordered
-	rawEnvList     []string
-	quietExit      bool
+	// (env context, STATE_ and INPUT_); rawEnvList replaces the whole
+	// environment of the process (docker, whose -e options read it).
+	actEnv     *ordered
+	rawEnvList []string
 	// displayName is the name of the step in the log; def the action it runs.
 	displayName string
 	def         *actionDef
 	nodeVersion string
-}
-
-// depth is the number of composite actions around the step.
-func (s *stepRun) depth() int {
-	d := 0
-	for p := s.parent; p != nil; p = p.parent {
-		d++
-	}
-	return d
 }
 
 // procEnv is the environment of the process the step starts.

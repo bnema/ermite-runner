@@ -33,7 +33,7 @@ func (j *job) definition(s *stepRun) (*actionDef, error) {
 		dir := j.actionDir(n)
 		def, err := j.loadDef(s.num, dir)
 		if err == errNoAction {
-			return nil, fmt.Errorf("Can't find 'action.yml', 'action.yaml' or 'Dockerfile' under '%s'. Did you forget to run actions/checkout before running your local action?", filepath.Clean(dir))
+			return nil, ghErrorf("Can't find 'action.yml', 'action.yaml' or 'Dockerfile' under '%s'. Did you forget to run actions/checkout before running your local action?", filepath.Clean(dir))
 		}
 		if err != nil {
 			return nil, err
@@ -42,7 +42,7 @@ func (j *job) definition(s *stepRun) (*actionDef, error) {
 		return def, nil
 	}
 	if n.def == nil {
-		return nil, fmt.Errorf("The action '%s' was not prepared", refString(n.uses))
+		return nil, ghErrorf("The action '%s' was not prepared", refString(n.uses))
 	}
 	return n.def, nil
 }
@@ -198,7 +198,7 @@ func (j *job) runAction(s *stepRun, cancel <-chan struct{}) stepResult {
 	case kindComposite:
 		return j.runComposite(s, def, in, env)
 	}
-	return fail(fmt.Errorf("Unsupported action type: %v", def.kind))
+	return fail(ghErrorf("Unsupported action type: %v", def.kind))
 }
 
 // hasPostOf is HasPost of the loaded definition of the node.

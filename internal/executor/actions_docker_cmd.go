@@ -5,7 +5,6 @@ package executor
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"fmt"
 	"os"
 	"os/exec"
 	"regexp"
@@ -188,7 +187,7 @@ func (j *job) runDockerCmd(s *stepRun, c dockerCmd, dir string, env []string, ca
 }
 
 // errCancelled is a docker command stopped by the cancellation of the step.
-var errCancelled = fmt.Errorf("The operation was canceled.")
+var errCancelled = ghErrorf("The operation was canceled.")
 
 func dirOrCwd(d string) string {
 	if st, err := os.Stat(d); err == nil && st.IsDir() {

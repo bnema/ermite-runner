@@ -4,7 +4,6 @@ package executor
 
 import (
 	"context"
-	"fmt"
 	"strings"
 
 	"bnema.dev/ermite-actions/action"
@@ -59,7 +58,7 @@ func lookupKey(n *node) (string, error) {
 // it runs.
 func (j *job) prepare(ctx context.Context, num int, nodes []*node, depth int, parent *node) error {
 	if depth > compositeMaxDepth {
-		return fmt.Errorf("Composite action depth exceeded max depth %d", compositeMaxDepth)
+		return ghErrorf("Composite action depth exceeded max depth %d", compositeMaxDepth)
 	}
 	st := j.actions
 	var repoNodes []*node
@@ -67,7 +66,7 @@ func (j *job) prepare(ctx context.Context, num int, nodes []*node, depth int, pa
 		switch n.uses.Kind {
 		case action.UsesDocker:
 			if n.uses.Image == "" {
-				return fmt.Errorf("Value cannot be null or empty. (Parameter 'Image')")
+				return ghErrorf("Value cannot be null or empty. (Parameter 'Image')")
 			}
 			if _, ok := st.pullUsers[n.uses.Image]; !ok {
 				st.pullOrder = append(st.pullOrder, n.uses.Image)
@@ -94,7 +93,7 @@ func (j *job) prepare(ctx context.Context, num int, nodes []*node, depth int, pa
 		}
 		ra, ok := infos[key]
 		if !ok {
-			return fmt.Errorf("Missing download info for %s", key)
+			return ghErrorf("Missing download info for %s", key)
 		}
 		dir := j.actionDirOfRepo(n)
 		// The directory of the archive is the one of the repository itself: the
@@ -180,7 +179,7 @@ func (j *job) prepareRepositoryAction(ctx context.Context, num int, n *node, dep
 	dir := j.actionDir(n)
 	def, err := j.loadDef(num, dir)
 	if err == errNoAction {
-		return fmt.Errorf("Can't find 'action.yml', 'action.yaml' or 'Dockerfile' for action '%s'.", refString(n.uses))
+		return ghErrorf("Can't find 'action.yml', 'action.yaml' or 'Dockerfile' for action '%s'.", refString(n.uses))
 	}
 	if err != nil {
 		return err

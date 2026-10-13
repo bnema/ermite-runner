@@ -118,7 +118,7 @@ func (j *job) fetch(ctx context.Context, url, token, file string) error {
 		return errAccessDenied{url}
 	case resp.StatusCode < 200 || resp.StatusCode > 299:
 		// HttpResponseMessage.EnsureSuccessStatusCode.
-		return fmt.Errorf("Response status code does not indicate success: %d (%s).", resp.StatusCode, http.StatusText(resp.StatusCode))
+		return ghErrorf("Response status code does not indicate success: %d (%s).", resp.StatusCode, http.StatusText(resp.StatusCode))
 	}
 	f, err := os.OpenFile(file, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
@@ -174,7 +174,7 @@ func (j *job) downloadAction(ctx context.Context, num int, ra ResolvedAction, na
 	err = extractTarball(af, staging, owner)
 	_ = af.Close()
 	if err != nil {
-		return fmt.Errorf("Can't extract the archive of action %s@%s: %w", name, ref, err)
+		return ghErrorf("Can't extract the archive of action %s@%s: %v", name, ref, err)
 	}
 	ents, err := os.ReadDir(staging)
 	if err != nil {

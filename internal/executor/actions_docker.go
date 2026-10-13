@@ -88,7 +88,7 @@ func (j *job) buildImage(s *stepRun, tag, dockerfile, workDir string, cancel <-c
 		return err
 	}
 	if code != 0 {
-		return fmt.Errorf("Docker build failed with exit code %d", code)
+		return ghErrorf("Docker build failed with exit code %d", code)
 	}
 	return nil
 }
@@ -127,7 +127,7 @@ func (j *job) runDocker(s *stepRun, def *actionDef, in *inputSet, env *ordered, 
 		}
 		if build != "" {
 			if _, err := os.Stat(build); err != nil {
-				return fail(fmt.Errorf("File not found: '%s'", build))
+				return fail(ghErrorf("File not found: '%s'", build))
 			}
 			j.out(num, "##[group]Building docker image")
 			j.out(num, fmt.Sprintf("Dockerfile for action: '%s'.", build))
