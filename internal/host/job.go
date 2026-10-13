@@ -575,7 +575,6 @@ func (j *jobRun) execute(ctx context.Context, rt *Runner, stopHard <-chan struct
 		j.failEarly(fmt.Sprintf("The runner has no free sandbox: %v", err))
 		return failure()
 	}
-
 	// Stop runs to completion even when the job context is done.
 	defer j.stopSandbox(ctx, rt, sb)
 
