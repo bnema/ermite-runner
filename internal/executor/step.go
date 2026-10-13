@@ -4,6 +4,7 @@ package executor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -159,6 +160,32 @@ func nodeServerEvaluable(n expr.Node) bool {
 	return true
 }
 
+// exceptionClasser is implemented by the errors of package expr that stand for
+// a .NET exception (expr.JSONError).
+type exceptionClasser interface{ ExceptionClass() string }
+
+// templateNotValid is the message of the TemplateValidationException the
+// runner throws when the evaluation of a template fails
+// (TemplateStrings.TemplateNotValidWithErrors): "The template is not valid. "
+// and the errors. With a position the error reads "file (Line: l, Col: c):
+// message" (recorded: expr-runtime-errors, step env and run). A step condition
+// has no position: the error is the exception itself, "Class: message"
+// (withLocation is false).
+func templateNotValid(err error, withLocation bool) string {
+	var te *template.Error
+	if !errors.As(err, &te) {
+		return err.Error()
+	}
+	if withLocation {
+		return "The template is not valid. " + te.Error()
+	}
+	var c exceptionClasser
+	if errors.As(err, &c) {
+		return "The template is not valid. " + c.ExceptionClass() + ": " + te.Raw
+	}
+	return te.Error()
+}
+
 func tokenSource(t template.Token) string {
 	if be, ok := t.(*template.BasicExpression); ok && be.Source != "" {
 		return be.Source
@@ -234,7 +261,7 @@ func (j *job) runStep(num int, st *workflow.Step) {
 	}
 
 	if envErr != nil {
-		j.errorf(num, "%s", envErr.Error())
+		j.errorf(num, "%s", templateNotValid(envErr, true))
 		complete(resFailed)
 		return
 	}
@@ -264,7 +291,7 @@ func (j *job) runStep(num int, st *workflow.Step) {
 	ok, err := cond()
 	switch {
 	case err != nil:
-		j.errorf(num, "%s", err.Error())
+		j.errorf(num, "%s", templateNotValid(err, false))
 		complete(resFailed)
 		return
 	case !ok:
