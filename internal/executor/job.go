@@ -286,13 +286,7 @@ func (j *job) debug(num int, msg string) {
 func (j *job) evalEnv(env *ordered) template.Env {
 	return template.Env{
 		Contexts: j.state.Values(env),
-		Funcs: map[string]expr.Func{
-			// hashFiles is a CI-2 feature: the schema allows it in steps, so it
-			// parses, and fails when evaluated.
-			"hashFiles": func(context.Context, []expr.Value) (expr.Value, error) {
-				return nil, errors.New("not supported yet: hashFiles")
-			},
-		},
+		Funcs:    map[string]expr.Func{"hashFiles": j.hashFilesFunc()},
 	}
 }
 
