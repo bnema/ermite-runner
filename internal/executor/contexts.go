@@ -477,11 +477,21 @@ func (s *State) Values(env *ordered) map[string]expr.Value {
 	return m
 }
 
-// secrets is the secrets context. The job's token is in it as GITHUB_TOKEN
-// (Variables.ToSecretsContext keeps every secret variable but the access token;
-// GitHub's job message carries the token as a secret named GITHUB_TOKEN, recorded:
-// ctx-inputs-vars, secrets.GITHUB_TOKEN == github.token). Without a token the
-// context is empty.
+// secrets is the secrets context. Today it holds one entry, GITHUB_TOKEN, as
+// on GitHub (Variables.ToSecretsContext lists the secret variables but the
+// access token; GitHub's message carries the token as the secret GITHUB_TOKEN,
+// recorded: ctx-inputs-vars, secrets.GITHUB_TOKEN == github.token).
+//
+// Where the value comes from: the "token" key of the github context that the
+// server sends in Job.contexts, the same value as github.token. It must be a
+// token of its own, scoped to the job (the permissions "Set up job" prints) and
+// short lived. It must never be the "ermitejob_" job token: that one
+// authenticates the runner's calls to ermite, stays in the runner host process
+// and must not reach the sandbox (runner.proto, "Secrets and trust"). ermite
+// does not send a token yet (planned for CI-3, with the secrets of the
+// repository); until it does, github.token is empty, so is secrets, and
+// a test of secrets.GITHUB_TOKEN against the empty string is false. Without a
+// token nothing is masked.
 func (s *State) secrets() *expr.Dictionary {
 	d := expr.NewDictionary()
 	if t := s.GitHub("token"); t != "" {
