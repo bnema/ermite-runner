@@ -37,9 +37,22 @@ Reaping removes every process, device, firewall rule and Docker object the runne
 
 ### Network policy (both modes)
 
-One nftables table, `inet ermite_runner`, replaced atomically (`nft -f -`) and deleted with the last sandbox; nothing else is touched. From a sandbox: to the host only DNS to its own gateway address, where the runner's DNS forwarder listens (UDP and TCP, forwarding to the resolvers of `/etc/resolv.conf`; port 53 of a gateway is closed to every other interface); no traffic to RFC 1918, `100.64.0.0/10`, link-local (including `169.254.169.254`), loopback, the documentation, benchmarking and IETF-assigned ranges, multicast or reserved ranges; no IPv6; no traffic between sandboxes; the rest is NATed. A sandbox's own checks (source address, destination ranges) run before any "established" accept, so a guest cannot forge another's flow. The golden rulesets are in `internal/netpolicy/testdata`. The DNS forwarder limits each listener to 32 in-flight queries (UDP beyond that is dropped), 16 TCP connections, and 30 s per TCP connection.
+One nftables table, `inet ermite_runner`, replaced atomically (`nft -f -`) and deleted with the last sandbox; nothing else is touched. From a sandbox: to the host only DNS to its own gateway address (plus one TCP port when the opt-in guest forge access is on, below), where the runner's DNS forwarder listens (UDP and TCP, forwarding to the resolvers of `/etc/resolv.conf`; port 53 of a gateway is closed to every other interface); no traffic to RFC 1918, `100.64.0.0/10`, link-local (including `169.254.169.254`), loopback, the documentation, benchmarking and IETF-assigned ranges, multicast or reserved ranges; no IPv6; no traffic between sandboxes; the rest is NATed. A sandbox's own checks (source address, destination ranges) run before any "established" accept, so a guest cannot forge another's flow. The golden rulesets are in `internal/netpolicy/testdata`. The DNS forwarder limits each listener to 32 in-flight queries (UDP beyond that is dropped), 16 TCP connections, and 30 s per TCP connection.
 
 **Side effect on the host:** the runner turns `net.ipv4.ip_forward` on (NAT needs it) and leaves it on when it exits. Forwarding is host-wide, not scoped to the runner's interfaces: if the machine must not route for other networks, restrict it with its own firewall rules (the runner's table only governs traffic of its sandboxes).
+
+### Guest forge access (opt-in, staging only)
+
+Off by default. `ERMITE_RUNNER_GUEST_FORGE=1` lets sandboxes reach the forge **the way the runner does**, for a staging host where ermite is only reachable through an overlay (NetBird) and the runner itself uses a local route, e.g. `/etc/hosts` `ermite.bnema.dev -> 127.0.0.1` and a reverse proxy (Gordon) on `*:8088` with `ERMITE_RUNNER_URL=http://ermite.bnema.dev:8088`. Jobs otherwise cannot `git clone ${{ github.server_url }}/...`: the public URL (`https://ermite.bnema.dev`) is TLS-terminated off-host, and the private ranges are denied.
+
+The host name and port come from `ERMITE_RUNNER_URL` (port defaulted from the scheme: 443 or 80). The runner **refuses to start** when the URL host is an IP literal (sandboxes are pointed at the host by DNS), when the URL has a path, when the name does not resolve on the host, or when the URL is plain `http://` without `ERMITE_RUNNER_INSECURE_HTTP=1` (same rule as for the runner itself: tokens then travel in clear). Then, for every sandbox in both modes:
+
+- the DNS forwarder answers `A` queries for exactly that host name (case-insensitive, trailing dot ignored) with the sandbox's **gateway address**, and `AAAA` with an empty `NOERROR` answer; every other name is forwarded as before;
+- the nftables input chain accepts TCP from the sandbox's own address to its own gateway address on that one port, before the sandbox's catch-all drop (one extra line per sandbox; see `internal/netpolicy/testdata/guest_forge.nft`). Nothing else on the host opens; the forward chain (private-range denies, source check, no sandbox-to-sandbox) is unchanged;
+- the `github.server_url`, `github.api_url` and `github.graphql_url` of the job's contexts, and so `GITHUB_SERVER_URL`, `GITHUB_API_URL` and `GITHUB_GRAPHQL_URL`, are rewritten to the origin of `ERMITE_RUNNER_URL` when their origin is the server's public one (`github.server_url`); paths are kept (`/-/github/api`). Other values, and the URLs inside `github.event`, stay as the server recorded them;
+- `guest forge access: sandboxes may reach <origin> on the host` is logged at start and at the start of every job, like the privileged-container warning.
+
+**The runner does not proxy.** The traffic reaches the host's own listener on that port, so a service must listen on it on an address the gateway reaches (`*`, as Gordon does; a listener bound to `127.0.0.1` receives nothing). A shared reverse proxy on that port routes by `Host` header, so **a job can reach every app that proxy serves on that port**, not only the forge, by sending another `Host` header: use this on staging hosts only, with a proxy whose other apps you accept to expose to job code. Jobs also see the forge over plain HTTP in that setup.
 
 ### Cancellation
 
@@ -96,7 +109,8 @@ the host process; the sandbox receives the workflow and its contexts only.
 | `ERMITE_RUNNER_LABELS` | extra labels, comma separated (`ubuntu-latest,ubuntu-24.04`) |
 | `ERMITE_RUNNER_ENVIRONMENT` | `github-hosted` (default) or `self-hosted`: the `runner.environment` value the jobs see. ermite's runners stand in for GitHub-hosted ones, so workflows written for github.com (`runner.environment == 'github-hosted'`) behave the same; `self-hosted` also makes "Set up job" print the runner and machine name, as GitHub does for self-hosted runners |
 | `ERMITE_RUNNER_REGISTER_TOKEN` | token for `register` (see above) |
-| `ERMITE_RUNNER_INSECURE_HTTP` | `1` allows a non-loopback `http://` URL (tests only) |
+| `ERMITE_RUNNER_INSECURE_HTTP` | `1` allows a non-loopback `http://` URL (tests only); also required for `ERMITE_RUNNER_GUEST_FORGE` with an `http://` URL |
+| `ERMITE_RUNNER_GUEST_FORGE` | `1` lets sandboxes reach the forge as the runner does (staging only; see "Guest forge access") |
 | `ERMITE_RUNNER_LOG_LEVEL` | `debug`, `info` (default), `warn`, `error` |
 | `ERMITE_RUNNER_LOG_FORMAT` | `console` (default, colours) or `json` |
 
@@ -246,6 +260,7 @@ the moment it starts.
 | `ERMITE_RUNNER_JOB_CPUS` / `_JOB_MEMORY` / `_JOB_DISK` | `2` / `4G` / `64G` | per job; sizes accept `M`, `G`, `T`. A warning is logged at start when the state directory has less free space than capacity x disk (disks are sparse: it is only a warning) |
 | `ERMITE_RUNNER_JOB_PIDS` | `32768` | container process limit |
 | `ERMITE_RUNNER_DENY_PRIVILEGED` | `0` | `1` refuses container mode without sysbox |
+| `ERMITE_RUNNER_GUEST_FORGE` | `0` | `1` lets sandboxes reach the host and port of `ERMITE_RUNNER_URL` on the host (staging only, see "Guest forge access") |
 | `ERMITE_RUNNER_LOCK_FILE` | `/run/ermite-runner.lock` | host-wide single-instance lock (tests only) |
 | `ERMITE_RUNNER_JOB_DISK_BANDWIDTH`, `_JOB_DISK_IOPS`, `_JOB_NET_BANDWIDTH` | `400`, `20000`, `1000` | VM rate limits in MiB/s, IOPS and Mbit/s; 0 disables |
 | `ERMITE_RUNNER_UID_BASE` | `900000` | jailer uid pool start |

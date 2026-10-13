@@ -1014,10 +1014,73 @@ func TestSocketPathTooLongIsExplained(t *testing.T) {
 // GO-002: only a podman daemon gets a DNS listener that may precede the gateway
 // address; Docker keeps a normal bind.
 func TestOnlyPodmanGetsAFreeBindDNSListener(t *testing.T) {
-	if newNet(nil, 0, false).DNS.FreeBind {
+	if newNet(nil, 0, false, "").DNS.FreeBind {
 		t.Fatal("Docker must keep a normal bind")
 	}
-	if !newNet(nil, 0, true).DNS.FreeBind {
+	if !newNet(nil, 0, true, "").DNS.FreeBind {
 		t.Fatal("podman needs the listener before the bridge address")
+	}
+}
+
+// Guest forge access: the exception reaches the policy of every guest, and the
+// warning naming the origin is logged at the driver start and at every job.
+func TestGuestForgeIsAttachedAndWarnedAtEveryJob(t *testing.T) {
+	e := newCEnv(t)
+	var err error
+	if e.cfg.GuestForge, err = sandbox.ParseGuestForge("http://ermite.bnema.dev:8088", true); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	ctx := logger(&buf)
+	d, err := New(ctx, e.cfg, e.opts())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = d.Close() }()
+	msg := "guest forge access: sandboxes may reach http://ermite.bnema.dev:8088 on the host"
+	if n := strings.Count(buf.String(), msg); n != 1 {
+		t.Fatalf("one warning at driver start, got %d", n)
+	}
+	for i := range 2 {
+		sb, _ := d.New()
+		conn, err := sb.Start(ctx, sandbox.JobSpec{JobID: fmt.Sprint("job", i)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, g := range e.plumb.Attached {
+			if g.ForgePort != 8088 {
+				t.Errorf("guest attached with ForgePort %d", g.ForgePort)
+			}
+		}
+		stub(t, conn)
+		_ = sb.Stop(ctx)
+	}
+	if n := strings.Count(buf.String(), msg); n != 3 {
+		t.Fatalf("the warning must be logged at every job start (1 + 2), got %d", n)
+	}
+}
+
+func TestNoGuestForgeByDefault(t *testing.T) {
+	e := newCEnv(t)
+	var buf bytes.Buffer
+	ctx := logger(&buf)
+	d := e.driver(t)
+	sb, _ := d.New()
+	conn, err := sb.Start(ctx, sandbox.JobSpec{JobID: "j"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, g := range e.plumb.Attached {
+		if g.ForgePort != 0 {
+			t.Errorf("ForgePort %d without the setting", g.ForgePort)
+		}
+	}
+	stub(t, conn)
+	_ = sb.Stop(ctx)
+	if strings.Contains(buf.String(), "guest forge") {
+		t.Fatal("a guest forge warning without the setting")
+	}
+	if n := newNet(nil, 0, false, "ermite.example.org").DNS.Override; n != "ermite.example.org" {
+		t.Fatalf("override %q", n)
 	}
 }

@@ -62,6 +62,11 @@ type Config struct {
 	Environment string
 	// InsecureHTTP allows a non-loopback http URL (ERMITE_RUNNER_INSECURE_HTTP=1).
 	InsecureHTTP bool
+	// GuestForgeOrigin is the origin (scheme://host[:port]) of ERMITE_RUNNER_URL
+	// when ERMITE_RUNNER_GUEST_FORGE=1, "" otherwise. The server URLs of every
+	// job are rewritten to it, see RewriteServerURLs. Set by the caller after
+	// sandbox.ResolveGuestForge.
+	GuestForgeOrigin string
 }
 
 // Client returns the client for a token, honouring InsecureHTTP.

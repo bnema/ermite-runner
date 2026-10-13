@@ -163,10 +163,13 @@ func New(ctx context.Context, cfg sandbox.Config, opt Options) (*Driver, error) 
 	}
 	d.net = opt.Net
 	if d.net == nil {
-		d.net = newNet(opt.Run, cfg.DNSPort, info.Podman)
+		d.net = newNet(opt.Run, cfg.DNSPort, info.Podman, cfg.GuestForge.DNSName())
 	}
 	if err := d.net.EnableForwarding(); err != nil {
 		return fail(err)
+	}
+	if cfg.GuestForge != nil {
+		log.Warn().Msg(cfg.GuestForge.Warning())
 	}
 	return d, nil
 }
@@ -174,9 +177,10 @@ func New(ctx context.Context, cfg sandbox.Config, opt Options) (*Driver, error) 
 // newNet builds the host network plumbing. Only podman creates the bridge
 // address late (see daemonInfo.Podman), so only there the DNS listener may come
 // before the address; on Docker a missing gateway address stays a startup error.
-func newNet(run cmdrun.Runner, dnsPort int, podman bool) *netsetup.Net {
+func newNet(run cmdrun.Runner, dnsPort int, podman bool, forgeHost string) *netsetup.Net {
 	n := netsetup.New(run, dnsPort, "")
 	n.DNS.FreeBind = podman
+	n.DNS.Override = forgeHost
 	return n
 }
 
@@ -302,6 +306,9 @@ func (s *containerSandbox) Start(ctx context.Context, spec sandbox.JobSpec) (san
 		// operator's logs must say what kind of isolation this job got.
 		log.Warn().Str("job", spec.JobID).Str("container", s.id).Msg(privilegedWarning)
 	}
+	if d.cfg.GuestForge != nil {
+		log.Warn().Str("job", spec.JobID).Str("container", s.id).Msg(d.cfg.GuestForge.Warning())
+	}
 	conn, err := s.run(bootCtx, spec)
 	if err != nil {
 		var tail string
@@ -421,7 +428,7 @@ func (s *containerSandbox) runNetwork(ctx context.Context, netw netpolicy.Net, l
 	}
 	s.netID = netID
 	s.attached = true
-	return d.net.Attach(ctx, netpolicy.Guest{Iface: s.iface, Gateway: netw.Gateway, Addr: netw.Guest})
+	return d.net.Attach(ctx, netpolicy.Guest{Iface: s.iface, Gateway: netw.Gateway, Addr: netw.Guest, ForgePort: d.cfg.GuestForge.TCPPort()})
 }
 
 // runContainer creates and starts the container.
