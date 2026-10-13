@@ -108,6 +108,13 @@ type Config struct {
 	DenyPrivileged bool
 	// LockFile is the host-wide single-instance lock.
 	LockFile string
+	// GuestForgeEnabled is ERMITE_RUNNER_GUEST_FORGE=1. The endpoint itself
+	// comes from the server URL, which is not a sandbox setting: the caller
+	// sets GuestForge (ResolveGuestForge) before building the drivers.
+	GuestForgeEnabled bool
+	// GuestForge, when not nil, is the one host endpoint that every sandbox may
+	// reach, and the name the DNS forwarder answers with the sandbox's gateway.
+	GuestForge *GuestForge
 	// Rate limits of micro-VMs; zero disables.
 	DiskBandwidthMiB, DiskIOPS, NetMbit int
 }
@@ -188,6 +195,13 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 		c.DenyPrivileged = true
 	default:
 		return c, fmt.Errorf("%s: %q is not 0 or 1", EnvDenyPrivileged, getenv(EnvDenyPrivileged))
+	}
+	switch strings.ToLower(strings.TrimSpace(getenv(EnvGuestForge))) {
+	case "", "0", "false", "no":
+	case "1", "true", "yes":
+		c.GuestForgeEnabled = true
+	default:
+		return c, fmt.Errorf("%s: %q is not 0 or 1", EnvGuestForge, getenv(EnvGuestForge))
 	}
 	if v := getenv(EnvLockFile); v != "" {
 		if !filepath.IsAbs(v) {

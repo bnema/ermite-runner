@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net"
 	"os"
 
 	"github.com/bnema/zerowrap"
@@ -103,6 +104,17 @@ func runCmd(ctx context.Context) int {
 	if url == "" {
 		fmt.Fprintf(os.Stderr, "ermite-runner: %s is not set\n", host.EnvURL)
 		return 2
+	}
+	if scfg.GuestForgeEnabled {
+		// The sandboxes reach the forge the way the runner does: by the host name
+		// and port of the URL the runner itself uses.
+		gf, err := sandbox.ResolveGuestForge(ctx, url, hcfg.InsecureHTTP, net.DefaultResolver.LookupHost)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "ermite-runner:", err)
+			return 2
+		}
+		scfg.GuestForge = gf
+		hcfg.GuestForgeOrigin = gf.Origin
 	}
 	drv, err := buildDriver(ctx, scfg)
 	if err != nil {

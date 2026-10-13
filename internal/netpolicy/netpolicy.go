@@ -12,6 +12,10 @@
 //     address of that guest, where the runner's DNS forwarder listens; every
 //     other packet is dropped, and port 53 of a gateway is closed to every
 //     other interface;
+//   - optionally (Guest.ForgePort, the opt-in guest forge access, staging
+//     only): TCP from the guest's source address to its own gateway address on
+//     that one port. The host's own listener on that port receives the traffic;
+//     nothing is proxied, and every other host port stays closed;
 //   - IPv6 from the guest is dropped (the guest also disables IPv6);
 //   - forwarded traffic must carry the guest's own source address;
 //   - forwarded traffic to RFC 1918, CGNAT 100.64.0.0/10 (VPN overlays),
@@ -73,6 +77,11 @@ type Guest struct {
 	Iface   string     // host-side interface: TAP or bridge name
 	Gateway netip.Addr // host address on Iface; the DNS forwarder listens here
 	Addr    netip.Addr // the guest's only allowed source address
+	// ForgePort, when not 0, opens TCP from Addr to Gateway on that one port
+	// (guest forge access). The accept is in the input chain, scoped to this
+	// guest's interface, source and gateway, so it neither reaches other
+	// addresses of the host nor other guests.
+	ForgePort uint16
 }
 
 // Validate checks the fields used in generated rules.
@@ -154,6 +163,11 @@ func Ruleset(guests []Guest) string {
 	for _, g := range gs {
 		for _, proto := range []string{"udp", "tcp"} {
 			fmt.Fprintf(&b, "\t\tiifname \"%s\" ip saddr %s ip daddr %s %s dport 53 accept\n", g.Iface, g.Addr, g.Gateway, proto)
+		}
+		if g.ForgePort != 0 {
+			// New connections only: the replies leave through the output hook,
+			// which this table does not touch.
+			fmt.Fprintf(&b, "\t\tiifname \"%s\" ip saddr %s ip daddr %s tcp dport %d accept\n", g.Iface, g.Addr, g.Gateway, g.ForgePort)
 		}
 		fmt.Fprintf(&b, "\t\tiifname \"%s\" drop\n", g.Iface)
 	}

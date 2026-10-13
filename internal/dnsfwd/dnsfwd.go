@@ -12,6 +12,10 @@
 // connections, an absolute lifetime of TCPLifetime per TCP connection (a client
 // cannot hold a slot by trickling bytes), a deadline on every upstream
 // exchange, and a cap on queries per TCP connection.
+//
+// One name can be overridden (Forwarder.Override, the opt-in guest forge
+// access): queries for it are answered locally with the address of the
+// listener, see override.go. Every other name is forwarded.
 package dnsfwd
 
 import (
@@ -62,12 +66,18 @@ type Forwarder struct {
 	// exists when the network is created and a missing one is an error to
 	// report at once, not a listener on an address nobody owns. Set before Listen.
 	FreeBind bool
+	// Override, when set, is a host name that every listener answers itself:
+	// A with the address the listener is bound to, and NOERROR with no data for
+	// every other type, whatever the host's resolvers say. Case-insensitive; a
+	// trailing dot is ignored. Set before Listen.
+	Override string
 
 	mu        sync.Mutex
 	listeners map[netip.Addr]*listener
 }
 
 type listener struct {
+	addr   netip.Addr
 	udp    net.PacketConn
 	tcp    net.Listener
 	cancel context.CancelFunc
@@ -126,7 +136,7 @@ func (f *Forwarder) Listen(ctx context.Context, addr netip.Addr) error {
 		return fmt.Errorf("dnsfwd: listen tcp %s: %w", hp, err)
 	}
 	lctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
-	l := &listener{udp: pc, tcp: tl, cancel: cancel, inflight: make(chan struct{}, MaxInflight), conns: make(chan struct{}, MaxTCPConns)}
+	l := &listener{addr: addr, udp: pc, tcp: tl, cancel: cancel, inflight: make(chan struct{}, MaxInflight), conns: make(chan struct{}, MaxTCPConns)}
 	f.listeners[addr] = l
 	log := zerowrap.FromCtx(ctx)
 	l.done.Add(2)
@@ -211,7 +221,7 @@ func (f *Forwarder) serveUDP(ctx context.Context, l *listener, log zerowrap.Logg
 		q := append([]byte(nil), buf[:n]...)
 		go func() {
 			defer func() { <-l.inflight }()
-			resp := f.exchange(ctx, q, false)
+			resp := f.exchange(ctx, l, q, false)
 			if len(resp) > 0 {
 				_, _ = pc.WriteTo(resp, from)
 			}
@@ -277,7 +287,7 @@ func (f *Forwarder) serveConn(ctx context.Context, l *listener, c net.Conn, dead
 		default:
 			return // saturated: close, the client retries
 		}
-		resp := f.exchange(ctx, q, true)
+		resp := f.exchange(ctx, l, q, true)
 		<-l.inflight
 		if len(resp) == 0 || len(resp) > 0xffff {
 			return
@@ -293,8 +303,12 @@ func (f *Forwarder) serveConn(ctx context.Context, l *listener, c net.Conn, dead
 
 // exchange relays q to the upstreams in order and returns the first answer, or
 // a SERVFAIL when none answers. The transport towards the upstream matches the
-// client's: a client that fell back to TCP gets a complete answer.
-func (f *Forwarder) exchange(ctx context.Context, q []byte, overTCP bool) []byte {
+// client's: a client that fell back to TCP gets a complete answer. The
+// overridden name, if any, is answered without asking the upstreams.
+func (f *Forwarder) exchange(ctx context.Context, l *listener, q []byte, overTCP bool) []byte {
+	if resp := f.overrideAnswer(l.addr, q); resp != nil {
+		return resp
+	}
 	for _, up := range f.upstreams() {
 		var resp []byte
 		var err error

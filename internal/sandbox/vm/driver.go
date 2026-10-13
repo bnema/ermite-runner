@@ -147,7 +147,13 @@ func New(ctx context.Context, cfg sandbox.Config, opt Options) (*Driver, error) 
 	}
 	d.net = opt.Net
 	if d.net == nil {
-		d.net = netsetup.New(opt.Run, cfg.DNSPort, "")
+		n := netsetup.New(opt.Run, cfg.DNSPort, "")
+		n.DNS.Override = cfg.GuestForge.DNSName()
+		d.net = n
+	}
+	if cfg.GuestForge != nil {
+		l := zerowrap.FromCtx(ctx)
+		l.Warn().Msg(cfg.GuestForge.Warning())
 	}
 	if err := d.net.EnableForwarding(); err != nil {
 		return fail(err)
@@ -266,6 +272,10 @@ func (s *vmSandbox) Start(ctx context.Context, spec sandbox.JobSpec) (sandbox.Co
 	log := zerowrap.FromCtx(ctx)
 	d := s.d
 	spec = d.cfg.Resolve(spec)
+	if d.cfg.GuestForge != nil {
+		// At every job start, as for privileged containers.
+		log.Warn().Str("job", spec.JobID).Str("vm", s.id).Msg(d.cfg.GuestForge.Warning())
+	}
 
 	jailed := !d.cfg.JailerOff
 	runUID := s.uid()
@@ -338,7 +348,7 @@ func (s *vmSandbox) bootNetwork(ctx context.Context, netw netpolicy.Net) error {
 		return err
 	}
 	s.attached = true // from here Detach is idempotent and always safe
-	return d.net.Attach(ctx, netpolicy.Guest{Iface: s.tap, Gateway: netw.Gateway, Addr: netw.Guest})
+	return d.net.Attach(ctx, netpolicy.Guest{Iface: s.tap, Gateway: netw.Gateway, Addr: netw.Guest, ForgePort: d.cfg.GuestForge.TCPPort()})
 }
 
 // bootVMM starts the jailer (or Firecracker) and waits for its API.

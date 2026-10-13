@@ -466,3 +466,149 @@ func TestFreeBindListensOnAnAddressTheHostDoesNotOwnYet(t *testing.T) {
 		t.Fatal("no listener")
 	}
 }
+
+// queryType is query with a chosen type (and optionally EDNS0).
+func queryType(id uint16, name string, qtype uint16, edns bool) []byte {
+	q := query(id, name)
+	binary.BigEndian.PutUint16(q[len(q)-4:], qtype)
+	if edns {
+		q[11] = 1
+		q = append(q, 0, 0, 41, 0x10, 0, 0, 0, 0, 0, 0, 0)
+	}
+	return q
+}
+
+func udpExchange(t *testing.T, addr string, q []byte) []byte {
+	t.Helper()
+	c, err := net.Dial("udp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.Close() }()
+	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
+	_, _ = c.Write(q)
+	buf := make([]byte, 1024)
+	n, err := c.Read(buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return buf[:n]
+}
+
+func startOverride(t *testing.T, name string, ups ...string) (*Forwarder, string) {
+	t.Helper()
+	f := New(func() []string { return ups }, 0)
+	f.Override = name
+	ip := netip.MustParseAddr("127.0.0.1")
+	if err := f.Listen(context.Background(), ip); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(f.CloseAll)
+	a, _ := f.Addr(ip)
+	return f, a.String()
+}
+
+func TestOverrideAnswersAWithTheListenerAddress(t *testing.T) {
+	var asked atomic.Int64
+	up := fakeUpstream(t, func(q []byte) []byte { asked.Add(1); return answer(q) })
+	// A trailing dot in the setting is ignored; on the wire a name has none.
+	_, addr := startOverride(t, "Ermite.Example.org.", up)
+	for _, name := range []string{"ermite.example.org", "ERMITE.example.ORG", "Ermite.Example.Org"} {
+		r := udpExchange(t, addr, queryType(0x4242, name, 1, false))
+		if binary.BigEndian.Uint16(r) != 0x4242 || r[2]&0x80 == 0 || r[2]&0x01 == 0 || r[3]&0x0F != 0 {
+			t.Fatalf("%s: header %x", name, r[:hdrLen])
+		}
+		if an := binary.BigEndian.Uint16(r[6:]); an != 1 {
+			t.Fatalf("%s: %d answers", name, an)
+		}
+		if !strings.HasSuffix(string(r), "\x00\x04\x7f\x00\x00\x01") {
+			t.Fatalf("%s: rdata is not 127.0.0.1: %x", name, r)
+		}
+	}
+	if asked.Load() != 0 {
+		t.Fatalf("the override went upstream %d times", asked.Load())
+	}
+}
+
+func TestOverrideAAAAIsEmptyNoError(t *testing.T) {
+	up := fakeUpstream(t, answer)
+	_, addr := startOverride(t, "ermite.example.org", up)
+	for _, edns := range []bool{false, true} {
+		r := udpExchange(t, addr, queryType(7, "ermite.EXAMPLE.org", 28, edns))
+		if r[3]&0x0F != 0 || binary.BigEndian.Uint16(r[6:]) != 0 || r[2]&0x80 == 0 {
+			t.Fatalf("AAAA (edns %v): %x", edns, r)
+		}
+		if edns != (binary.BigEndian.Uint16(r[10:]) == 1) {
+			t.Fatalf("AAAA (edns %v): arcount %d", edns, binary.BigEndian.Uint16(r[10:]))
+		}
+	}
+}
+
+func TestOverrideForwardsEveryOtherName(t *testing.T) {
+	var asked atomic.Int64
+	up := fakeUpstream(t, func(q []byte) []byte { asked.Add(1); return answer(q) })
+	_, addr := startOverride(t, "ermite.example.org", up)
+	for _, name := range []string{"example.org", "other.example.org", "x.ermite.example.org", "ermite.example.org.evil.test", "ermite.example.or"} {
+		r := udpExchange(t, addr, query(9, name))
+		if string(r[len(r)-6:]) != "ANSWER" {
+			t.Fatalf("%s was not forwarded: %x", name, r)
+		}
+	}
+	if asked.Load() != 5 {
+		t.Fatalf("%d upstream queries, want 5", asked.Load())
+	}
+}
+
+func TestOverrideOverTCPAndDisabledByDefault(t *testing.T) {
+	up := fakeUpstream(t, answer)
+	_, addr := startOverride(t, "ermite.example.org", up)
+	tc, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tc.Close() }()
+	_ = tc.SetDeadline(time.Now().Add(5 * time.Second))
+	q := queryType(3, "ermite.example.org", 1, false)
+	_, _ = tc.Write(append([]byte{byte(len(q) >> 8), byte(len(q))}, q...))
+	var l [2]byte
+	if _, err := io.ReadFull(tc, l[:]); err != nil {
+		t.Fatal(err)
+	}
+	r := make([]byte, binary.BigEndian.Uint16(l[:]))
+	if _, err := io.ReadFull(tc, r); err != nil {
+		t.Fatal(err)
+	}
+	if binary.BigEndian.Uint16(r[6:]) != 1 || !strings.HasSuffix(string(r), "\x7f\x00\x00\x01") {
+		t.Fatalf("tcp: %x", r)
+	}
+
+	// Off by default: the name is forwarded like any other.
+	_, addr2 := start(t, up)
+	r2 := udpExchange(t, addr2, query(4, "ermite.example.org"))
+	if string(r2[len(r2)-6:]) != "ANSWER" {
+		t.Fatalf("not forwarded without Override: %x", r2)
+	}
+}
+
+func TestOverrideIgnoresMalformedAndNonQueries(t *testing.T) {
+	f := New(func() []string { return nil }, 0)
+	f.Override = "ermite.example.org"
+	gw := netip.MustParseAddr("10.200.0.1")
+	good := queryType(1, "ermite.example.org", 1, false)
+	if f.overrideAnswer(gw, good) == nil {
+		t.Fatal("control query not answered")
+	}
+	cut := good[:len(good)-3]
+	chaos := queryType(1, "ermite.example.org", 1, false)
+	binary.BigEndian.PutUint16(chaos[len(chaos)-2:], 3) // class CH
+	resp := append([]byte(nil), good...)
+	resp[2] |= 0x80 // QR set: not a query
+	notify := append([]byte(nil), good...)
+	notify[2] |= 4 << 3 // opcode 4
+	ptr := append(append([]byte(nil), good[:hdrLen]...), 0xC0, 0x0C, 0, 1, 0, 1)
+	for name, q := range map[string][]byte{"truncated": cut, "class CH": chaos, "response": resp, "opcode": notify, "pointer": ptr, "short": good[:5]} {
+		if f.overrideAnswer(gw, q) != nil {
+			t.Errorf("%s was answered locally", name)
+		}
+	}
+}

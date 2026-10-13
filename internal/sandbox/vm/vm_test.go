@@ -1307,3 +1307,44 @@ func TestKillAndWaitReportsAProcessThatStays(t *testing.T) {
 		t.Fatal("an unkillable process was reported gone")
 	}
 }
+
+// Guest forge access: the exception reaches the policy of the guest, and the
+// warning naming the origin is logged at the driver start and at every job.
+func TestGuestForgeIsAttachedAndWarnedAtEveryJob(t *testing.T) {
+	e := newEnv(t, "")
+	var err error
+	if e.cfg.GuestForge, err = sandbox.ParseGuestForge("https://ermite.example.org:8443", false); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	ctx := zerowrap.WithCtx(context.Background(), zerowrap.New(zerowrap.Config{Level: "debug", Format: "json", Output: &buf}))
+	d, err := New(ctx, e.cfg, Options{Run: e.run, Net: e.plumb, BootTimeout: 5 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = d.Close() }()
+	msg := "guest forge access: sandboxes may reach https://ermite.example.org:8443 on the host"
+	if n := strings.Count(buf.String(), msg); n != 1 {
+		t.Fatalf("one warning at driver start, got %d", n)
+	}
+	for i := range 2 {
+		sb, _ := d.New()
+		conn, err := sb.Start(ctx, sandbox.JobSpec{JobID: fmt.Sprint("job", i)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(e.plumb.Attached) != 1 {
+			t.Fatalf("%d attached", len(e.plumb.Attached))
+		}
+		for _, g := range e.plumb.Attached {
+			if g.ForgePort != 8443 {
+				t.Errorf("guest attached with ForgePort %d", g.ForgePort)
+			}
+		}
+		runStub(t, conn)
+		_ = sb.Stop(ctx)
+	}
+	if n := strings.Count(buf.String(), msg); n != 3 {
+		t.Fatalf("the warning must be logged at every job start (1 + 2), got %d", n)
+	}
+}

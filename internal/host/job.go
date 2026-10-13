@@ -67,6 +67,9 @@ type jobRun struct {
 	maxStarted  int32
 	lastLogStep int32
 	violation   string
+	// contexts is Job.Contexts as handed to the executor: with the server URLs
+	// pointed at the runner's URL when guest forge access is on.
+	contexts string
 	// hard stops the sandbox at once; set before the session starts.
 	hard    func()
 	result  *execpb.JobResult
@@ -562,6 +565,11 @@ func failure() outcome { return outcome{conclusion: ermite.CiConclusion_CI_CONCL
 
 // execute starts the sandbox, runs the job in it and returns how it ended.
 func (j *jobRun) execute(ctx context.Context, rt *Runner, stopHard <-chan struct{}) outcome {
+	var err error
+	if j.contexts, err = RewriteServerURLs(j.job.Contexts, rt.Cfg.GuestForgeOrigin); err != nil {
+		j.failEarly(fmt.Sprintf("The job's contexts cannot be prepared: %v", err))
+		return failure()
+	}
 	sb, err := rt.Driver.New()
 	if err != nil {
 		j.failEarly(fmt.Sprintf("The runner has no free sandbox: %v", err))
@@ -632,7 +640,7 @@ func (j *jobRun) startSandbox(ctx context.Context, rt *Runner, sb sandbox.Sandbo
 func (j *jobRun) drive(conn sandbox.Conn, rt *Runner) (*execpb.Exit, error) {
 	run := &execpb.Run{Job: &execpb.JobSpec{
 		WorkflowPath: j.job.WorkflowPath, WorkflowYaml: j.job.WorkflowYaml, JobKey: j.job.JobKey,
-		Matrix: j.job.Matrix, Contexts: j.job.Contexts, Repo: j.job.Repo, TimeoutMinutes: int32(j.timeoutMinutes()),
+		Matrix: j.job.Matrix, Contexts: j.contexts, Repo: j.job.Repo, TimeoutMinutes: int32(j.timeoutMinutes()),
 		DeadlineMs: max(1, time.Until(j.deadline()).Milliseconds()),
 		RunnerName: rt.Cfg.Name, RunnerVersion: rt.Cfg.Version, RunnerEnvironment: rt.Cfg.environment(),
 	}}
