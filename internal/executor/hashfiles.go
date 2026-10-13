@@ -109,7 +109,7 @@ const (
 )
 
 func splitSlash(s string) []string {
-	return regexp.MustCompile(`/+`).Split(s, -1)
+	return slashRunRe.Split(s, -1)
 }
 
 var errPattern = errors.New("invalid pattern")
@@ -126,7 +126,7 @@ func newGlobPattern(text, cwd, home string) (*globPattern, error) {
 	if text == "" {
 		return nil, fmt.Errorf("%w: pattern cannot be empty", errPattern)
 	}
-	norm := regexp.MustCompile(`//+`).ReplaceAllString(text, "/")
+	norm := doubleSlashRe.ReplaceAllString(text, "/")
 	p.trailingSep = strings.HasSuffix(norm, "/")
 	trimmed := norm
 	if trimmed != "/" {
@@ -266,6 +266,12 @@ func getLiteral(s string) string {
 	return string(lit)
 }
 
+var (
+	slashRunRe     = regexp.MustCompile(`/+`)
+	doubleSlashRe  = regexp.MustCompile(`//+`)
+	neverMatchesRe = regexp.MustCompile(`$.`)
+)
+
 const reSpecials = "().*{}+?[]^$\\!"
 
 // parseMM is minimatch's parse for one segment with the options of
@@ -283,7 +289,7 @@ func parseMM(s string) mmSeg {
 	}
 	rx, err := regexp.Compile("^" + re + "$")
 	if err != nil {
-		return mmSeg{re: regexp.MustCompile(`$.`)}
+		return mmSeg{re: neverMatchesRe}
 	}
 	return mmSeg{re: rx}
 }
@@ -395,7 +401,7 @@ func translateMM(p []rune) (re string, magic bool) {
 // match is Pattern.match.
 func (p *globPattern) match(item string) int {
 	if p.segs[len(p.segs)-1].raw == "**" {
-		item = regexp.MustCompile(`//+`).ReplaceAllString(item, "/")
+		item = doubleSlashRe.ReplaceAllString(item, "/")
 		if !strings.HasSuffix(item, "/") && !p.implicit {
 			item += "/"
 		}
@@ -429,7 +435,7 @@ func (p *globPattern) partialMatch(item string) bool {
 }
 
 func trimTrailingSep(s string) string {
-	s = regexp.MustCompile(`//+`).ReplaceAllString(s, "/")
+	s = doubleSlashRe.ReplaceAllString(s, "/")
 	if s != "/" && strings.HasSuffix(s, "/") {
 		return s[:len(s)-1]
 	}
