@@ -237,7 +237,9 @@ func (j *job) runDocker(s *stepRun, def *actionDef, in *inputSet, env *ordered, 
 	j.out(num, "##[command]"+cmd.line)
 	// The docker process gets the container variables on top of its own
 	// environment: "-e NAME" reads them from there.
-	s.rawEnvList = j.processEnv(cenv)
+	// (ProcessInvoker gets ContainerEnvironmentVariables: the translated values,
+	// and nothing from the contexts on top.)
+	s.rawEnvList = j.dockerProcessEnv(cenv)
 	return j.runProc(s, cmd.argv[0], workspace, cmd.argv, "Docker Action run completed with exit code %d", cancel)
 }
 
@@ -270,3 +272,26 @@ func (j *job) cancelledStep(num int) stepResult {
 }
 
 func shortID() string { return strings.ReplaceAll(newImageTag(""), ":", "")[:6] }
+
+// dockerProcessEnv is the environment of the docker CLI: the one of the runner
+// and the translated container variables (DockerCommandManager.DockerRun passes
+// ContainerEnvironmentVariables as the environment of the process).
+func (j *job) dockerProcessEnv(cenv *ordered) []string {
+	penv := newOrdered()
+	for _, kv := range j.baseEnv {
+		if k, v, ok := strings.Cut(kv, "="); ok {
+			penv.Set(k, v)
+		}
+	}
+	for _, k := range cenv.Keys() {
+		v, _ := cenv.Get(k)
+		penv.Set(k, v)
+	}
+	penv.Set(ProcessTrackingID, j.trackID)
+	var list []string
+	for _, k := range penv.Keys() {
+		v, _ := penv.Get(k)
+		list = append(list, k+"="+v)
+	}
+	return list
+}

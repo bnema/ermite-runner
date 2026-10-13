@@ -6,12 +6,15 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
-
 )
 
 // execute is ActionRunner.RunAsync plus ScriptHandler for one run step.
 func (j *job) execute(s *stepRun, stepCancel <-chan struct{}) stepResult {
 	num, st := s.num, s.st
+	if st.TimeoutMinutes != nil { // step timeouts are phase G's
+		j.errorf(num, "not supported yet: timeout-minutes")
+		return resFailed
+	}
 	if st.Uses != nil {
 		return j.runAction(s, stepCancel)
 	}

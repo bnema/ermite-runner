@@ -7,6 +7,7 @@ import (
 	"errors"
 	"strings"
 
+	"bnema.dev/ermite-actions/action"
 	"bnema.dev/ermite-actions/expr"
 	"bnema.dev/ermite-actions/template"
 	"bnema.dev/ermite-actions/workflow"
@@ -119,6 +120,15 @@ func (j *job) displayName(st *workflow.Step, env *ordered) string {
 	case st.Run != nil:
 		tok, prefix = st.Run, "Run "
 	case st.Uses != nil:
+		// The name is built from the parsed reference (ActionRunner.cs:305-333):
+		// the image of a docker:// step without its scheme, "Name[/Path]@Ref" for
+		// a repository, the path for a local action.
+		if u, err := action.ParseUses(st.Uses.Value); err == nil {
+			if u.Kind == action.UsesDocker {
+				return formatStepName("Run ", u.Image)
+			}
+			return formatStepName("Run ", refString(u))
+		}
 		tok, prefix = st.Uses, "Run "
 	default:
 		return ""

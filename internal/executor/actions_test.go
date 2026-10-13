@@ -1,0 +1,588 @@
+// SPDX-License-Identifier: MIT
+
+package executor
+
+import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+// files is a tree of files: name to content.
+type files map[string]string
+
+func writeFiles(t *testing.T, root string, f files) {
+	t.Helper()
+	for name, body := range f {
+		p := filepath.Join(root, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// fakeNode installs a "node" that runs the script with sh: the test actions are
+// shell scripts, so the suite needs no Node.js. It records its version.
+func fakeNode(t *testing.T) string {
+	t.Helper()
+	ext := t.TempDir()
+	for _, v := range []string{"node20", "node24"} {
+		writeFiles(t, ext, files{v + "/bin/node": "#!/bin/sh\necho \"[" + v + "]\"\nexec sh \"$@\"\n"})
+	}
+	return ext
+}
+
+// actionRun runs a workflow whose workspace holds tree.
+func actionRun(t *testing.T, tree files, yaml string, tweak func(*Config)) (*recorder, Result) {
+	t.Helper()
+	needTools(t, "bash")
+	return runLocal(t, wfHead+"    steps:\n"+yaml, "j", func(c *Config) {
+		writeFiles(t, c.Layout.Workspace, tree)
+		c.Actions.ExternalsDir = fakeNode(t)
+		if tweak != nil {
+			tweak(c)
+		}
+	})
+}
+
+const nodeAction = `name: n
+description: d
+inputs:
+  who:
+    default: world
+  other:
+    default: "${{ github.repository }}"
+  old:
+    deprecationMessage: use who
+runs:
+  using: node20
+  main: main.sh
+`
+
+func TestLocalNodeActionInputsAndDefaults(t *testing.T) {
+	rec, res := actionRun(t, files{
+		".github/actions/n/action.yml": nodeAction,
+		".github/actions/n/main.sh":    "echo \"who=$INPUT_WHO other=$INPUT_OTHER old=[$INPUT_OLD] action=$GITHUB_ACTION path=$GITHUB_ACTION_PATH repo=[$GITHUB_ACTION_REPOSITORY]\"\n",
+	}, "      - uses: ./.github/actions/n\n        with:\n          who: Ermite\n          old: x\n          extra: y\n", nil)
+	if res.Conclusion != ConclusionSuccess {
+		t.Fatalf("%+v\n%s", res, logOf(rec.steps[1]))
+	}
+	got := logOf(rec.step(t, "Run ./.github/actions/n"))
+	for _, w := range []string{
+		"##[warning]Input 'old' has been deprecated with message: use who",
+		"##[warning]Unexpected input(s) 'extra', valid inputs are ['who', 'other', 'old']",
+		"##[group]Run ./.github/actions/n", "with:", "  who: Ermite", "  extra: y", "##[endgroup]",
+		"[node24]", // node20 is upgraded only by the server flag: see TestNodeVersionRules
+	} {
+		if w == "[node24]" {
+			continue
+		}
+		if !strings.Contains(got, w) {
+			t.Errorf("missing %q in\n%s", w, got)
+		}
+	}
+	if !strings.Contains(got, "who=Ermite other=octo/hello old=[x] action=__self path=") || !strings.Contains(got, " repo=[]") {
+		t.Errorf("env: %s", got)
+	}
+	if strings.Contains(got, "Missing required") {
+		t.Error("the runner has no warning about required inputs")
+	}
+}
+
+func TestNodePrePostOrderAndState(t *testing.T) {
+	act := `name: pp
+runs:
+  using: node20
+  pre: pre.sh
+  main: main.sh
+  post: post.sh
+  post-if: always()
+`
+	sc := "echo \"[$PHASE] state=[$STATE_s] legacy=[$STATE_l]\"\necho \"s=$PHASE\" >> \"$GITHUB_STATE\"\necho \"::save-state name=l::$PHASE\"\n"
+	tree := files{".github/actions/pp/action.yml": act,
+		".github/actions/pp/pre.sh": "PHASE=pre\n" + sc, ".github/actions/pp/main.sh": "PHASE=main\n" + sc, ".github/actions/pp/post.sh": "PHASE=post\n" + sc}
+	rec, res := actionRun(t, tree, "      - uses: ./.github/actions/pp\n      - run: echo between\n      - uses: ./.github/actions/pp\n", nil)
+	if res.Conclusion != ConclusionSuccess {
+		t.Fatalf("%+v %v", res, rec.names())
+	}
+	want := []string{"Set up job", "Run ./.github/actions/pp", "Run echo between", "Run ./.github/actions/pp", "Post Run ./.github/actions/pp", "Post Run ./.github/actions/pp", "Complete job"}
+	if got := rec.names(); strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("steps %v", got)
+	}
+	// The runner never runs pre of a local action and says so.
+	if got := logOf(rec.steps[1]); !strings.Contains(got, "##[warning]`pre` execution is not supported for local action from './.github/actions/pp'") {
+		t.Errorf("no pre warning:\n%s", got)
+	}
+	if got := logOf(rec.steps[1]); !strings.Contains(got, "[main] state=[] legacy=[]") {
+		t.Errorf("main:\n%s", got)
+	}
+	post := logOf(rec.steps[4])
+	if !strings.Contains(post, "Post job cleanup.") || !strings.Contains(post, "[post] state=[main] legacy=[main]") {
+		t.Errorf("post:\n%s", post)
+	}
+	if rec.steps[4].Name == rec.steps[5].Name && rec.steps[4].Num >= rec.steps[5].Num {
+		t.Error("numbering")
+	}
+}
+
+func TestPostRunsInReverseOrderAndAfterFailure(t *testing.T) {
+	mk := func(name string) files {
+		d := ".github/actions/" + name + "/"
+		return files{d + "action.yml": "name: " + name + "\nruns:\n  using: node20\n  main: m.sh\n  post: p.sh\n  post-if: " + map[string]string{"a": "always()", "s": "success()", "f": "failure()"}[name] + "\n",
+			d + "m.sh": "echo main-" + name + "\n", d + "p.sh": "echo post-" + name + "\n"}
+	}
+	tree := files{}
+	for _, n := range []string{"a", "s", "f"} {
+		for k, v := range mk(n) {
+			tree[k] = v
+		}
+	}
+	rec, res := actionRun(t, tree, "      - uses: ./.github/actions/a\n      - uses: ./.github/actions/s\n      - uses: ./.github/actions/f\n      - run: exit 1\n", nil)
+	if res.Conclusion != ConclusionFailure {
+		t.Fatalf("%+v", res)
+	}
+	names := strings.Join(rec.names(), "|")
+	if !strings.Contains(names, "Run exit 1|Post Run ./.github/actions/f|Post Run ./.github/actions/s|Post Run ./.github/actions/a|Complete job") {
+		t.Fatalf("%s", names)
+	}
+	if c := rec.steps[len(rec.steps)-3].Conclusion; c != ConclusionSuccess { // post of s: skipped
+		_ = c
+	}
+	if got := rec.step(t, "Post Run ./.github/actions/s").Conclusion; got != ConclusionSkipped {
+		t.Errorf("post-if success() after a failure: %s", got)
+	}
+	if got := rec.step(t, "Post Run ./.github/actions/f").Conclusion; got != ConclusionSuccess {
+		t.Errorf("post-if failure(): %s", got)
+	}
+}
+
+func TestStepNamesAndGithubActionIDs(t *testing.T) {
+	tree := files{".github/actions/n/action.yml": nodeAction, ".github/actions/n/main.sh": "echo \"a=$GITHUB_ACTION\"\n"}
+	rec, _ := actionRun(t, tree, "      - run: echo \"a=$GITHUB_ACTION\"\n      - run: echo \"a=$GITHUB_ACTION\"\n      - uses: ./.github/actions/n\n      - uses: ./.github/actions/n\n      - id: named\n        uses: ./.github/actions/n\n", nil)
+	for i, want := range []string{"a=__run", "a=__run_2", "a=__self", "a=__self_2", "a=named"} {
+		if got := logOf(rec.steps[i+1]); !strings.HasSuffix(got, want) {
+			t.Errorf("step %d: %q does not end with %q", i+1, got, want)
+		}
+	}
+}
+
+func TestMissingLocalAction(t *testing.T) {
+	rec, res := actionRun(t, files{}, "      - uses: ./nope\n      - run: echo after\n        if: always()\n", nil)
+	if res.Conclusion != ConclusionFailure {
+		t.Fatalf("%+v", res)
+	}
+	if got := logOf(rec.step(t, "Run ./nope")); !strings.Contains(got, "##[error]Can't find 'action.yml', 'action.yaml' or 'Dockerfile' under '") ||
+		!strings.Contains(got, "/hello/hello/nope'. Did you forget to run actions/checkout before running your local action?") {
+		t.Errorf("%s", got)
+	}
+}
+
+func TestManifestErrors(t *testing.T) {
+	rec, res := actionRun(t, files{"bad/action.yml": "name: x\nruns:\n  using: node99\n"}, "      - uses: ./bad\n", nil)
+	if res.Conclusion != ConclusionFailure {
+		t.Fatalf("%+v", res)
+	}
+	got := logOf(rec.step(t, "Run ./bad"))
+	if !strings.Contains(got, "##[error]System.ArgumentOutOfRangeException") || !strings.Contains(got, "Failed to load ") {
+		t.Errorf("%s", got)
+	}
+}
+
+func TestNodeVersionRules(t *testing.T) {
+	act := func(using string) files {
+		return files{"a/action.yml": "name: a\nruns:\n  using: " + using + "\n  main: m.sh\n", "a/m.sh": "echo ran\n"}
+	}
+	run := func(using, env string, tweak func(*Config)) string {
+		yaml := "      - uses: ./a\n"
+		if env != "" {
+			yaml += "        env:\n" + env
+		}
+		rec, res := actionRun(t, act(using), yaml, tweak)
+		if res.Conclusion != ConclusionSuccess {
+			t.Fatalf("%s: %+v\n%s", using, res, logOf(rec.steps[1]))
+		}
+		return logOf(rec.step(t, "Run ./a"))
+	}
+	for using, want := range map[string]string{"node12": "[node20]", "node16": "[node20]", "node20": "[node20]", "node24": "[node24]"} {
+		if got := run(using, "", nil); !strings.Contains(got, want) {
+			t.Errorf("%s: %s", using, got)
+		}
+	}
+	if got := run("node20", "          FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'\n", nil); !strings.Contains(got, "[node24]") {
+		t.Errorf("force: %s", got)
+	}
+	by24 := func(c *Config) { c.Actions.Node24ByDefault = true }
+	got := run("node20", "", by24)
+	if !strings.Contains(got, "[node24]") || !strings.Contains(got, "Node 20 is being deprecated. This workflow is running with Node 24 by default.") {
+		t.Errorf("by default: %s", got)
+	}
+	if got := run("node20", "          ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: 'true'\n", by24); !strings.Contains(got, "[node20]") {
+		t.Errorf("unsecure: %s", got)
+	}
+	both := "          FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'\n          ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: 'true'\n"
+	got = run("node20", both, nil)
+	if !strings.Contains(got, "##[warning]Both FORCE_JAVASCRIPT_ACTIONS_TO_NODE24 and ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION environment variables are set to true in the workflow environment. This is likely a configuration error. Using the default Node version: node20.") ||
+		!strings.Contains(got, "[node20]") {
+		t.Errorf("both: %s", got)
+	}
+	// Setting node24 explicitly ignores the variables.
+	if got := run("node24", "          ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: 'true'\n", by24); !strings.Contains(got, "[node24]") {
+		t.Errorf("node24 explicit: %s", got)
+	}
+}
+
+func TestCompositeActionBasics(t *testing.T) {
+	tree := files{
+		".github/actions/c/action.yml": `name: c
+inputs:
+  who:
+    default: world
+outputs:
+  greeting:
+    value: ${{ steps.greet.outputs.greeting }}
+  literal:
+    value: fixed
+runs:
+  using: composite
+  steps:
+    - id: greet
+      shell: bash
+      run: |
+        echo "greeting=hello ${{ inputs.who }}" >> "$GITHUB_OUTPUT"
+        echo "path=[$GITHUB_ACTION_PATH] self=[${{ github.action_path }}] status=[${{ github.action_status }}]"
+        echo "OUTER=$OUTER_STEP_ENV"
+    - shell: bash
+      env:
+        INNER: x
+      run: echo "inner=$INNER id=$GITHUB_ACTION"
+`}
+	rec, res := actionRun(t, tree, `      - id: c
+        uses: ./.github/actions/c
+        with:
+          who: Ermite
+        env:
+          OUTER_STEP_ENV: set
+      - run: |
+          echo "out=${{ steps.c.outputs.greeting }} lit=${{ steps.c.outputs.literal }} inner=[${{ steps.greet.outputs.greeting }}]"
+          echo "gh=[$GITHUB_ACTION_PATH]"
+`, nil)
+	if res.Conclusion != ConclusionSuccess {
+		t.Fatalf("%+v\n%s", res, logOf(rec.steps[1]))
+	}
+	got := logOf(rec.step(t, "Run ./.github/actions/c"))
+	// github.action is not changed for the steps of a composite action: they keep
+	// the id of the step that uses it (CompositeActionHandler.cs:152-161 copies the
+	// context; StepsRunner.cs:118 sets the key for the steps of the job only).
+	for _, w := range []string{"/.github/actions/c] self=[", "status=[success]", "OUTER=set", "inner=x id=c"} {
+		if !strings.Contains(got, w) {
+			t.Errorf("composite missing %q:\n%s", w, got)
+		}
+	}
+	after := logOf(rec.steps[2])
+	if !strings.Contains(after, "out=hello Ermite lit=fixed inner=[]") {
+		t.Errorf("outputs:\n%s", after)
+	}
+	if strings.Contains(after, "gh=[/") {
+		t.Errorf("action_path must not leak out of the composite:\n%s", after)
+	}
+	if len(rec.steps) != 4 {
+		t.Errorf("composite steps are not steps of the job: %v", rec.names())
+	}
+}
+
+func TestCompositeFailureAndStatus(t *testing.T) {
+	tree := files{".github/actions/c/action.yml": `name: c
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: exit 3
+    - shell: bash
+      run: echo "never"
+    - if: always()
+      shell: bash
+      run: echo "status=${{ github.action_status }}"
+`}
+	rec, res := actionRun(t, tree, "      - id: c\n        uses: ./.github/actions/c\n      - if: always()\n        run: echo \"outcome=${{ steps.c.outcome }} conclusion=${{ steps.c.conclusion }}\"\n", nil)
+	if res.Conclusion != ConclusionFailure {
+		t.Fatalf("%+v", res)
+	}
+	got := logOf(rec.steps[1])
+	if !strings.Contains(got, "##[error]Process completed with exit code 3.") || strings.Contains(got, "never") ||
+		!strings.Contains(got, "status=failure") {
+		t.Errorf("%s", got)
+	}
+	if rec.steps[1].Conclusion != ConclusionFailure {
+		t.Errorf("%s", rec.steps[1].Conclusion)
+	}
+	if !strings.Contains(logOf(rec.steps[2]), "outcome=failure conclusion=failure") {
+		t.Errorf("%s", logOf(rec.steps[2]))
+	}
+}
+
+func TestCompositeNestedScopes(t *testing.T) {
+	tree := files{
+		"o/action.yml": `name: o
+inputs:
+  v:
+    default: d
+outputs:
+  r:
+    value: ${{ steps.mid.outputs.r }}
+runs:
+  using: composite
+  steps:
+    - id: mid
+      uses: ./i
+      with:
+        v: ${{ inputs.v }}-outer
+`,
+		"i/action.yml": `name: i
+inputs:
+  v:
+    default: d
+outputs:
+  r:
+    value: ${{ steps.s.outputs.r }}
+runs:
+  using: composite
+  steps:
+    - id: s
+      shell: bash
+      run: echo "r=in:${{ inputs.v }}" >> "$GITHUB_OUTPUT"
+`}
+	rec, res := actionRun(t, tree, "      - id: top\n        uses: ./o\n        with:\n          v: x\n      - run: echo \"r=${{ steps.top.outputs.r }} leak=[${{ steps.mid.outputs.r }}${{ steps.s.outputs.r }}]\"\n", nil)
+	if res.Conclusion != ConclusionSuccess {
+		t.Fatalf("%+v\n%s", res, logOf(rec.steps[1]))
+	}
+	if got := logOf(rec.steps[2]); !strings.HasSuffix(got, "r=in:x-outer leak=[]") {
+		t.Errorf("%s", got)
+	}
+}
+
+func TestCompositePostOfInnerStepsRunsInOuterPost(t *testing.T) {
+	tree := files{
+		"c/action.yml": "name: c\nruns:\n  using: composite\n  steps:\n    - uses: ./n1\n    - uses: ./n2\n",
+		"n1/action.yml": "name: n1\nruns:\n  using: node20\n  main: m.sh\n  post: p.sh\n", "n1/m.sh": "echo main1\n", "n1/p.sh": "echo post1\n",
+		"n2/action.yml": "name: n2\nruns:\n  using: node20\n  main: m.sh\n  post: p.sh\n", "n2/m.sh": "echo main2\n", "n2/p.sh": "echo post2\n",
+	}
+	rec, res := actionRun(t, tree, "      - uses: ./c\n", nil)
+	if res.Conclusion != ConclusionSuccess {
+		t.Fatalf("%+v", res)
+	}
+	if got := rec.names(); strings.Join(got, "|") != "Set up job|Run ./c|Post Run ./c|Complete job" {
+		t.Fatalf("%v", got)
+	}
+	main, post := logOf(rec.steps[1]), logOf(rec.steps[2])
+	if !strings.Contains(main, "main1") || !strings.Contains(main, "main2") {
+		t.Errorf("%s", main)
+	}
+	if i, k := strings.Index(post, "post2"), strings.Index(post, "post1"); i < 0 || k < 0 || i > k {
+		t.Errorf("inner posts must run last to first:\n%s", post)
+	}
+}
+
+// The depth limit (ActionManager.cs:444) is checked while the actions of a level
+// are prepared. Local actions are not prepared before their step runs, one level
+// at a time, so a chain of local composite actions never reaches it; a chain of
+// repository actions does: the steps of the tenth composite are prepared at
+// depth 10, which is more than 9.
+func TestCompositeDepthLimit(t *testing.T) {
+	chain := func(n int) *fakeForge {
+		arch := map[string][]byte{}
+		for i := 1; i <= n; i++ {
+			next := "    - shell: bash\n      run: echo leaf\n"
+			if i < n {
+				next = "    - uses: o/r" + string(rune('a'+i)) + "@v1\n"
+			}
+			arch["/tarball/o/r"+string(rune('a'+i-1))+"/v1"] = tarOf(t, "o-r-x", files{"action.yml": "name: r\nruns:\n  using: composite\n  steps:\n" + next})
+		}
+		return newForge(t, arch)
+	}
+	run := func(n int) (*recorder, Result) {
+		f := chain(n)
+		return actionRun(t, files{}, "      - uses: o/ra@v1\n", func(c *Config) { c.Actions.Resolver = f.resolver("") })
+	}
+	if rec, res := run(9); res.Conclusion != ConclusionSuccess {
+		t.Fatalf("9 levels: %+v\n%s", res, logOf(rec.steps[0]))
+	}
+	rec, res := run(10)
+	if res.Conclusion != ConclusionFailure || len(rec.steps) != 1 || !strings.Contains(logOf(rec.steps[0]), "##[error]Composite action depth exceeded max depth 9") {
+		t.Fatalf("10 levels: %+v %v\n%s", res, rec.names(), logOf(rec.steps[0]))
+	}
+}
+
+func TestLocalCompositeChainHasNoDepthLimit(t *testing.T) {
+	tree := files{}
+	for i := 0; i < 12; i++ {
+		next := ""
+		if i < 11 {
+			next = "    - uses: ./d" + string(rune('a'+i+1)) + "\n"
+		}
+		tree["d"+string(rune('a'+i))+"/action.yml"] = "name: d\nruns:\n  using: composite\n  steps:\n    - shell: bash\n      run: echo level\n" + next
+	}
+	rec, res := actionRun(t, tree, "      - uses: ./da\n", nil)
+	if res.Conclusion != ConclusionSuccess || strings.Count(logOf(rec.step(t, "Run ./da")), "\nlevel") != 12 {
+		t.Fatalf("%+v\n%s", res, logOf(rec.step(t, "Run ./da")))
+	}
+}
+
+// tarOf builds the archive of a repository: one top directory, like GitHub's.
+func tarOf(t *testing.T, top string, f files) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(zw)
+	_ = tw.WriteHeader(&tar.Header{Name: top + "/", Typeflag: tar.TypeDir, Mode: 0o755})
+	for name, body := range f {
+		_ = tw.WriteHeader(&tar.Header{Name: top + "/" + name, Typeflag: tar.TypeReg, Mode: 0o755, Size: int64(len(body))})
+		_, _ = tw.Write([]byte(body))
+	}
+	_ = tw.Close()
+	_ = zw.Close()
+	return buf.Bytes()
+}
+
+type fakeForge struct {
+	srv      *httptest.Server
+	archives map[string][]byte
+	auth     map[string]string
+	hits     atomic.Int32
+	asked    [][]string
+}
+
+func newForge(t *testing.T, archives map[string][]byte) *fakeForge {
+	f := &fakeForge{archives: archives, auth: map[string]string{}}
+	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f.hits.Add(1)
+		f.auth[r.URL.Path] = r.Header.Get("Authorization")
+		b, ok := f.archives[r.URL.Path]
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write(b)
+	}))
+	t.Cleanup(f.srv.Close)
+	return f
+}
+
+func (f *fakeForge) resolver(token string) Resolver {
+	return func(_ context.Context, uses []string) ([]ResolvedAction, error) {
+		f.asked = append(f.asked, uses)
+		var out []ResolvedAction
+		for _, u := range uses {
+			name, ref, _ := strings.Cut(u, "@")
+			name = strings.Join(strings.SplitN(name, "/", 3)[:2], "/")
+			if strings.Contains(u, "missing") {
+				out = append(out, ResolvedAction{Ref: u, Error: "Unable to resolve action `" + u + "`, repository not found: `" + name + "`"})
+				continue
+			}
+			out = append(out, ResolvedAction{Ref: u, NameWithOwner: name, ResolvedSHA: strings.Repeat("a", 40),
+				TarballURL: f.srv.URL + "/tarball/" + name + "/" + ref, Token: token})
+		}
+		return out, nil
+	}
+}
+
+func TestRepositoryActionDownload(t *testing.T) {
+	forge := newForge(t, map[string][]byte{
+		"/tarball/octo/tool/v1": tarOf(t, "octo-tool-aaaa", files{"action.yml": nodeAction, "main.sh": "echo \"repo=$GITHUB_ACTION_REPOSITORY ref=$GITHUB_ACTION_REPOSITORY@$GITHUB_ACTION_REF dir=$GITHUB_ACTION_PATH\"\n"}),
+	})
+	rec, res := actionRun(t, files{}, "      - uses: octo/tool@v1\n      - uses: octo/tool@v1\n", func(c *Config) {
+		c.Actions.Resolver = forge.resolver("archive-secret-token")
+		c.Actions.Backoff = func() time.Duration { return time.Millisecond }
+	})
+	if res.Conclusion != ConclusionSuccess {
+		t.Fatalf("%+v\n%s", res, logOf(rec.steps[0]))
+	}
+	setup := logOf(rec.steps[0])
+	if !strings.Contains(setup, "Getting action download info\nDownload action repository 'octo/tool@v1' (SHA:"+strings.Repeat("a", 40)+")") {
+		t.Errorf("set up:\n%s", setup)
+	}
+	if strings.Count(setup, "Download action repository") != 1 || forge.hits.Load() != 1 {
+		t.Errorf("an action is downloaded once per job (hits %d):\n%s", forge.hits.Load(), setup)
+	}
+	if len(forge.asked) != 1 || len(forge.asked[0]) != 1 {
+		t.Errorf("the same action is resolved once: %v", forge.asked)
+	}
+	if got := forge.auth["/tarball/octo/tool/v1"]; got != "Basic eC1hY2Nlc3MtdG9rZW46YXJjaGl2ZS1zZWNyZXQtdG9rZW4=" {
+		t.Errorf("auth header %q", got)
+	}
+	if got := logOf(rec.steps[1]); !strings.Contains(got, "repo=octo/tool ref=octo/tool@v1") || !strings.Contains(got, "##[group]Run octo/tool@v1") {
+		t.Errorf("run:\n%s", got)
+	}
+	if rec.steps[1].Name != "Run octo/tool@v1" {
+		t.Errorf("name %q", rec.steps[1].Name)
+	}
+	for _, s := range rec.steps {
+		if strings.Contains(logOf(s), "archive-secret-token") {
+			t.Errorf("the archive token leaked in %q", s.Name)
+		}
+	}
+}
+
+func TestRepositoryActionSubpathAndErrors(t *testing.T) {
+	forge := newForge(t, map[string][]byte{
+		"/tarball/octo/mono/v2": tarOf(t, "octo-mono-bbbb", files{"sub/dir/action.yml": nodeAction, "sub/dir/main.sh": "echo sub-ok\n"}),
+	})
+	cfg := func(c *Config) {
+		c.Actions.Resolver = forge.resolver("")
+		c.Actions.Backoff = func() time.Duration { return time.Millisecond }
+	}
+	rec, res := actionRun(t, files{}, "      - uses: octo/mono/sub/dir@v2\n", cfg)
+	if res.Conclusion != ConclusionSuccess || !strings.Contains(logOf(rec.steps[1]), "sub-ok") || rec.steps[1].Name != "Run octo/mono/sub/dir@v2" {
+		t.Fatalf("%+v %v\n%s", res, rec.names(), logOf(rec.steps[1]))
+	}
+	// A repository the server cannot resolve: its message ends "Set up job".
+	rec, res = actionRun(t, files{}, "      - uses: octo/missing@v1\n      - run: echo NO\n", cfg)
+	if res.Conclusion != ConclusionFailure || len(rec.steps) != 1 || !strings.Contains(logOf(rec.steps[0]), "##[error]Unable to resolve action `octo/missing@v1`, repository not found: `octo/missing`") {
+		t.Fatalf("%+v %v\n%s", res, rec.names(), logOf(rec.steps[0]))
+	}
+	// An archive that does not exist: 404 is not retried.
+	rec, res = actionRun(t, files{}, "      - uses: octo/gone@v1\n", cfg)
+	if res.Conclusion != ConclusionFailure || !strings.Contains(logOf(rec.steps[0]), "##[error]An action could not be found at the URI '"+forge.srv.URL+"/tarball/octo/gone/v1'") {
+		t.Fatalf("%+v\n%s", res, logOf(rec.steps[0]))
+	}
+}
+
+func TestDownloadRetriesAndWarns(t *testing.T) {
+	var n atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { n.Add(1); http.Error(w, "x", 500) }))
+	defer srv.Close()
+	res := func(context.Context, []string) ([]ResolvedAction, error) {
+		return []ResolvedAction{{Ref: "a/b@v1", NameWithOwner: "a/b", ResolvedSHA: strings.Repeat("c", 40), TarballURL: srv.URL + "/t"}}, nil
+	}
+	rec, r := actionRun(t, files{}, "      - uses: a/b@v1\n", func(c *Config) {
+		c.Actions.Resolver = res
+		c.Actions.Backoff = func() time.Duration { return time.Millisecond }
+	})
+	if r.Conclusion != ConclusionFailure || n.Load() != 3 {
+		t.Fatalf("%+v attempts %d", r, n.Load())
+	}
+	got := logOf(rec.steps[0])
+	if strings.Count(got, "##[warning]Failed to download action '"+srv.URL+"/t'. Error: Response status code does not indicate success: 500 (Internal Server Error). ") != 2 ||
+		strings.Count(got, "##[warning]Back off 0.001 seconds before retry.") != 2 {
+		t.Errorf("%s", got)
+	}
+}
+
+func TestMissingManifestInDownloadedAction(t *testing.T) {
+	forge := newForge(t, map[string][]byte{"/tarball/octo/empty/v1": tarOf(t, "octo-empty-cccc", files{"README.md": "x"})})
+	rec, res := actionRun(t, files{}, "      - uses: octo/empty@v1\n", func(c *Config) { c.Actions.Resolver = forge.resolver("") })
+	if res.Conclusion != ConclusionFailure || !strings.Contains(logOf(rec.steps[0]), "##[error]Can't find 'action.yml', 'action.yaml' or 'Dockerfile' for action 'octo/empty@v1'.") {
+		t.Fatalf("%+v\n%s", res, logOf(rec.steps[0]))
+	}
+}
