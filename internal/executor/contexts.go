@@ -490,9 +490,9 @@ func (s *State) secrets() *expr.Dictionary {
 	return d
 }
 
-// Secrets returns the values that must never appear in the job log: the
-// token and the base64 of "x-access-token:<token>" the runner also masks
-// (ExecutionContext.cs:1026-1028).
+// Secrets returns the values that must never leave the job: the token and the
+// base64 of "x-access-token:<token>" (ExecutionContext.cs:1026-1028); newMasker
+// adds their other encodings.
 func (s *State) Secrets() []string {
 	t := s.GitHub("token")
 	if t == "" {

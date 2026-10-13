@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -144,9 +145,12 @@ type job struct {
 	baseEnv     []string
 	lookupPath  string
 	before      map[string]bool
-	// masks are the secret values replaced by *** in every log line.
-	masks []string
+	// masker hides the secrets in everything reported; it is set once the
+	// contexts are built, before any step runs.
+	masker atomic.Pointer[masker]
 }
+
+func (j *job) mask(s string) string { return j.masker.Load().mask(s) }
 
 func (j *job) now() time.Time {
 	if j.cfg.Now != nil {
@@ -162,6 +166,7 @@ func Run(cancel *Canceller, cfg Config) Result {
 		cancel = NewCanceller()
 	}
 	j := &job{cfg: cfg, cancel: cancel, trackID: "github_" + uuid.NewString()}
+	j.cfg.Reporter = &maskReporter{j: j, next: cfg.Reporter}
 	defer func() {
 		if j.fc != nil {
 			_ = j.fc.Close()
@@ -171,7 +176,8 @@ func Run(cancel *Canceller, cfg Config) Result {
 		}
 	}()
 	res := j.run()
-	cfg.Reporter.JobCompleted(res)
+	res.Error = j.mask(res.Error)
+	j.cfg.Reporter.JobCompleted(res)
 	return res
 }
 
@@ -243,9 +249,6 @@ func (j *job) timeoutMinutes() int {
 func (j *job) write(num int, line string) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	for _, m := range j.masks {
-		line = strings.ReplaceAll(line, m, "***")
-	}
 	j.cfg.Reporter.Log(num, j.now(), line)
 }
 
@@ -258,6 +261,7 @@ func (j *job) out(num int, text string) {
 
 // tagged writes tag+message; only the first line carries the tag.
 func (j *job) tagged(num int, tag, msg string) {
+	msg = j.mask(msg) // before the cut: a secret split by it would leak its start
 	if len(msg) > maxIssueMessageLength && tag != "" {
 		msg = msg[:maxIssueMessageLength]
 	}
@@ -371,7 +375,7 @@ func (j *job) setUp() ([]*workflow.Step, error) {
 		state.WithLayout(layout)
 	}
 	j.state = state
-	j.masks = state.Secrets()
+	j.masker.Store(newMasker(state.Secrets()...))
 
 	// Features that arrive in later phases fail the job with a clear message.
 	switch {
@@ -541,6 +545,11 @@ func (j *job) completeJob(num int) map[string]string {
 		for _, p := range pairs {
 			if p.Value == "" {
 				j.debug(num, fmt.Sprintf("Skip output '%s' since it's empty", p.Key))
+				continue
+			}
+			// An output that holds a secret is dropped (JobExtension.cs:819-824).
+			if j.masker.Load().has(p.Value) {
+				j.tagged(num, "##[warning]", fmt.Sprintf("Skip output '%s' since it may contain secret.", p.Key))
 				continue
 			}
 			// ermite refuses outputs above 1 MiB in total (runner.proto,
