@@ -7,7 +7,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 func writeTree(t *testing.T, root string, files map[string]string) {
@@ -136,6 +138,53 @@ func TestHashFilesBrokenLinkFails(t *testing.T) {
 	}
 	if got, err := hashFilesIn(t.Context(), ws, "/h", []string{"**"}, true); err != nil || got != "" {
 		t.Errorf("followed, the link is omitted: %q %v", got, err)
+	}
+}
+
+// A FIFO in the workspace must not hang the function: opening it for reading
+// blocks until a writer comes. It is skipped, directly or through a symbolic
+// link, with or without --follow-symbolic-links.
+func TestHashFilesSkipsFIFOs(t *testing.T) {
+	ws := t.TempDir()
+	writeTree(t, ws, map[string]string{"a.txt": "alpha\n"})
+	if err := syscall.Mkfifo(filepath.Join(ws, "pipe"), 0o644); err != nil {
+		t.Skipf("no FIFO here: %v", err)
+	}
+	if err := os.Symlink("pipe", filepath.Join(ws, "pipelink")); err != nil {
+		t.Fatal(err)
+	}
+	only, err := hashFilesIn(t.Context(), ws, "/h", []string{"a.txt"}, false)
+	if err != nil || only == "" {
+		t.Fatalf("%q %v", only, err)
+	}
+	for _, tc := range []struct {
+		patterns []string
+		follow   bool
+	}{
+		{[]string{"**"}, false}, {[]string{"**"}, true}, {[]string{"pipe"}, false}, {[]string{"pipe"}, true},
+		{[]string{"pipelink"}, false}, {[]string{"pipelink"}, true},
+	} {
+		done := make(chan struct{})
+		var got string
+		var err error
+		go func() {
+			defer close(done)
+			got, err = hashFilesIn(t.Context(), ws, "/h", tc.patterns, tc.follow)
+		}()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%q follow=%v: hangs on a FIFO", tc.patterns, tc.follow)
+		}
+		if err != nil {
+			t.Errorf("%q follow=%v: %v", tc.patterns, tc.follow, err)
+		}
+		if tc.patterns[0] == "**" && got != only {
+			t.Errorf("%q follow=%v: %q, want a.txt alone %q", tc.patterns, tc.follow, got, only)
+		}
+		if tc.patterns[0] != "**" && got != "" {
+			t.Errorf("%q follow=%v: %q, want no file", tc.patterns, tc.follow, got)
+		}
 	}
 }
 

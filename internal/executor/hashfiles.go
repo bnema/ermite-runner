@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"bnema.dev/ermite-actions/expr"
@@ -717,10 +718,14 @@ func readDirNames(root *os.Root, rel string) ([]string, error) {
 }
 
 // hashOne is the SHA-256 digest of a regular file. ok is false for what is not
-// hashed: a directory (reached through a link), a special file, a link that
-// leaves the workspace or is broken.
+// hashed: a directory (reached through a link), a special file (a FIFO, a
+// socket, a device: skipped, where the official script would hang on a FIFO),
+// a link that leaves the workspace or is broken.
 func hashOne(ctx context.Context, root *os.Root, rel string) (sum []byte, ok bool, err error) {
-	f, err := root.Open(rel)
+	// O_NONBLOCK: opening a FIFO for reading blocks until a writer comes, and
+	// nothing can interrupt the open. Reached through a symbolic link (or with
+	// --follow-symbolic-links) a FIFO would hang the job until its timeout.
+	f, err := root.OpenFile(rel, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, false, nil
 	}
