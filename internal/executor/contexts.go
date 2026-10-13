@@ -3,6 +3,7 @@
 package executor
 
 import (
+	"encoding/base64"
 	"fmt"
 	"path/filepath"
 	"runtime"
@@ -241,6 +242,8 @@ func NewState(contextsJSON, matrixJSON, jobKey string, r RunnerInfo, repoFallbac
 	s := &State{other: map[string]expr.Value{}, env: newOrdered(), steps: map[string]*stepCtx{}, status: "success"}
 
 	// github: token first, then what the server gave (ExecutionContext.cs:1023-1037).
+	// The token is the one the server sent in github.token (GitHub's
+	// system.github.token variable), empty when it sent none.
 	gh := expr.NewDictionary()
 	gh.Add("token", expr.String(""))
 	if v, ok := root.Get("github"); ok {
@@ -250,6 +253,9 @@ func NewState(contextsJSON, matrixJSON, jobKey string, r RunnerInfo, repoFallbac
 		}
 		for _, p := range d.Pairs() {
 			if strings.EqualFold(p.Key, "token") {
+				if t, isStr := p.Value.(expr.String); isStr {
+					gh = setKey(gh, "token", t)
+				}
 				continue
 			}
 			gh.Add(p.Key, p.Value)
@@ -463,12 +469,36 @@ func (s *State) Values(env *ordered) map[string]expr.Value {
 		"job":     s.job,
 		"env":     env.Dict(),
 		"steps":   s.stepsValue(),
-		"secrets": expr.NewDictionary(),
+		"secrets": s.secrets(),
 	}
 	for k, v := range s.other {
 		m[k] = v
 	}
 	return m
+}
+
+// secrets is the secrets context. The job's token is in it as GITHUB_TOKEN
+// (Variables.ToSecretsContext keeps every secret variable but the access token;
+// GitHub's job message carries the token as a secret named GITHUB_TOKEN, recorded:
+// ctx-inputs-vars, secrets.GITHUB_TOKEN == github.token). Without a token the
+// context is empty.
+func (s *State) secrets() *expr.Dictionary {
+	d := expr.NewDictionary()
+	if t := s.GitHub("token"); t != "" {
+		d.Add("GITHUB_TOKEN", expr.String(t))
+	}
+	return d
+}
+
+// Secrets returns the values that must never appear in the job log: the
+// token and the base64 of "x-access-token:<token>" the runner also masks
+// (ExecutionContext.cs:1026-1028).
+func (s *State) Secrets() []string {
+	t := s.GitHub("token")
+	if t == "" {
+		return nil
+	}
+	return []string{t, base64.StdEncoding.EncodeToString([]byte("x-access-token:" + t))}
 }
 
 // ServerContexts returns the contexts that the server has when it evaluates

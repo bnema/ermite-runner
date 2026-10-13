@@ -144,6 +144,8 @@ type job struct {
 	baseEnv     []string
 	lookupPath  string
 	before      map[string]bool
+	// masks are the secret values replaced by *** in every log line.
+	masks []string
 }
 
 func (j *job) now() time.Time {
@@ -241,6 +243,9 @@ func (j *job) timeoutMinutes() int {
 func (j *job) write(num int, line string) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
+	for _, m := range j.masks {
+		line = strings.ReplaceAll(line, m, "***")
+	}
 	j.cfg.Reporter.Log(num, j.now(), line)
 }
 
@@ -372,6 +377,7 @@ func (j *job) setUp() ([]*workflow.Step, error) {
 		state.WithLayout(layout)
 	}
 	j.state = state
+	j.masks = state.Secrets()
 
 	// Features that arrive in later phases fail the job with a clear message.
 	switch {
