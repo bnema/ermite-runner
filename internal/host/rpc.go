@@ -106,6 +106,24 @@ func newClient(baseURL, token string, base http.RoundTripper, insecure bool) erm
 	return ermiteconnect.NewRunnerServiceClient(hc, strings.TrimRight(baseURL, "/")+APIPath)
 }
 
+// ServerFeaturesFunc returns the function that reads the features of the
+// server with GetVersion, which needs no authentication. It is called once
+// per job.
+func (c Config) ServerFeaturesFunc(url string) ServerFeatures {
+	hc := &http.Client{
+		Transport:     bearer{base: http.DefaultTransport, allowInsecure: c.InsecureHTTP},
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+	client := ermiteconnect.NewServerServiceClient(hc, strings.TrimRight(url, "/")+APIPath)
+	return func(ctx context.Context) ([]string, error) {
+		resp, err := client.GetVersion(ctx, connect.NewRequest(&ermite.GetVersionRequest{}))
+		if err != nil {
+			return nil, err
+		}
+		return resp.Msg.GetFeatures(), nil
+	}
+}
+
 // APIPath is where ermite serves its API under the base URL, as in ermite's own
 // client (internal/adapters/client.APIPath there).
 const APIPath = "/-/api"

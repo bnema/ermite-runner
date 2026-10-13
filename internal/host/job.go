@@ -70,6 +70,10 @@ type jobRun struct {
 	// contexts is Job.Contexts as handed to the executor: with the server URLs
 	// pointed at the runner's URL when guest forge access is on.
 	contexts string
+	// features is what the server accepts; annLists are the annotations the
+	// executor sent for steps that have not completed yet (see results.go).
+	features jobFeatures
+	annLists map[int32][]*ermite.Annotation
 	// hard stops the sandbox at once; set before the session starts.
 	hard    func()
 	result  *execpb.JobResult
@@ -282,7 +286,7 @@ func (j *jobRun) stepStarted(s *execpb.StepStarted) {
 	u := &ermite.StepUpdate{Number: s.Number, Name: cutName(s.Name), State: ermite.StepState_STEP_STATE_IN_PROGRESS, StartedAt: tsOf(s.UnixNano)}
 	j.steps[s.Number] = u
 	j.mu.Unlock()
-	j.outbox.Step(u)
+	j.outbox.Step(u, nil)
 }
 
 func (j *jobRun) stepCompleted(s *execpb.StepCompleted) {
@@ -312,9 +316,18 @@ func (j *jobRun) stepCompleted(s *execpb.StepCompleted) {
 		u.Conclusion = ermite.CiConclusion_CI_CONCLUSION_FAILURE
 	}
 	u.CompletedAt = tsOf(s.UnixNano)
+	// The outcome is how the step ended before continue-on-error; a runner that
+	// does not say leaves it unspecified, which means the conclusion.
+	if o := conclusionOf(s.Outcome); o != ermite.CiConclusion_CI_CONCLUSION_UNSPECIFIED {
+		if o == ermite.CiConclusion_CI_CONCLUSION_TIMED_OUT {
+			o = ermite.CiConclusion_CI_CONCLUSION_FAILURE
+		}
+		u.Outcome = o
+	}
 	j.steps[s.Number] = u
+	anns := j.takeAnnotations(s.Number)
 	j.mu.Unlock()
-	j.outbox.Step(u)
+	j.outbox.Step(u, anns)
 }
 
 // logLine checks and queues a line of the log. The step must be one that was
@@ -577,6 +590,7 @@ func (j *jobRun) execute(ctx context.Context, rt *Runner, stopHard <-chan struct
 	}
 	// Stop runs to completion even when the job context is done.
 	defer j.stopSandbox(ctx, rt, sb)
+	j.features = j.loadFeatures(ctx, rt)
 
 	conn, err := j.startSandbox(ctx, rt, sb, stopHard)
 	if err != nil {
@@ -643,11 +657,13 @@ func (j *jobRun) drive(conn sandbox.Conn, rt *Runner) (*execpb.Exit, error) {
 		Matrix: j.job.Matrix, Contexts: j.contexts, Repo: j.job.Repo, TimeoutMinutes: int32(j.timeoutMinutes()),
 		DeadlineMs: max(1, time.Until(j.deadline()).Milliseconds()),
 		RunnerName: rt.Cfg.Name, RunnerVersion: rt.Cfg.Version, RunnerEnvironment: rt.Cfg.environment(),
+		SendAnnotations: j.features.annotations, SendSummaries: j.features.summaries,
 	}}
 	_, exit, err := execstream.DriveJob(conn, run, j.cancelCh, execstream.JobHandler{
 		StepStarted: j.stepStarted, StepCompleted: j.stepCompleted,
-		Log:       j.logLine,
-		JobResult: func(r *execpb.JobResult) { j.mu.Lock(); j.result = r; j.mu.Unlock() },
+		Log:             j.logLine,
+		JobResult:       func(r *execpb.JobResult) { j.mu.Lock(); j.result = r; j.mu.Unlock() },
+		StepAnnotations: j.stepAnnotations, StepSummary: j.stepSummary,
 	})
 	return exit, err
 }
@@ -742,6 +758,9 @@ func (j *jobRun) complete(ctx context.Context, conclusion ermite.CiConclusion, o
 		JobId: j.job.JobId, Conclusion: conclusion, Outputs: outputs,
 		RunnerShutdown: shutdown && conclusion == ermite.CiConclusion_CI_CONCLUSION_CANCELLED,
 		Steps:          j.finalSteps(conclusion),
+		// The annotations no UpdateJob has carried: all of them with the
+		// step they belong to, whole lists (replace semantics).
+		Annotations: j.allPendingAnnotations(),
 	}
 	err := j.sendComplete(ctx, req, conclusion)
 	if err == nil || ctx.Err() != nil || classify(err) != kindPermanent {

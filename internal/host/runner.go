@@ -32,6 +32,10 @@ type Runner struct {
 	// Job builds the client of a job from its job token.
 	Job    func(jobToken string) ermiteconnect.RunnerServiceClient
 	Timing Timing
+	// Features lists the features of the server (GetVersion). Annotations and
+	// step summaries are sent only when it says "ci.annotations" and
+	// "ci.summaries". Nil means neither is sent.
+	Features ServerFeatures
 
 	// now returns the current time; tests replace it.
 	now func() time.Time

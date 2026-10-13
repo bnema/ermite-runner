@@ -32,9 +32,13 @@ type Line struct {
 
 // Result is what a job reported.
 type Result struct {
-	Complete *ermite.CompleteJobRequest
-	Lines    []Line
-	Steps    map[int32]*ermite.StepUpdate
+	// Annotations are those stored, by step (replace-per-step rule), and
+	// Summaries the Markdown stored by step.
+	Annotations map[int32][]*ermite.Annotation
+	Summaries   map[int32]string
+	Complete    *ermite.CompleteJobRequest
+	Lines       []Line
+	Steps       map[int32]*ermite.StepUpdate
 }
 
 // Server is the fake. Create it with New; URL is where to point the runner.
@@ -55,6 +59,8 @@ type Server struct {
 }
 
 type jobState struct {
+	annots   map[int32][]*ermite.Annotation
+	sums     map[int32]string
 	log      *LogStore
 	steps    map[int32]*ermite.StepUpdate
 	complete *ermite.CompleteJobRequest
@@ -108,7 +114,15 @@ func (s *Server) Result(jobID string) Result {
 	for k, v := range st.steps {
 		steps[k] = v
 	}
-	return Result{Complete: st.complete, Lines: st.log.Lines(), Steps: steps}
+	anns := map[int32][]*ermite.Annotation{}
+	for k, v := range st.annots {
+		anns[k] = v
+	}
+	sums := map[int32]string{}
+	for k, v := range st.sums {
+		sums[k] = v
+	}
+	return Result{Complete: st.complete, Lines: st.log.Lines(), Steps: steps, Annotations: anns, Summaries: sums}
 }
 
 func (s *Server) violation(msg string) { s.Errors = append(s.Errors, msg) } // called with s.mu held
@@ -147,7 +161,7 @@ func (s *Server) FetchJob(_ context.Context, r *connect.Request[ermite.FetchJobR
 	j := s.queue[0]
 	s.queue = s.queue[1:]
 	s.assigned[j.JobToken] = j
-	s.jobs[j.JobId] = &jobState{log: &LogStore{OnViolation: s.violation}, steps: map[int32]*ermite.StepUpdate{}}
+	s.jobs[j.JobId] = &jobState{log: &LogStore{OnViolation: s.violation}, steps: map[int32]*ermite.StepUpdate{}, annots: map[int32][]*ermite.Annotation{}, sums: map[int32]string{}}
 	return connect.NewResponse(&ermite.FetchJobResponse{Job: j}), nil
 }
 
@@ -182,6 +196,7 @@ func (s *Server) UpdateJob(_ context.Context, r *connect.Request[ermite.UpdateJo
 		}
 		st.steps[u.Number] = u
 	}
+	replace(st.annots, r.Msg.Annotations)
 	return connect.NewResponse(&ermite.UpdateJobResponse{}), nil
 }
 
@@ -219,6 +234,7 @@ func (s *Server) CompleteJob(_ context.Context, r *connect.Request[ermite.Comple
 	for _, u := range r.Msg.Steps {
 		st.steps[u.Number] = u
 	}
+	replace(st.annots, r.Msg.Annotations)
 	s.done <- r.Msg.JobId
 	return connect.NewResponse(&ermite.CompleteJobResponse{Conclusion: r.Msg.Conclusion, Applied: true}), nil
 }
@@ -233,4 +249,32 @@ func (s *Server) WatchJob(ctx context.Context, r *connect.Request[ermite.WatchJo
 	}
 	<-ctx.Done()
 	return ctx.Err()
+}
+
+// replace applies the rule of runner.proto: the annotations of each step the
+// call names replace those stored.
+func replace(stored map[int32][]*ermite.Annotation, anns []*ermite.Annotation) {
+	named := map[int32]bool{}
+	for _, a := range anns {
+		if !named[a.StepNumber] {
+			named[a.StepNumber] = true
+			stored[a.StepNumber] = nil
+		}
+		stored[a.StepNumber] = append(stored[a.StepNumber], a)
+	}
+}
+
+// UploadSummary stores the summary of a step.
+func (s *Server) UploadSummary(_ context.Context, r *connect.Request[ermite.UploadSummaryRequest]) (*connect.Response[ermite.UploadSummaryResponse], error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st, err := s.job(r.Header(), r.Msg.JobId)
+	if err != nil {
+		return nil, err
+	}
+	if st.complete != nil {
+		return nil, ended(st.complete.Conclusion)
+	}
+	st.sums[r.Msg.StepNumber] = r.Msg.Markdown
+	return connect.NewResponse(&ermite.UploadSummaryResponse{}), nil
 }

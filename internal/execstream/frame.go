@@ -115,6 +115,10 @@ type JobHandler struct {
 	StepCompleted func(*execpb.StepCompleted)
 	Log           func(*execpb.Log)
 	JobResult     func(*execpb.JobResult)
+	// StepAnnotations and StepSummary come before the StepCompleted of their
+	// step.
+	StepAnnotations func(*execpb.StepAnnotations)
+	StepSummary     func(*execpb.StepSummary)
 }
 
 // DriveJob is Drive for a session that carries a job: besides Output frames it
@@ -178,6 +182,14 @@ func DriveJob(rw io.ReadWriter, run *execpb.Run, cancel <-chan *execpb.Cancel, h
 		case *execpb.Frame_JobResult:
 			if h.JobResult != nil {
 				h.JobResult(b.JobResult)
+			}
+		case *execpb.Frame_StepAnnotations:
+			if h.StepAnnotations != nil {
+				h.StepAnnotations(b.StepAnnotations)
+			}
+		case *execpb.Frame_StepSummary:
+			if h.StepSummary != nil {
+				h.StepSummary(b.StepSummary)
 			}
 		case *execpb.Frame_Exit:
 			return hello, b.Exit, nil

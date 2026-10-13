@@ -4,6 +4,7 @@ package host
 
 import (
 	"context"
+	"sort"
 	"sync"
 	"time"
 
@@ -37,6 +38,17 @@ type logLine struct {
 type event struct {
 	line *logLine
 	step *ermite.StepUpdate
+	// anns are the annotations that go with a step snapshot, by step number:
+	// the whole list of each step they name (replace semantics).
+	anns map[int32][]*ermite.Annotation
+	// summary is a step summary for UploadSummary.
+	summary *summary
+}
+
+// summary is the Markdown of one step.
+type summary struct {
+	step     int32
+	markdown string
 }
 
 // outbox sends logs and step updates of one job to ermite, in order, one call
@@ -61,6 +73,11 @@ type outbox struct {
 	dead    bool
 	done    chan struct{}
 
+	// pendingAnns are the annotations the server may not hold yet, by step: the
+	// last list queued for the step, until an UpdateJob that carried it
+	// succeeded. CompleteJob sends what is left.
+	pendingAnns map[int32][]*ermite.Annotation
+
 	offset int64 // lines the server holds, as far as we know
 	// offsetMaybeStale is set when a send was cut short by its context while
 	// the call may have been applied by the server with the response lost: the
@@ -71,6 +88,7 @@ type outbox struct {
 // callClient is the part of the RunnerService client the job uses.
 type callClient interface {
 	UpdateJob(context.Context, *connect.Request[ermite.UpdateJobRequest]) (*connect.Response[ermite.UpdateJobResponse], error)
+	UploadSummary(context.Context, *connect.Request[ermite.UploadSummaryRequest]) (*connect.Response[ermite.UploadSummaryResponse], error)
 	AppendLog(context.Context, *connect.Request[ermite.AppendLogRequest]) (*connect.Response[ermite.AppendLogResponse], error)
 }
 
@@ -121,16 +139,55 @@ func (o *outbox) Log(l logLine) {
 	o.cond.Broadcast()
 }
 
-// Step queues a step snapshot.
-func (o *outbox) Step(s *ermite.StepUpdate) {
+// Step queues a step snapshot, with the annotations that changed (may be nil).
+func (o *outbox) Step(s *ermite.StepUpdate, anns map[int32][]*ermite.Annotation) {
 	o.mu.Lock()
 	if o.dead {
 		o.mu.Unlock()
 		return
 	}
-	o.events = append(o.events, event{step: s})
+	for n, l := range anns {
+		if o.pendingAnns == nil {
+			o.pendingAnns = map[int32][]*ermite.Annotation{}
+		}
+		o.pendingAnns[n] = l
+	}
+	o.events = append(o.events, event{step: s, anns: anns})
 	o.mu.Unlock()
 	o.cond.Broadcast()
+}
+
+// Summary queues the summary of a step.
+func (o *outbox) Summary(step int32, markdown string) {
+	o.mu.Lock()
+	if o.dead {
+		o.mu.Unlock()
+		return
+	}
+	o.events = append(o.events, event{summary: &summary{step, markdown}})
+	o.mu.Unlock()
+	o.cond.Broadcast()
+}
+
+// PendingAnnotations returns the annotations that no successful UpdateJob has
+// carried, for CompleteJob, in step order.
+func (o *outbox) PendingAnnotations() []*ermite.Annotation {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return flattenAnnotations(o.pendingAnns)
+}
+
+func flattenAnnotations(m map[int32][]*ermite.Annotation) []*ermite.Annotation {
+	steps := make([]int32, 0, len(m))
+	for n := range m {
+		steps = append(steps, n)
+	}
+	sort.Slice(steps, func(a, b int) bool { return steps[a] < steps[b] })
+	var out []*ermite.Annotation
+	for _, n := range steps {
+		out = append(out, m[n]...)
+	}
+	return out
 }
 
 // Close sends what is queued, then stops the sender. It waits at most until
@@ -179,7 +236,7 @@ func (o *outbox) next(ctx context.Context) []event {
 		return nil
 	}
 	first := o.events[0]
-	if first.step != nil {
+	if first.step != nil || first.summary != nil {
 		o.events = o.events[1:]
 		return []event{first}
 	}
@@ -208,9 +265,12 @@ func (o *outbox) loop(ctx context.Context) {
 		if batch == nil {
 			return
 		}
-		if batch[0].step != nil {
-			o.sendStep(ctx, batch[0].step)
-		} else {
+		switch {
+		case batch[0].step != nil:
+			o.sendStep(ctx, batch[0].step, batch[0].anns)
+		case batch[0].summary != nil:
+			o.sendSummary(ctx, batch[0].summary)
+		default:
 			o.sendLines(ctx, batch)
 		}
 		o.mu.Lock()
@@ -251,13 +311,50 @@ func (o *outbox) retry(ctx context.Context, what string, call func(context.Conte
 	}
 }
 
-func (o *outbox) sendStep(ctx context.Context, s *ermite.StepUpdate) {
+func (o *outbox) sendStep(ctx context.Context, s *ermite.StepUpdate, anns map[int32][]*ermite.Annotation) {
+	req := &ermite.UpdateJobRequest{JobId: o.jobID, Steps: []*ermite.StepUpdate{s}, Annotations: flattenAnnotations(anns)}
 	err := o.retry(ctx, "UpdateJob", func(c context.Context) error {
-		_, err := o.client.UpdateJob(c, connect.NewRequest(&ermite.UpdateJobRequest{JobId: o.jobID, Steps: []*ermite.StepUpdate{s}}))
+		_, err := o.client.UpdateJob(c, connect.NewRequest(req))
+		return err
+	})
+	if err == nil {
+		// The server holds these lists now, unless a later one replaced them.
+		o.mu.Lock()
+		for n, l := range anns {
+			if cur := o.pendingAnns[n]; len(cur) == len(l) && (len(l) == 0 || &cur[0] == &l[0]) {
+				delete(o.pendingAnns, n)
+			}
+		}
+		o.mu.Unlock()
+		return
+	}
+	if ctx.Err() == nil && classify(err) == kindPermanent {
+		o.log.Error().Err(err).Int32("step", s.Number).Msg("UpdateJob refused")
+		if len(anns) > 0 {
+			// The annotations may be what the server refused: the step update
+			// alone must not be lost with them.
+			o.mu.Lock()
+			for n := range anns {
+				delete(o.pendingAnns, n)
+			}
+			o.mu.Unlock()
+			if err := o.retry(ctx, "UpdateJob", func(c context.Context) error {
+				_, err := o.client.UpdateJob(c, connect.NewRequest(&ermite.UpdateJobRequest{JobId: o.jobID, Steps: []*ermite.StepUpdate{s}}))
+				return err
+			}); err != nil && ctx.Err() == nil && classify(err) == kindPermanent {
+				o.log.Error().Err(err).Int32("step", s.Number).Msg("UpdateJob refused without annotations")
+			}
+		}
+	}
+}
+
+func (o *outbox) sendSummary(ctx context.Context, s *summary) {
+	err := o.retry(ctx, "UploadSummary", func(c context.Context) error {
+		_, err := o.client.UploadSummary(c, connect.NewRequest(&ermite.UploadSummaryRequest{JobId: o.jobID, StepNumber: s.step, Markdown: s.markdown}))
 		return err
 	})
 	if err != nil && ctx.Err() == nil && classify(err) == kindPermanent {
-		o.log.Error().Err(err).Int32("step", s.Number).Msg("UpdateJob refused")
+		o.log.Error().Err(err).Int32("step", s.step).Msg("UploadSummary refused, the summary is dropped")
 	}
 }
 
