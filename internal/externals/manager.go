@@ -52,15 +52,18 @@ type Manager struct {
 	// Client downloads the archives; nil means a client with a 15 minute limit
 	// that follows redirects to https locations only.
 	Client *http.Client
-	// RetryEvery is how long a failed download waits before the next attempt
-	// (default 5 minutes).
+	// RetryEvery is the interval of the background retries of the downloads that
+	// failed for a reason that may pass (default 5 minutes).
 	RetryEvery time.Duration
 
 	mu      sync.Mutex
 	state   map[string]entry // by artifact name
-	bg      context.Context  // the context of Start, for retries
-	lastTry time.Time
 	syncing bool
+
+	// stubMu serialises the creation of the directories of unavailable tools;
+	// stubs remembers the ones built (or checked) by this process.
+	stubMu sync.Mutex
+	stubs  map[string]bool
 }
 
 type entry struct {
@@ -79,13 +82,11 @@ func New(stateDir string) (m *Manager, ok bool) {
 // runner with a working network normally takes its first job with everything in
 // place, and one without never waits long. When the wait ends the download goes
 // on; jobs that start meanwhile see the tools that are not done yet as
-// unavailable ("still being downloaded"). Retries of failed downloads use ctx
-// too: they stop with it.
+// unavailable ("still being downloaded"). Downloads that failed for a reason
+// that may pass (network, HTTP status) are retried every RetryEvery, jobs or
+// not, until ctx ends.
 func (m *Manager) Start(ctx context.Context, wait time.Duration) {
 	log := zerowrap.FromCtx(ctx)
-	m.mu.Lock()
-	m.bg = ctx
-	m.mu.Unlock()
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -93,12 +94,45 @@ func (m *Manager) Start(ctx context.Context, wait time.Duration) {
 			log.Warn().Err(err).Msg("some external tools are not available: jobs that need them fail with the reason; the download is retried")
 		}
 	}()
+	go m.retryLoop(ctx)
 	select {
 	case <-done:
 	case <-time.After(wait):
 		log.Warn().Dur("waited", wait).Msg("external tools are still downloading: the runner takes jobs, those that need them fail until they are ready")
 	case <-ctx.Done():
 	}
+}
+
+// retryLoop calls Sync every RetryEvery while a tool is missing for a reason
+// that may pass.
+func (m *Manager) retryLoop(ctx context.Context) {
+	every := m.RetryEvery
+	if every == 0 {
+		every = 5 * time.Minute
+	}
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		if m.wantsRetry() {
+			_ = m.Sync(ctx)
+		}
+	}
+}
+
+func (m *Manager) wantsRetry() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, e := range m.state {
+		if e.retry {
+			return true
+		}
+	}
+	return false
 }
 
 // Sync makes the externals match the table: it downloads what is missing,
@@ -116,7 +150,7 @@ func (m *Manager) Sync(ctx context.Context) error {
 		m.state = map[string]entry{}
 	}
 	m.mu.Unlock()
-	defer func() { m.mu.Lock(); m.syncing = false; m.lastTry = time.Now(); m.mu.Unlock() }()
+	defer func() { m.mu.Lock(); m.syncing = false; m.mu.Unlock() }()
 
 	log := zerowrap.FromCtx(ctx)
 	var errs []error
@@ -130,8 +164,6 @@ func (m *Manager) Sync(ctx context.Context) error {
 		switch {
 		case !ok:
 			e = m.unavailable(name, fmt.Sprintf("there is no %s build for linux-%s", name, m.Arch), false)
-		case a.SHA256 == "":
-			e = m.unavailable(name, fmt.Sprintf("%s (Node.js %s) is not available yet on this runner: %s", a.Name, a.Version, a.Pending), false)
 		default:
 			var err error
 			if e, err = m.ensure(ctx, a); err != nil {
@@ -154,28 +186,29 @@ func (m *Manager) Sync(ctx context.Context) error {
 }
 
 // Externals implements sandbox.ExternalsSource. A tool that has no outcome yet
-// is reported as being downloaded. When a download failed for a reason that may
-// pass, a retry is started in the background (at most one per RetryEvery).
+// is reported as being downloaded. It has no side effect on the downloads (the
+// retries run on a timer, see Start); the directories of unavailable tools are
+// built at most once and only touched here.
 func (m *Manager) Externals() []sandbox.External {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	var out []sandbox.External
-	retry := false
-	for _, n := range m.names() {
-		e, ok := m.state[n]
-		if !ok {
-			e = m.unavailable(n, n+" is still being downloaded on this runner: run the job again in a few minutes", false)
+	names := m.names()
+	got := make([]entry, len(names))
+	have := make([]bool, len(names))
+	for i, n := range names {
+		got[i], have[i] = m.state[n]
+	}
+	m.mu.Unlock()
+
+	// Outside the lock: the first call for a reason writes files.
+	out := make([]sandbox.External, len(names))
+	for i, n := range names {
+		switch {
+		case !have[i]:
+			got[i] = m.unavailable(n, n+" is still being downloaded on this runner: run the job again in a few minutes", false)
+		case got[i].ext.Unavailable:
+			touch(got[i].ext.Dir) // handed out again: not stale
 		}
-		retry = retry || e.retry
-		out = append(out, e.ext)
-	}
-	every := m.RetryEvery
-	if every == 0 {
-		every = 5 * time.Minute
-	}
-	if retry && !m.syncing && m.bg != nil && m.bg.Err() == nil && time.Since(m.lastTry) >= every {
-		m.lastTry = time.Now() // no second attempt before the next interval
-		go func(ctx context.Context) { _ = m.Sync(ctx) }(m.bg)
+		out[i] = got[i].ext
 	}
 	return out
 }
@@ -204,35 +237,147 @@ func (m *Manager) artifact(name string) (Artifact, bool) {
 
 const unavailableDir = ".unavailable"
 
-// unavailable builds the entry of a tool that is missing: a directory with the
-// reason in ExternalUnavailableFile and a bin/node stub that prints it. Its name carries a hash of the reason, so
-// that the ID (and so a VM's disk) changes only when the reason does.
+// unavailableStub is the bin/node of a tool that is missing: it prints the
+// reason (the file UNAVAILABLE next to bin/) on stderr and fails, so that a job
+// which runs the tool anyway (a node action, a run step) gets the reason rather
+// than "No such file or directory". It does not contain the reason.
+const unavailableStub = "#!/bin/sh\ncat \"$(dirname \"$0\")/../" + sandbox.ExternalUnavailableFile + "\" >&2\nexit 1\n"
+
+// unavailable returns the entry of a tool that is missing: a directory with the
+// reason in ExternalUnavailableFile and the bin/node stub. Its name carries a
+// hash of the reason, so that the ID (and so a VM's disk) changes only when the
+// reason does. The directory is built once per process, complete, under a
+// temporary name and renamed into place; files that exist with the right
+// content are never rewritten, and a missing or different one is replaced
+// through a rename, so a reader (the build of a VM's externals disk, a job that
+// runs the stub) never sees a file half written. Each call touches the
+// directory: the pruning keeps what was handed out in the last hour.
 func (m *Manager) unavailable(name, reason string, retry bool) entry {
 	sum := sha256.Sum256([]byte(name + "\x00" + reason))
 	id := "unavailable-" + hex.EncodeToString(sum[:8])
 	dir := filepath.Join(m.Dir, unavailableDir, name+"-"+id)
 	e := entry{retry: retry, ext: sandbox.External{Name: name, ID: id, Dir: dir, Unavailable: true}}
-	if err := os.MkdirAll(filepath.Join(dir, "bin"), 0o755); err != nil {
-		return e // still marked unavailable; the sandbox then has an empty directory
-	}
-	// Modes are set explicitly: the umask of the runner must not hide the files
-	// from the user of the sandbox.
-	for _, d := range []string{filepath.Dir(dir), dir, filepath.Join(dir, "bin")} {
-		_ = os.Chmod(d, 0o755)
-	}
-	write := func(name, content string, mode os.FileMode) {
-		p := filepath.Join(dir, name)
-		if os.WriteFile(p, []byte(content), mode) == nil {
-			_ = os.Chmod(p, mode)
+
+	m.stubMu.Lock()
+	defer m.stubMu.Unlock()
+	if _, err := os.Lstat(filepath.Join(dir, "bin", "node")); err != nil || !m.stubs[dir] {
+		// Best effort: on failure the entry stays marked unavailable and the
+		// sandbox sees whatever there is.
+		if err := buildStub(dir, reason); err == nil {
+			if m.stubs == nil {
+				m.stubs = map[string]bool{}
+			}
+			m.stubs[dir] = true
 		}
 	}
-	write(sandbox.ExternalUnavailableFile, reason+"\n", 0o644)
-	// A stub where the executable would be, so that a job which runs it anyway
-	// (a node action, a run step) fails with the reason instead of "No such file
-	// or directory". The reason goes through a quoted here-document: it is data.
-	stub := "#!/bin/sh\ncat >&2 <<'ERMITE_UNAVAILABLE'\n" + strings.ReplaceAll(reason, "\nERMITE_UNAVAILABLE", "") + "\nERMITE_UNAVAILABLE\nexit 1\n"
-	write("bin/node", stub, 0o755)
+	touch(dir)
 	return e
+}
+
+func touch(dir string) {
+	now := time.Now()
+	_ = os.Chtimes(dir, now, now)
+}
+
+// buildStub makes dir hold the UNAVAILABLE file and the bin/node stub, with
+// explicit modes (the umask of the runner must not hide them from the user of
+// the sandbox).
+func buildStub(dir, reason string) error {
+	parent := filepath.Dir(dir)
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		return err
+	}
+	if err := os.Chmod(parent, 0o755); err != nil {
+		return err
+	}
+	files := []stubFile{
+		{sandbox.ExternalUnavailableFile, reason + "\n", 0o644},
+		{"bin/node", unavailableStub, 0o755},
+	}
+	if _, err := os.Lstat(dir); errors.Is(err, os.ErrNotExist) {
+		tmp, err := os.MkdirTemp(parent, ".tmp-")
+		if err != nil {
+			return err
+		}
+		defer func() { _ = os.RemoveAll(tmp) }()
+		if err := os.Mkdir(filepath.Join(tmp, "bin"), 0o755); err != nil {
+			return err
+		}
+		for _, d := range []string{tmp, filepath.Join(tmp, "bin")} {
+			if err := os.Chmod(d, 0o755); err != nil {
+				return err
+			}
+		}
+		for _, f := range files {
+			if err := f.write(tmp); err != nil {
+				return err
+			}
+		}
+		if err := os.Rename(tmp, dir); err == nil {
+			return nil
+		}
+		// Lost a race with another process, or the directory appeared: repair it.
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "bin"), 0o755); err != nil {
+		return err
+	}
+	for _, f := range files {
+		if f.current(dir) {
+			continue
+		}
+		if err := f.write(dir); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+type stubFile struct {
+	name, content string
+	mode          os.FileMode
+}
+
+// current reports whether the file exists with this content and mode.
+func (f stubFile) current(dir string) bool {
+	p := filepath.Join(dir, f.name)
+	st, err := os.Lstat(p)
+	if err != nil || !st.Mode().IsRegular() || st.Mode().Perm() != f.mode {
+		return false
+	}
+	b, err := os.ReadFile(p)
+	return err == nil && string(b) == f.content
+}
+
+// write creates the file through a temporary file in the same directory and a
+// rename, never in place.
+func (f stubFile) write(dir string) error {
+	p := filepath.Join(dir, f.name)
+	tmp, err := os.CreateTemp(filepath.Dir(p), ".tmp-")
+	if err != nil {
+		return err
+	}
+	ok := false
+	defer func() {
+		if !ok {
+			_ = os.Remove(tmp.Name())
+		}
+	}()
+	if _, err := tmp.WriteString(f.content); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(f.mode); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp.Name(), p); err != nil {
+		return err
+	}
+	ok = true
+	return nil
 }
 
 // ensure returns the ready entry of a, downloading it when needed. On failure it
@@ -290,7 +435,7 @@ func (m *Manager) fetch(ctx context.Context, a Artifact, final string) error {
 	if err := os.Mkdir(tree, 0o755); err != nil {
 		return err
 	}
-	if err := extractTarGz(archive, tree); err != nil {
+	if err := extractTarGz(archive, tree, a.StripTop); err != nil {
 		return &verdictError{fmt.Errorf("unpack: %w", err)}
 	}
 	if !isReady(tree) {

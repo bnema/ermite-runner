@@ -9,17 +9,22 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/bnema/zerowrap"
 
 	"bnema.dev/ermite-runner/internal/sandbox"
 )
@@ -38,15 +43,11 @@ func TestPinnedTable(t *testing.T) {
 		if !strings.HasPrefix(a.URL, "https://") || !strings.HasSuffix(a.URL, ".tar.gz") || !strings.Contains(a.URL, "v"+a.Version+"/") {
 			t.Errorf("%s: URL %q", key, a.URL)
 		}
-		if a.SHA256 == "" {
-			if a.Pending == "" {
-				t.Errorf("%s has neither a checksum nor a reason", key)
-			}
-			if !strings.HasPrefix(a.URL, alpineDist) {
-				t.Errorf("%s: only the alpine builds may lack a checksum", key)
-			}
-		} else if !hex64.MatchString(a.SHA256) {
+		if !hex64.MatchString(a.SHA256) {
 			t.Errorf("%s: SHA-256 %q", key, a.SHA256)
+		}
+		if a.StripTop != strings.HasPrefix(a.URL, nodeDist) {
+			t.Errorf("%s: StripTop %v for %s", key, a.StripTop, a.URL)
 		}
 	}
 	// actions/runner's externals.sh: node20 and node24 for both architectures,
@@ -59,6 +60,11 @@ func TestPinnedTable(t *testing.T) {
 	for _, a := range Pinned {
 		if strings.HasPrefix(a.Name, "node20") && a.Version != "20.20.2" || strings.HasPrefix(a.Name, "node24") && a.Version != "24.21.0" {
 			t.Errorf("%s pins %s", a.Name, a.Version)
+		}
+	}
+	for _, a := range Pinned {
+		if strings.HasSuffix(a.Name, "_alpine") && (a.Arch != "x64" || !strings.HasPrefix(a.URL, alpineDist+"v"+a.Version+"/node-v"+a.Version+"-alpine-x64.tar.gz")) {
+			t.Errorf("%s: %+v", a.Name, a)
 		}
 	}
 	if got := len(ForArch(Pinned, "arm64")); got != 2 {
@@ -138,7 +144,7 @@ func extractBytes(t *testing.T, data []byte) (string, error) {
 	if err := os.Mkdir(dst, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	return dst, extractTarGz(arch, dst)
+	return dst, extractTarGz(arch, dst, true)
 }
 
 func TestExtractLayoutAndModes(t *testing.T) {
@@ -260,14 +266,14 @@ func TestLinkTargetRule(t *testing.T) {
 		name, target string
 		ok           bool
 	}{
-		{"t/bin/npm", "../lib/x", true},
-		{"t/bin/npm", "../../x", false}, // one above the tree
-		{"t/lib/a/b/l", "../../../x", true},
-		{"t/lib/a/b/l", "../../../../x", false},
-		{"t/l", "bin/node", true},
-		{"t/l", "../x", false},
-		{"t/l", "/abs", false},
-		{"t/a/l", "b/../c", false},
+		{"bin/npm", "../lib/x", true},
+		{"bin/npm", "../../x", false}, // one above the tree
+		{"lib/a/b/l", "../../../x", true},
+		{"lib/a/b/l", "../../../../x", false},
+		{"l", "bin/node", true},
+		{"l", "../x", false},
+		{"l", "/abs", false},
+		{"a/l", "b/../c", false},
 	} {
 		if err := checkLinkTarget(c.name, c.target); (err == nil) != c.ok {
 			t.Errorf("%s -> %s: %v", c.name, c.target, err)
@@ -278,13 +284,15 @@ func TestLinkTargetRule(t *testing.T) {
 // ---- the manager
 
 type fixture struct {
-	srv     *httptest.Server
-	hits    atomic.Int64
-	archive []byte
-	sum     string
-	table   []Artifact
-	dir     string
-	m       *Manager
+	srv           *httptest.Server
+	hits          atomic.Int64
+	archive       []byte
+	sum           string
+	archiveAlpine []byte // no top directory, like actions/alpine_nodejs
+	sumAlpine     string
+	table         []Artifact
+	dir           string
+	m             *Manager
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -293,9 +301,17 @@ func newFixture(t *testing.T) *fixture {
 	f.archive = targz(t, nodeTree()...)
 	s := sha256.Sum256(f.archive)
 	f.sum = hex.EncodeToString(s[:])
+	f.archiveAlpine = targz(t,
+		ent{name: "./bin/", typ: tar.TypeDir, mode: 0o755},
+		ent{name: "./bin/node", mode: 0o755, body: "#!/bin/sh\necho alpine\n"},
+		ent{name: "./LICENSE", mode: 0o644, body: "x"})
+	sa := sha256.Sum256(f.archiveAlpine)
+	f.sumAlpine = hex.EncodeToString(sa[:])
 	f.srv = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.hits.Add(1)
 		switch {
+		case strings.HasSuffix(r.URL.Path, "/alpine.tar.gz"):
+			_, _ = w.Write(f.archiveAlpine)
 		case strings.HasSuffix(r.URL.Path, "-linux-x64.tar.gz"):
 			_, _ = w.Write(f.archive)
 		case strings.HasSuffix(r.URL.Path, "tampered.tar.gz"):
@@ -307,9 +323,9 @@ func newFixture(t *testing.T) *fixture {
 	t.Cleanup(f.srv.Close)
 	f.dir = filepath.Join(t.TempDir(), "externals")
 	f.table = []Artifact{
-		{Name: "node20", Version: "1.0.0", Arch: "x64", URL: f.srv.URL + "/v1.0.0/node-v1.0.0-linux-x64.tar.gz", SHA256: f.sum},
-		{Name: "node24", Version: "2.0.0", Arch: "x64", URL: f.srv.URL + "/v2.0.0/node-v2.0.0-linux-x64.tar.gz", SHA256: f.sum},
-		{Name: "node20_alpine", Version: "1.0.0", Arch: "x64", URL: f.srv.URL + "/v1.0.0/alpine.tar.gz", Pending: "no checksum yet"},
+		{Name: "node20", Version: "1.0.0", Arch: "x64", URL: f.srv.URL + "/v1.0.0/node-v1.0.0-linux-x64.tar.gz", SHA256: f.sum, StripTop: true},
+		{Name: "node24", Version: "2.0.0", Arch: "x64", URL: f.srv.URL + "/v2.0.0/node-v2.0.0-linux-x64.tar.gz", SHA256: f.sum, StripTop: true},
+		{Name: "node20_alpine", Version: "1.0.0", Arch: "x64", URL: f.srv.URL + "/v1.0.0/alpine.tar.gz", SHA256: f.sumAlpine},
 	}
 	f.m = &Manager{Dir: f.dir, Arch: "x64", Table: f.table, Client: f.srv.Client()}
 	return f
@@ -339,20 +355,15 @@ func TestSyncDownloadsVerifiesAndReuses(t *testing.T) {
 	if b, err := os.ReadFile(filepath.Join(n24.Dir, "bin", "node")); err != nil || !strings.Contains(string(b), "echo v1") {
 		t.Fatalf("node24: %q %v", b, err)
 	}
-	// The alpine build has no checksum: not downloaded, with the reason.
-	if !al.Unavailable {
+	// The alpine archive has no top directory: bin/node is at its root.
+	if al.Unavailable {
 		t.Fatalf("alpine: %+v", al)
 	}
-	reason, err := os.ReadFile(filepath.Join(al.Dir, sandbox.ExternalUnavailableFile))
-	if err != nil || !strings.Contains(string(reason), "not available yet") || !strings.Contains(string(reason), "no checksum yet") {
-		t.Fatalf("reason: %q %v", reason, err)
-	}
-	stub, err := os.ReadFile(filepath.Join(al.Dir, "bin", "node"))
-	if err != nil || !strings.Contains(string(stub), "not available yet") {
-		t.Fatalf("stub: %q %v", stub, err)
+	if b, err := os.ReadFile(filepath.Join(al.Dir, "bin", "node")); err != nil || !strings.Contains(string(b), "echo alpine") {
+		t.Fatalf("alpine node: %q %v", b, err)
 	}
 	hits := f.hits.Load()
-	if hits != 2 {
+	if hits != 3 {
 		t.Fatalf("downloads: %d", hits)
 	}
 
@@ -366,6 +377,29 @@ func TestSyncDownloadsVerifiesAndReuses(t *testing.T) {
 	}
 	if got := byName(m2.Externals())["node24"]; got.ID != n24.ID {
 		t.Fatalf("ID changed: %q -> %q", n24.ID, got.ID)
+	}
+}
+
+// runStub runs the bin/node of an unavailable tool: it must fail with the reason
+// on stderr, from wherever the tool is mounted.
+func runStub(t *testing.T, e sandbox.External, want string) {
+	t.Helper()
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh needed")
+	}
+	// Run it through a symlinked path too, as a guest sees it at another place.
+	cmd := exec.Command(filepath.Join(e.Dir, "bin", "node"), "-e", "x")
+	var stderr, stdout bytes.Buffer
+	cmd.Stderr, cmd.Stdout = &stderr, &stdout
+	err := cmd.Run()
+	if ee, ok := err.(*exec.ExitError); !ok || ee.ExitCode() != 1 {
+		t.Fatalf("the stub must exit 1, got %v", err)
+	}
+	if !strings.Contains(stderr.String(), want) || stdout.Len() != 0 {
+		t.Fatalf("stub stderr %q stdout %q, want %q", stderr.String(), stdout.String(), want)
+	}
+	if b, _ := os.ReadFile(filepath.Join(e.Dir, "bin", "node")); strings.Contains(string(b), want) {
+		t.Fatalf("the stub holds the reason: %q", b)
 	}
 }
 
@@ -396,6 +430,7 @@ func TestSyncRefusesAChecksumMismatchBeforeExtracting(t *testing.T) {
 	if f.m.state["node20"].retry {
 		t.Fatal("retry scheduled for a mismatch")
 	}
+	runStub(t, n20, "SHA-256 mismatch")
 	ents, _ := os.ReadDir(f.dir)
 	for _, e := range ents {
 		if strings.HasPrefix(e.Name(), ".tmp-") {
@@ -432,12 +467,9 @@ func TestSyncOfflineKeepsTheRunnerGoing(t *testing.T) {
 		if !e.Unavailable {
 			t.Fatalf("%s available offline", n)
 		}
-		stub, _ := os.ReadFile(filepath.Join(e.Dir, "bin", "node"))
-		if !strings.Contains(string(stub), "is not available on this runner") || !strings.HasPrefix(string(stub), "#!/bin/sh") {
-			t.Fatalf("stub: %q", stub)
-		}
+		runStub(t, e, "is not available on this runner")
 	}
-	if !f.m.state["node20"].retry {
+	if !f.m.wantsRetry() {
 		t.Fatal("a network failure must be retried")
 	}
 }
@@ -504,7 +536,7 @@ func TestSyncKeepsOnlyPinnedVersions(t *testing.T) {
 	for _, e := range ents {
 		got = append(got, e.Name())
 	}
-	want := ".unavailable node20-1.0.0-x64 node24-2.0.0-x64"
+	want := "node20-1.0.0-x64 node20_alpine-1.0.0-x64 node24-2.0.0-x64"
 	if strings.Join(got, " ") != want {
 		t.Fatalf("kept %v, want %s", got, want)
 	}
@@ -587,7 +619,7 @@ func TestFailedDownloadIsRetriedInTheBackground(t *testing.T) {
 	}))
 	defer srv.Close()
 	m := &Manager{Dir: f.dir, Arch: "x64", Client: srv.Client(), RetryEvery: time.Millisecond}
-	m.Table = []Artifact{{Name: "node24", Version: "2.0.0", Arch: "x64", URL: srv.URL + "/a-linux-x64.tar.gz", SHA256: f.sum}}
+	m.Table = []Artifact{{Name: "node24", Version: "2.0.0", Arch: "x64", URL: srv.URL + "/a-linux-x64.tar.gz", SHA256: f.sum, StripTop: true}}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	m.Start(ctx, time.Minute)
@@ -629,4 +661,289 @@ func TestStartDoesNotWaitLongerThanAsked(t *testing.T) {
 		}
 	}
 	t.Fatal("the background sync did not stop")
+}
+
+// ---- the directories of unavailable tools
+
+func TestStubIsBuiltOnceAndNeverRewrittenInPlace(t *testing.T) {
+	m := &Manager{Dir: filepath.Join(t.TempDir(), "e"), Arch: "x64"}
+	e := m.unavailable("node24", "why", false)
+	node := filepath.Join(e.ext.Dir, "bin", "node")
+	file := filepath.Join(e.ext.Dir, sandbox.ExternalUnavailableFile)
+	ino := func(p string) uint64 {
+		st, err := os.Stat(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return st.Sys().(*syscall.Stat_t).Ino
+	}
+	n0, f0 := ino(node), ino(file)
+
+	// Again, from this process and from a fresh one (a restart): same files.
+	m.unavailable("node24", "why", false)
+	(&Manager{Dir: m.Dir, Arch: "x64"}).unavailable("node24", "why", false)
+	if ino(node) != n0 || ino(file) != f0 {
+		t.Fatal("an existing, correct stub was rewritten")
+	}
+
+	// A damaged or missing file is replaced by a rename (a new inode, so a reader
+	// of the old one never sees it change), with the right mode.
+	if err := os.WriteFile(node, nil, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(file); err != nil {
+		t.Fatal(err)
+	}
+	(&Manager{Dir: m.Dir, Arch: "x64"}).unavailable("node24", "why", false)
+	if b, _ := os.ReadFile(node); string(b) != unavailableStub {
+		t.Fatalf("stub not repaired: %q", b)
+	}
+	if b, _ := os.ReadFile(file); string(b) != "why\n" {
+		t.Fatalf("reason not repaired: %q", b)
+	}
+	if st, _ := os.Stat(node); st.Mode().Perm() != 0o755 || ino(node) == n0 {
+		t.Fatalf("repair in place: %v", st.Mode())
+	}
+	runStub(t, e.ext, "why")
+	left, _ := filepath.Glob(filepath.Join(e.ext.Dir, "*", ".tmp-*"))
+	left2, _ := filepath.Glob(filepath.Join(e.ext.Dir, ".tmp-*"))
+	if len(left)+len(left2) != 0 {
+		t.Fatalf("temporary files left: %v %v", left, left2)
+	}
+}
+
+// While Externals() and Sync() run in several goroutines, a reader that walks
+// the directories of the unavailable tools (as the build of a VM's externals
+// disk does) never sees a missing, empty or partial file.
+func TestConcurrentExternalsAndSyncNeverShowAHalfWrittenStub(t *testing.T) {
+	f := newFixture(t)
+	f.srv.Close() // offline: every tool is unavailable
+	ctx := context.Background()
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	var bad atomic.Value
+	check := func(dir string) {
+		for _, c := range []struct{ name, want string }{{"bin/node", unavailableStub}} {
+			b, err := os.ReadFile(filepath.Join(dir, c.name))
+			if err != nil {
+				bad.Store(fmt.Sprintf("%s/%s: %v", dir, c.name, err))
+			} else if string(b) != c.want {
+				bad.Store(fmt.Sprintf("%s/%s: %q", dir, c.name, b))
+			}
+		}
+		b, err := os.ReadFile(filepath.Join(dir, sandbox.ExternalUnavailableFile))
+		if err != nil || len(b) == 0 || !strings.HasSuffix(string(b), "\n") {
+			bad.Store(fmt.Sprintf("%s/UNAVAILABLE: %q %v", dir, b, err))
+		}
+	}
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				for _, e := range f.m.Externals() {
+					check(e.Dir) // what a driver would hand to the disk build
+				}
+			}
+		}()
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			dirs, _ := filepath.Glob(filepath.Join(f.dir, unavailableDir, "*"))
+			for _, d := range dirs {
+				if !strings.Contains(filepath.Base(d), ".tmp-") {
+					check(d)
+				}
+			}
+		}
+	}()
+	for i := 0; i < 5; i++ {
+		_ = f.m.Sync(ctx)
+	}
+	close(stop)
+	wg.Wait()
+	if v := bad.Load(); v != nil {
+		t.Fatalf("a reader saw an incomplete stub: %v", v)
+	}
+}
+
+func TestPruneKeepsStubDirectoriesHandedOutInTheLastHour(t *testing.T) {
+	f := newFixture(t)
+	f.srv.Close()
+	_ = f.m.Sync(context.Background()) // offline: stubs for the three tools
+	root := filepath.Join(f.dir, unavailableDir)
+	mk := func(name string, age time.Duration) string {
+		p := filepath.Join(root, name)
+		if err := os.MkdirAll(filepath.Join(p, "bin"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		old := time.Now().Add(-age)
+		if err := os.Chtimes(p, old, old); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	fresh := mk("node24-unavailable-aaaaaaaaaaaaaaaa", 5*time.Minute) // handed to a running job
+	stale := mk("node24-unavailable-bbbbbbbbbbbbbbbb", 2*time.Hour)
+
+	// A reason that is not current any more but was handed out again just now
+	// (Externals touches what it returns) survives; one that was not, does not.
+	cur := f.m.Externals()[0]
+	old := time.Now().Add(-3 * time.Hour)
+	if err := os.Chtimes(cur.Dir, old, old); err != nil {
+		t.Fatal(err)
+	}
+	f.m.Externals() // handed out: touched
+	if st, _ := os.Stat(cur.Dir); time.Since(st.ModTime()) > time.Minute {
+		t.Fatalf("Externals did not touch %s", cur.Dir)
+	}
+	// The set changes (the reasons are not the same any more), the touched
+	// directory is no longer current.
+	f.m.mu.Lock()
+	f.m.state = map[string]entry{}
+	f.m.mu.Unlock()
+	f.m.prune(zerowrap.Logger{}, map[string]bool{})
+	for _, p := range []string{fresh, cur.Dir} {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("%s was pruned although handed out in the last hour", p)
+		}
+	}
+	if _, err := os.Stat(stale); err == nil {
+		t.Error("a stale stub directory was kept")
+	}
+}
+
+// ---- retries
+
+func TestRetriesRunOnATickerWithoutAnyJob(t *testing.T) {
+	f := newFixture(t)
+	var up atomic.Bool
+	var calls atomic.Int64
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		if !up.Load() {
+			http.Error(w, "down", http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = w.Write(f.archive)
+	}))
+	defer srv.Close()
+	m := &Manager{Dir: f.dir, Arch: "x64", Client: srv.Client(), RetryEvery: 20 * time.Millisecond}
+	m.Table = []Artifact{{Name: "node24", Version: "2.0.0", Arch: "x64", URL: srv.URL + "/a-linux-x64.tar.gz", SHA256: f.sum, StripTop: true}}
+	ctx, cancel := context.WithCancel(context.Background())
+	m.Start(ctx, time.Minute)
+
+	// Nobody calls Externals(): the ticker alone retries.
+	deadline := time.Now().Add(10 * time.Second)
+	for calls.Load() < 3 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if calls.Load() < 3 {
+		t.Fatalf("%d attempts without any job", calls.Load())
+	}
+	up.Store(true)
+	for time.Now().Before(deadline) {
+		m.mu.Lock()
+		ok := !m.state["node24"].ext.Unavailable
+		m.mu.Unlock()
+		if ok {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if m.Externals()[0].Unavailable {
+		t.Fatal("never recovered")
+	}
+
+	// Once everything is there the ticker stops downloading, and with the context
+	// it stops altogether.
+	before := calls.Load()
+	time.Sleep(150 * time.Millisecond)
+	if calls.Load() != before {
+		t.Fatal("the ticker keeps requesting what it has")
+	}
+	cancel()
+	m.mu.Lock()
+	m.state["node24"] = entry{ext: sandbox.External{Name: "node24", Unavailable: true}, retry: true}
+	m.mu.Unlock()
+	time.Sleep(150 * time.Millisecond)
+	if calls.Load() != before {
+		t.Fatal("a retry ran after the context ended")
+	}
+}
+
+// A verdict (wrong checksum) is not retried by the ticker.
+func TestNoRetryForAVerdict(t *testing.T) {
+	f := newFixture(t)
+	f.table[0].SHA256 = strings.Repeat("0", 64)
+	m := &Manager{Dir: f.dir, Arch: "x64", Table: f.table[:1], Client: f.srv.Client(), RetryEvery: 10 * time.Millisecond}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m.Start(ctx, time.Minute)
+	hits := f.hits.Load()
+	time.Sleep(150 * time.Millisecond)
+	if f.hits.Load() != hits {
+		t.Fatal("a checksum mismatch was retried")
+	}
+}
+
+// ---- the real archives, when they are at hand
+
+// The actions/alpine_nodejs archives have no top directory (./bin/node). Set
+// ERMITE_RUNNER_TEST_ALPINE_DIR, or leave the files in /tmp/alpine-node.
+func TestRealAlpineArchives(t *testing.T) {
+	dir := os.Getenv("ERMITE_RUNNER_TEST_ALPINE_DIR")
+	if dir == "" {
+		dir = "/tmp/alpine-node"
+	}
+	ran := false
+	for _, a := range Pinned {
+		if !strings.HasSuffix(a.Name, "_alpine") {
+			continue
+		}
+		archive := filepath.Join(dir, filepath.Base(a.URL))
+		b, err := os.ReadFile(archive)
+		if err != nil {
+			t.Logf("%s: %v", a.Name, err)
+			continue
+		}
+		ran = true
+		t.Run(a.Name, func(t *testing.T) {
+			sum := sha256.Sum256(b)
+			if err := VerifySum(hex.EncodeToString(sum[:]), a.SHA256); err != nil {
+				t.Fatalf("the pinned checksum is not the file's: %v", err)
+			}
+			dst := t.TempDir()
+			if err := extractTarGz(archive, dst, a.StripTop); err != nil {
+				t.Fatal(err)
+			}
+			if !isReady(dst) {
+				t.Fatal("no executable bin/node")
+			}
+			if st, err := os.Stat(filepath.Join(dst, "LICENSE")); err != nil || st.Mode().Perm() != 0o644 {
+				t.Fatalf("LICENSE: %v %v", st, err)
+			}
+			// Taking the first component off would lose bin/node.
+			wrong := t.TempDir()
+			_ = extractTarGz(archive, wrong, true)
+			if isReady(wrong) {
+				t.Fatal("the alpine archive must not be unpacked with the top directory stripped")
+			}
+		})
+	}
+	if !ran {
+		t.Skipf("no alpine archive in %s", dir)
+	}
 }

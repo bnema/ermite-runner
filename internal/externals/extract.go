@@ -23,9 +23,10 @@ const (
 	maxUnpack  = 2 << 30
 )
 
-// extractTarGz unpacks the .tar.gz at archive into the existing directory dest,
-// dropping the first path component (Node.js archives hold one top directory,
-// node-vX-linux-x64). It refuses what could write or point outside dest:
+// extractTarGz unpacks the .tar.gz at archive into the existing directory dest.
+// With stripTop the first path component is dropped (the nodejs.org archives
+// hold one top directory, node-vX-linux-x64); without it the names are taken as
+// they are (the actions/alpine_nodejs archives start at ./bin/node). It refuses what could write or point outside dest:
 //
 //   - absolute names and names with ".." components;
 //   - anything but directories, regular files, symbolic links and hard links;
@@ -37,7 +38,7 @@ const (
 // Writes go through os.Root, which also refuses to follow a link out of dest.
 // File modes are reduced to 0755 / 0644: the owner of the files is whoever runs
 // the runner, and the sandboxes only read and execute them.
-func extractTarGz(archive, dest string) error {
+func extractTarGz(archive, dest string, stripTop bool) error {
 	f, err := os.Open(archive)
 	if err != nil {
 		return err
@@ -72,11 +73,11 @@ func extractTarGz(archive, dest string) error {
 		if h.Typeflag == tar.TypeXGlobalHeader {
 			continue
 		}
-		name, err := stripTop(h.Name)
+		name, err := cleanName(h.Name, stripTop)
 		if err != nil {
 			return err
 		}
-		if name == "" { // the top directory itself
+		if name == "" { // the top directory itself, or "./"
 			continue
 		}
 		if under(links, name) {
@@ -91,7 +92,7 @@ func extractTarGz(archive, dest string) error {
 			}
 			err = writeFile(root, name, tr, h.Mode)
 		case tar.TypeSymlink:
-			if err = checkLinkTarget(h.Name, h.Linkname); err == nil {
+			if err = checkLinkTarget(name, h.Linkname); err == nil {
 				if err = root.MkdirAll(path.Dir(name), 0o755); err == nil {
 					if err = root.Symlink(h.Linkname, name); err == nil {
 						links[name] = true
@@ -100,7 +101,7 @@ func extractTarGz(archive, dest string) error {
 			}
 		case tar.TypeLink:
 			var old string
-			if old, err = stripTop(h.Linkname); err == nil {
+			if old, err = cleanName(h.Linkname, stripTop); err == nil {
 				if old == "" || under(links, old) {
 					err = fmt.Errorf("hard link %q points at %q", h.Name, h.Linkname)
 				} else if err = root.MkdirAll(path.Dir(name), 0o755); err == nil {
@@ -139,9 +140,10 @@ func writeFile(root *os.Root, name string, r io.Reader, mode int64) error {
 	return f.Close()
 }
 
-// stripTop validates an archive path and removes its first component. It
-// returns "" for the top directory itself.
-func stripTop(name string) (string, error) {
+// cleanName validates an archive path and returns it relative to the tree: "./"
+// prefixes and empty or "." components are dropped, and with stripTop so is the
+// first component. It returns "" for the top of the tree itself.
+func cleanName(name string, stripTop bool) (string, error) {
 	if name == "" || strings.ContainsRune(name, 0) || strings.ContainsRune(name, '\\') {
 		return "", fmt.Errorf("invalid entry name %q", name)
 	}
@@ -158,22 +160,26 @@ func stripTop(name string) (string, error) {
 			parts = append(parts, p)
 		}
 	}
-	if len(parts) <= 1 {
-		return "", nil
+	if stripTop {
+		if len(parts) <= 1 {
+			return "", nil
+		}
+		parts = parts[1:]
 	}
-	return strings.Join(parts[1:], "/"), nil
+	return strings.Join(parts, "/"), nil
 }
 
 // checkLinkTarget accepts a relative target whose ".." components all come
-// first. Below the top of the tree that lexical rule is exact, because no entry
-// is ever unpacked below a symbolic link.
+// first and that stays inside the tree. name is the cleaned path of the link.
+// The lexical rule is exact because no entry is ever unpacked below a symbolic
+// link.
 func checkLinkTarget(name, target string) error {
 	if target == "" || strings.ContainsRune(target, 0) || strings.HasPrefix(target, "/") {
 		return fmt.Errorf("symbolic link %q has the target %q: absolute or empty", name, target)
 	}
 	// depth is how many directories lie between the tree's top and the link.
 	depth := 0
-	if dir := path.Dir(mustStrip(name)); dir != "." {
+	if dir := path.Dir(name); dir != "." {
 		depth = strings.Count(dir, "/") + 1
 	}
 	up, seenName := 0, false
@@ -193,12 +199,6 @@ func checkLinkTarget(name, target string) error {
 		return fmt.Errorf("symbolic link %q: target %q leaves the archive", name, target)
 	}
 	return nil
-}
-
-// mustStrip is stripTop for a name that was already validated.
-func mustStrip(name string) string {
-	s, _ := stripTop(name)
-	return s
 }
 
 // under reports whether name, or one of its parents, is an unpacked symbolic link.
