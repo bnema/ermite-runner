@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -614,6 +615,15 @@ func (j *job) completeJob(num int) map[string]string {
 
 	j.out(num, "Cleaning up orphan processes")
 	killOrphans(j.trackID, j.before, func(l string) { j.out(num, l) })
+
+	// The actions that asked for node20 and got node24 (JobExtension.cs:1043-1049).
+	j.mu.Lock()
+	up := slices.SortedFunc(slices.Values(j.upgradedToNode24), func(a, b string) int { return strings.Compare(strings.ToLower(a), strings.ToLower(b)) })
+	j.mu.Unlock()
+	if len(up) > 0 {
+		j.tagged(num, "##[warning]", "Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: "+
+			strings.Join(up, ", ")+". For more information see: "+node20DeprecationURL)
+	}
 
 	rep.StepCompleted(num, CompleteJobName, result.conclusion(), j.now())
 	return outputs

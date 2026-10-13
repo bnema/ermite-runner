@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"bnema.dev/ermite-actions/action"
 )
 
 const (
@@ -129,6 +131,9 @@ func appendUnique(l []string, v string) []string {
 
 // actionName is HandlerFactory.GetActionName: "Name[/Path]@Ref".
 func actionName(n *node) string {
+	if n.uses.Kind == action.UsesLocal {
+		return n.uses.Path // no name: HandlerFactory.cs:200-208 uses the path alone
+	}
 	return registeredRef(n.uses)
 }
 

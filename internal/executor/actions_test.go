@@ -223,6 +223,10 @@ func TestNodeVersionRules(t *testing.T) {
 	if got := run("node20", "          FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'\n", nil); !strings.Contains(got, "[node24]") {
 		t.Errorf("force: %s", got)
 	}
+	rec, _ := actionRun(t, act("node20"), "      - uses: ./a\n        env:\n          FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'\n", nil)
+	if got := logOf(rec.steps[len(rec.steps)-1]); !strings.Contains(got, "##[warning]Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: ./a. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/") {
+		t.Errorf("complete job:\n%s", got)
+	}
 	by24 := func(c *Config) { c.Actions.Node24ByDefault = true }
 	got := run("node20", "", by24)
 	if !strings.Contains(got, "[node24]") || !strings.Contains(got, "Node 20 is being deprecated. This workflow is running with Node 24 by default.") {
