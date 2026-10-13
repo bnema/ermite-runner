@@ -232,3 +232,63 @@ func TestManagerRollsBackOnError(t *testing.T) {
 }
 
 var _ io.Reader = strings.NewReader("")
+
+func forgeGuest(t *testing.T, iface string, slot int, port uint16) Guest {
+	t.Helper()
+	g := guest(t, iface, slot)
+	g.ForgePort = port
+	return g
+}
+
+func TestRulesetGuestForgeGolden(t *testing.T) {
+	golden(t, "guest_forge.nft", Ruleset([]Guest{forgeGuest(t, "ertap0", 0, 8088)}))
+}
+
+// Without ForgePort the ruleset has no TCP rule beyond DNS: the exception is
+// opt-in (and one.nft, the golden file of that case, is unchanged).
+func TestRulesetWithoutForgePortHasNoForgeRule(t *testing.T) {
+	rs := Ruleset([]Guest{guest(t, "ertap0", 0)})
+	if n, dns := strings.Count(rs, "tcp dport"), strings.Count(rs, "tcp dport 53 "); n != dns {
+		t.Fatalf("%d tcp port rules, %d of them for DNS:\n%s", n, dns, rs)
+	}
+}
+
+// The exception is one TCP port towards the guest's own gateway, from its own
+// address and interface, placed before the guest's catch-all drop; a second
+// guest gets its own, never the other's gateway; nothing else opens, and the
+// forward chain (private ranges, source checks, sandbox-to-sandbox) is the
+// same with and without it.
+func TestGuestForgeRuleScopeAndOrder(t *testing.T) {
+	gs := []Guest{forgeGuest(t, "ertap0", 0, 8088), forgeGuest(t, "erbr1", 1, 8088), guest(t, "ertap2", 2)}
+	rs := Ruleset(gs)
+	in := rs[strings.Index(rs, "chain input"):strings.Index(rs, "chain forward")]
+	r0 := `iifname "ertap0" ip saddr 10.200.0.2 ip daddr 10.200.0.1 tcp dport 8088 accept`
+	r1 := `iifname "erbr1" ip saddr 10.200.0.6 ip daddr 10.200.0.5 tcp dport 8088 accept`
+	for _, want := range []string{r0, r1} {
+		if strings.Count(in, want) != 1 {
+			t.Errorf("want exactly one %q in the input chain:\n%s", want, in)
+		}
+	}
+	if strings.Count(rs, "8088") != 2 {
+		t.Errorf("the port appears %d times, want 2 (one per guest with the exception):\n%s", strings.Count(rs, "8088"), rs)
+	}
+	if strings.Index(in, r0) > strings.Index(in, `iifname "ertap0" drop`) || strings.Index(in, r1) > strings.Index(in, `iifname "erbr1" drop`) {
+		t.Error("the forge accept must precede the guest's catch-all drop")
+	}
+	// The guest without the exception has none.
+	if strings.Contains(in, `iifname "ertap2" ip saddr 10.200.0.10 ip daddr 10.200.0.9 tcp dport 8088`) {
+		t.Error("ertap2 got a forge rule")
+	}
+	// The forward and postrouting chains do not depend on the exception.
+	plain := Ruleset([]Guest{guest(t, "ertap0", 0), guest(t, "erbr1", 1), guest(t, "ertap2", 2)})
+	tail := func(s string) string { return s[strings.Index(s, "chain forward"):] }
+	if tail(rs) != tail(plain) {
+		t.Error("the forward/postrouting chains changed with the exception")
+	}
+	// Every accept of the input chain that is not DNS is one of the two.
+	for _, l := range strings.Split(in, "\n") {
+		if strings.HasSuffix(l, "accept") && !strings.Contains(l, "dport 53 accept") && !strings.Contains(l, "tcp dport 8088 accept") {
+			t.Errorf("unexpected accept: %s", l)
+		}
+	}
+}

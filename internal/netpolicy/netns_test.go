@@ -72,6 +72,7 @@ func TestRulesetBetweenTwoGuestsAndAForgedSource(t *testing.T) {
 
 	gA := guest(t, "ertap0", 0) // 10.200.0.1 / .2
 	gB := guest(t, "ertap1", 1) // 10.200.0.5 / .6
+	gA.ForgePort = 8088         // guest A has the guest forge exception, guest B has not
 	for _, g := range []Guest{gA, gB} {
 		sh("ip", "addr", "add", g.Gateway.String()+"/30", "dev", g.Iface)
 		sh("ip", "link", "set", g.Iface, "up")
@@ -186,6 +187,54 @@ except Exception: pass
 	sh("ip", "route", "add", "198.51.100.7/32", "via", "203.0.114.2")
 	if got := udp("a", "198.51.100.7", "doc-range", "", 0, 9999); got != "silence" {
 		t.Errorf("TEST-NET-2 reached: %s", got)
+	}
+
+	// Guest forge access: the host listens on 8088 and 8089 on every address
+	// (like a reverse proxy on *:8088). Guest A, which has the exception for
+	// 8088, reaches its own gateway there and nowhere else; guest B, which has
+	// none, reaches nothing.
+	const tcpServer = `
+import socket,threading
+def serve(port):
+    s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); s.bind(("0.0.0.0",port)); s.listen(8)
+    while True:
+        c,_=s.accept(); c.sendall(b"hello"); c.close()
+for p in (8088,8089): threading.Thread(target=serve,args=(p,),daemon=True).start()
+threading.Event().wait()
+`
+	tsrv := exec.Command("python3", "-c", tcpServer)
+	if err := tsrv.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = tsrv.Process.Kill(); _ = tsrv.Wait() })
+	time.Sleep(500 * time.Millisecond)
+	const tcpClient = `
+import socket,sys
+s=socket.socket(); s.settimeout(2)
+try:
+    s.connect((sys.argv[1],int(sys.argv[2]))); print(s.recv(10).decode())
+except Exception: print("closed")
+`
+	tcp := func(n, dst string, port int) string {
+		return in(n, "python3", "-c", tcpClient, dst, fmt.Sprint(port))
+	}
+	if got := tcp("a", gA.Gateway.String(), 8088); got != "hello" {
+		t.Errorf("guest A cannot reach its gateway on the forge port: %s", got)
+	}
+	if got := tcp("a", gA.Gateway.String(), 8089); got != "closed" {
+		t.Errorf("guest A reached its gateway on another port: %s", got)
+	}
+	if got := tcp("a", gB.Gateway.String(), 8088); got != "closed" {
+		t.Errorf("guest A reached guest B's gateway on the forge port: %s", got)
+	}
+	if got := tcp("a", "203.0.114.1", 8088); got != "closed" {
+		t.Errorf("guest A reached the host's LAN address on the forge port: %s", got)
+	}
+	if got := tcp("b", gB.Gateway.String(), 8088); got != "closed" {
+		t.Errorf("guest B, without the exception, reached its gateway: %s", got)
+	}
+	if got := tcp("b", gA.Gateway.String(), 8088); got != "closed" {
+		t.Errorf("guest B reached guest A's gateway on the forge port: %s", got)
 	}
 
 	out := seen()
