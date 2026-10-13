@@ -21,8 +21,8 @@ import (
 // Bytes that follow the secret change the last, incomplete group of its base64
 // (`echo "$T" | base64` appends a newline), so each base64 form is also
 // registered without that group: only the characters the secret alone
-// determines. (The actions/runner sources are not in $CLONED_REPOS_HOME, so
-// this was not compared with its ValueEncoders.)
+// determines. actions/runner (ValueEncoders.Base64StringEscapeShift) only
+// registers the full forms; the truncated ones are an addition.
 type masker struct{ values []string }
 
 const maskedValue = "***"
