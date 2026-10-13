@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 
+	"bnema.dev/ermite-actions/expr"
 	"bnema.dev/ermite-actions/template"
 	"bnema.dev/ermite-actions/workflow"
 )
@@ -83,11 +84,79 @@ func (j *job) displayName(st *workflow.Step, env *ordered) string {
 	default:
 		return ""
 	}
-	name, err := j.evalString(tok, env)
+	// JobExtension evaluates the display names once, when the job starts, with
+	// the contexts the server sent (github.job is empty there) and without the
+	// step functions; ActionRunner.GenerateDisplayName only does it when every
+	// context and function the name uses is available (CheckHasRequiredContext).
+	// A name that is fully evaluated then stays as it is (recorded:
+	// ctx-github-names, "Run echo \"job=\""); the others are evaluated again,
+	// with the contexts of the step, when the step starts.
+	var name string
+	var err error
+	if serverEvaluable(tok) {
+		j.mu.Lock()
+		sc := j.state.ServerContexts()
+		j.mu.Unlock()
+		name, err = template.EvaluateString(context.Background(), tok, template.Env{Contexts: sc})
+	} else {
+		name, err = j.evalString(tok, env)
+	}
 	if err != nil {
 		name = tokenSource(tok)
 	}
 	return formatStepName(prefix, name)
+}
+
+// serverContextNames are the contexts of the job message (ContextData) when
+// display names are first evaluated.
+var serverContextNames = map[string]bool{"github": true, "needs": true, "strategy": true, "matrix": true, "inputs": true, "vars": true}
+
+// wellKnownFuncs are the functions available without the step functions.
+var wellKnownFuncs = map[string]bool{"case": true, "contains": true, "endswith": true, "format": true, "join": true, "startswith": true, "tojson": true, "fromjson": true}
+
+// serverEvaluable is TemplateTokenExtensions.CheckHasRequiredContext for the
+// first evaluation of a display name: every expression of the token only
+// reads contexts of the job message and calls well-known functions.
+func serverEvaluable(tok template.Token) bool {
+	ok := true
+	template.Walk(tok, func(t template.Token) bool {
+		if be, isExpr := t.(*template.BasicExpression); isExpr {
+			ok = ok && nodeServerEvaluable(be.Node())
+		}
+		return ok
+	})
+	return ok
+}
+
+func nodeServerEvaluable(n expr.Node) bool {
+	switch n := n.(type) {
+	case *expr.ContextAccess:
+		return serverContextNames[strings.ToLower(n.Name.Lexeme)]
+	case *expr.Unary:
+		return nodeServerEvaluable(n.Expr)
+	case *expr.Binary:
+		return nodeServerEvaluable(n.Left) && nodeServerEvaluable(n.Right)
+	case *expr.Grouping:
+		return nodeServerEvaluable(n.Group)
+	case *expr.IndexAccess:
+		return nodeServerEvaluable(n.Expr) && nodeServerEvaluable(n.Index)
+	case *expr.Logical:
+		for _, a := range n.Args {
+			if !nodeServerEvaluable(a) {
+				return false
+			}
+		}
+	case *expr.FunctionCall:
+		if !wellKnownFuncs[strings.ToLower(n.Name.Lexeme)] {
+			return false
+		}
+		for _, a := range n.Args {
+			if !nodeServerEvaluable(a) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func tokenSource(t template.Token) string {

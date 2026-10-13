@@ -258,6 +258,12 @@ func NewState(contextsJSON, matrixJSON, jobKey string, r RunnerInfo, repoFallbac
 	s.serverGitHub = expr.NewDictionary()
 	if v, ok := root.Get("github"); ok {
 		s.serverGitHub = v.(*expr.Dictionary)
+		// GitHub evaluates names with github.job empty (recorded:
+		// ctx-github-names): the job key is only added to the contexts the
+		// job runs with.
+		if _, has := s.serverGitHub.Get("job"); has {
+			s.serverGitHub = setKey(s.serverGitHub, "job", expr.String(""))
+		}
 	}
 	if str(gh, "job") == "" && jobKey != "" {
 		gh = setKeySorted(gh, "job", expr.String(jobKey))
