@@ -8,6 +8,7 @@ require (
 	connectrpc.com/connect v1.21.0
 	github.com/bnema/zerowrap v1.4.1
 	github.com/containerd/errdefs v1.0.0
+	github.com/dlclark/regexp2 v1.12.0
 	github.com/google/uuid v1.6.0
 	github.com/moby/moby/api v1.56.1
 	github.com/moby/moby/client v0.6.2

@@ -3,15 +3,17 @@
 package executor
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"strings"
 	"unicode"
 )
 
 // Workflow commands in the output of a step: a port of ActionCommand.cs
-// (Runner.Common) and of the parts of ActionCommandManager.cs that CI-1 needs.
-// Masking (add-mask) and problem matchers are CI-2; they are announced in the
-// log and otherwise ignored.
+// (Runner.Common) and of ActionCommandManager.cs.
 
 type escapeMapping struct{ token, replacement string }
 
@@ -117,9 +119,7 @@ const (
 )
 
 // commandNames are the commands the executor registers, in ActionCommandManager
-// (the names of the extensions at ActionCommandManager.cs). add-mask,
-// add-matcher and remove-matcher are recognised and reported as not supported
-// yet.
+// (the names of the extensions at ActionCommandManager.cs).
 var commandNames = []string{
 	"set-env", "set-output", "save-state", "add-mask", "add-path", "add-matcher", "remove-matcher",
 	"debug", "warning", "error", "notice", "group", "endgroup", "echo", "stop-commands",
@@ -139,6 +139,17 @@ type commandHost interface {
 	CommandFailed()
 	// EnvFlag reads a variable of the env context, then of the process.
 	EnvFlag(name string) bool
+	// AddIssue is ExecutionContext.AddIssue: it logs the issue and keeps it for
+	// the annotations of the step.
+	AddIssue(issue)
+	// Workspace is github.workspace.
+	Workspace() string
+	// AddMask is SecretMasker.AddValue.
+	AddMask(value string)
+	// Matchers is the root of the problem matchers of the job.
+	Matchers() *matcherRoot
+	// ReadMatcherFile reads a problem matcher file (IOUtil.LoadObject).
+	ReadMatcherFile(path string) ([]byte, error)
 }
 
 // commandManager is ActionCommandManager: one per step.
@@ -192,6 +203,9 @@ func (m *commandManager) TryProcess(input string) bool {
 		}
 		m.stopToken, m.stopped = cmd.Data, true
 		m.registered[strings.ToLower(cmd.Data)] = true
+		if len(m.stopToken) > 6 { // ActionCommandManager.cs:117
+			m.host.AddMask(m.stopToken)
+		}
 		m.host.Out(input)
 		m.host.Debug("Paused processing commands until the token you called ::stopCommands:: with is received")
 		return true
@@ -233,10 +247,12 @@ func (m *commandManager) run(name string, c *actionCommand) error {
 		h.Out("##[endgroup]")
 	case "debug":
 		h.Debug(c.Data)
-	case "warning", "error", "notice":
-		// IssueCommandExtension: the annotation is logged; ermite does not store
-		// annotations yet (CI-2), so file, line and title are dropped.
-		h.Tagged("##["+name+"]", c.Data)
+	case "warning":
+		m.commandIssue(LevelWarning, name, c)
+	case "error":
+		m.commandIssue(LevelFailure, name, c)
+	case "notice":
+		m.commandIssue(LevelNotice, name, c)
 	case "echo":
 		if c.Data == "" {
 			return ghErrorf("Value cannot be null or empty. (Parameter 'value')")
@@ -289,9 +305,114 @@ func (m *commandManager) run(name string, c *actionCommand) error {
 			return ghErrorf("Value cannot be null or empty. (Parameter 'path')")
 		}
 		h.AddPath(c.Data)
-	case "add-mask", "add-matcher", "remove-matcher":
-		// Not supported yet (CI-2). The value of add-mask is not echoed.
-		h.Tagged("##[warning]", fmt.Sprintf("The `%s` command is not supported yet by this runner.", name))
+	case "add-mask":
+		m.addMask(c)
+	case "add-matcher":
+		return m.addMatcher(c)
+	case "remove-matcher":
+		return m.removeMatcher(c)
+	}
+	return nil
+}
+
+// warn is IExecutionContext.Warning.
+func (m *commandManager) warn(msg string) { m.host.AddIssue(issue{Level: LevelWarning, Message: msg}) }
+
+// addMask is AddMaskCommandExtension (ActionCommandManager.cs:402-424).
+func (m *commandManager) addMask(c *actionCommand) {
+	if strings.TrimFunc(c.Data, unicode.IsSpace) == "" {
+		m.warn("Can't add secret mask for empty string in ##[add-mask] command.")
+		return
+	}
+	if m.echo {
+		m.host.Out("::add-mask::***")
+	}
+	m.host.AddMask(c.Data)
+	// Also add each individual line. Typically individual lines are processed
+	// from STDOUT of child processes.
+	for _, item := range strings.FieldsFunc(c.Data, func(r rune) bool { return r == '\r' || r == '\n' }) {
+		if item = strings.TrimFunc(item, unicode.IsSpace); item != "" {
+			m.host.AddMask(item)
+		}
+	}
+}
+
+// matcherPath roots a path of add-matcher and remove-matcher in the workspace.
+func (m *commandManager) matcherPath(file string) string {
+	if !filepath.IsAbs(file) {
+		return filepath.Join(m.host.Workspace(), file)
+	}
+	return file
+}
+
+// loadMatchers is IOUtil.LoadObject<IssueMatchersConfig>.
+func (m *commandManager) loadMatchers(file string) (*matchersConfig, error) {
+	b, err := m.host.ReadMatcherFile(file)
+	if err != nil {
+		return nil, dotnetFileError(file, err)
+	}
+	return parseMatchersConfig(b)
+}
+
+// dotnetFileError gives the error of a file that cannot be read the text of
+// the .NET exception (FileNotFoundException, DirectoryNotFoundException).
+func dotnetFileError(file string, err error) error {
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		if st, e := os.Stat(filepath.Dir(file)); e != nil || !st.IsDir() {
+			return ghErrorf("Could not find a part of the path '%s'.", file)
+		}
+		return ghErrorf("Could not find file '%s'.", file)
+	case errors.Is(err, fs.ErrPermission):
+		return ghErrorf("Access to the path '%s' is denied.", file)
+	}
+	return err
+}
+
+// addMatcher is AddMatcherCommandExtension (ActionCommandManager.cs:496-536).
+func (m *commandManager) addMatcher(c *actionCommand) error {
+	if c.Data == "" {
+		m.warn("File path must be specified.")
+		return nil
+	}
+	cfg, err := m.loadMatchers(m.matcherPath(c.Data))
+	if err != nil {
+		return err
+	}
+	if cfg != nil && len(cfg.Matchers) > 0 {
+		if err := cfg.validate(); err != nil {
+			return err
+		}
+		m.host.Debug(m.host.Matchers().add(cfg))
+	}
+	return nil
+}
+
+// removeMatcher is RemoveMatcherCommandExtension (ActionCommandManager.cs:538-607).
+func (m *commandManager) removeMatcher(c *actionCommand) error {
+	owner, file := c.prop("owner"), c.Data
+	if owner != "" && file != "" {
+		m.warn("Either specify an owner name or a file path in ##[remove-matcher] command. Both values cannot be set.")
+		return nil
+	}
+	if owner == "" && file == "" {
+		m.warn("Either an owner name or a file path must be specified in ##[remove-matcher] command.")
+		return nil
+	}
+	if owner != "" {
+		m.host.Debug(m.host.Matchers().remove([]string{owner}))
+		return nil
+	}
+	cfg, err := m.loadMatchers(m.matcherPath(file))
+	if err != nil {
+		return err
+	}
+	if cfg != nil && len(cfg.Matchers) > 0 {
+		var owners []string
+		for _, mc := range cfg.Matchers {
+			owners = append(owners, mc.Owner)
+		}
+		m.host.Debug(m.host.Matchers().remove(owners))
 	}
 	return nil
 }

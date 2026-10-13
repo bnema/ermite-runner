@@ -192,17 +192,11 @@ func (j *job) processEnv(stepEnv *ordered) []string {
 // step.
 func (j *job) startProcess(s *stepRun, plan ShellPlan, dir string, argv []string, stepCancel <-chan struct{}) stepResult {
 	num := s.num
+	om := newOutputManager(s)
+	defer om.dispose()
 	res, err := runProcess(procSpec{
 		Argv: argv, Dir: dir, Env: j.processEnv(s.env), Credential: j.cfg.Credential,
-		OnLine: func(line string) {
-			if strings.Contains(line, "##[start-action") || strings.Contains(line, "##[end-action") {
-				line = strings.ReplaceAll(strings.ReplaceAll(line, "##[start-action", `##[\start-action`), "##[end-action", `##[\end-action`)
-			}
-			if (strings.Contains(line, "##[") || strings.Contains(line, "::")) && s.cmds.TryProcess(line) {
-				return
-			}
-			j.write(num, line)
-		},
+		OnLine: om.onData,
 		Cancel: stepCancel, TermAfter: j.cfg.TermAfter, KillAfter: j.cfg.KillAfter,
 		WaitDelay: j.cfg.WaitDelay, Signal: j.cfg.Signal,
 	})
@@ -214,7 +208,7 @@ func (j *job) startProcess(s *stepRun, plan ShellPlan, dir string, argv []string
 		// The process was stopped on cancellation: ExecuteAsync throws
 		// (ProcessInvoker.cs:369) and StepsRunner logs the exception
 		// (StepsRunner.cs:333-337).
-		j.errorf(num, "The operation was canceled.")
+		s.logCanceled()
 		return resCanceled
 	}
 	if res.ExitCode != 0 {

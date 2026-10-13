@@ -301,6 +301,8 @@ func (r *maskReporter) Log(n int, at time.Time, line string) {
 }
 
 func (r *maskReporter) StepCompleted(n int, name string, c Conclusion, at time.Time) {
+	// The results of the step (outcome, annotations, summary) go first.
+	r.j.flushStepResults(r.next, n, c)
 	r.next.StepCompleted(n, r.j.mask(name), c, at)
 }
 

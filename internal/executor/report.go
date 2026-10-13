@@ -48,3 +48,46 @@ type Result struct {
 	// told to stop (see ErrShutdown).
 	RunnerShutdown bool
 }
+
+// AnnotationLevel is the severity of an annotation.
+type AnnotationLevel string
+
+// Levels, with the names of GitHub's check run annotations.
+const (
+	LevelNotice  AnnotationLevel = "notice"
+	LevelWarning AnnotationLevel = "warning"
+	LevelFailure AnnotationLevel = "failure" // ::error and an error that the runner itself logs
+)
+
+// Annotation is a message attached to a step, produced by ::notice,
+// ::warning, ::error, a problem matcher or an error the runner logs, and
+// already masked. The executor keeps at most 10 per level per step.
+type Annotation struct {
+	Level                AnnotationLevel
+	Title, Message, File string
+	StartLine, EndLine   int32
+	StartColumn          int32
+	EndColumn            int32
+}
+
+// StepResults is what a step leaves besides its log, reported just before
+// StepCompleted.
+type StepResults struct {
+	// Outcome is steps.<id>.outcome: the result before continue-on-error.
+	Outcome Conclusion
+	// Annotations is the whole list of the step, replacing any earlier one. It
+	// is empty when ci.annotations is not available (Config.SendAnnotations).
+	Annotations []Annotation
+	// Summary is the masked GITHUB_STEP_SUMMARY of the step, HasSummary says
+	// whether there is one. Empty when ci.summaries is not available
+	// (Config.SendSummaries).
+	Summary    string
+	HasSummary bool
+}
+
+// StepResultReporter is implemented by a Reporter that wants the results of
+// the steps. StepResults(n) is called once for each step of the workflow,
+// before StepCompleted(n) and under the same serialisation.
+type StepResultReporter interface {
+	StepResults(number int, r StepResults)
+}

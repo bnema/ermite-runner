@@ -354,9 +354,10 @@ func readEnvFile(sink Sink, root *os.Root, name string) ([]Pair, error) {
 	return ParseEnvFile(text)
 }
 
-// processStepSummary is CreateStepSummaryCommand.ProcessCommand (:230) for
-// CI-1: the file is only checked (an empty file is ignored, a file above 1 MiB
-// is an error); ermite does not store summaries yet.
+// processStepSummary is CreateStepSummaryCommand.ProcessCommand
+// (FileCommandManager.cs:230-275): a missing or empty file is ignored, a file
+// above 1 MiB is an error; otherwise the lines are masked one by one and the
+// result goes to the sink when it keeps summaries. mask may be nil.
 func processStepSummary(sink Sink, root *os.Root, name string) error {
 	fh, err := openRegular(root, name)
 	if errors.Is(err, os.ErrNotExist) {
@@ -370,9 +371,34 @@ func processStepSummary(sink Sink, root *os.Root, name string) error {
 	if err != nil || st.Size() == 0 {
 		return nil
 	}
-	if st.Size() > stepSummaryLimit {
-		sink.Error(fmt.Sprintf("$GITHUB_STEP_SUMMARY upload aborted, supports content up to a size of %dk, got %dk. For more information see: https://docs.github.com/actions/using-workflows/workflow-commands-for-github-actions#adding-a-markdown-summary", stepSummaryLimit/1024, st.Size()/1024))
+	tooLarge := func(size int64) {
+		sink.Error(fmt.Sprintf("$GITHUB_STEP_SUMMARY upload aborted, supports content up to a size of %dk, got %dk. For more information see: https://docs.github.com/actions/using-workflows/workflow-commands-for-github-actions#adding-a-markdown-summary", stepSummaryLimit/1024, size/1024))
 	}
+	if st.Size() > stepSummaryLimit {
+		tooLarge(st.Size())
+		return nil
+	}
+	ss, ok := sink.(summarySink)
+	if !ok {
+		return nil
+	}
+	text, ok, err := readText(root, name)
+	if err != nil || !ok {
+		return err
+	}
+	var mask func(string) string
+	if m, has := sink.(interface{ MaskText(string) string }); has {
+		mask = m.MaskText
+	} else {
+		mask = func(s string) string { return s }
+	}
+	content := summaryContent(text, mask)
+	if len(content) > stepSummaryLimit {
+		// Masking made it longer than the limit of the contract.
+		tooLarge(int64(len(content)))
+		return nil
+	}
+	ss.Summary(content)
 	return nil
 }
 

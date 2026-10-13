@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"bnema.dev/ermite-actions/expr"
 	"bnema.dev/ermite-actions/template"
@@ -26,6 +27,12 @@ type stepRun struct {
 	cmdResult *stepResult
 	outcome   *stepResult
 	cmds      *commandManager
+	// scope is what the step shares with the step that contains it, see
+	// stepScope. name is the display name; timedOut is set when the step
+	// reached its timeout-minutes.
+	scope    stepScope
+	name     string
+	timedOut timedOutFlag
 }
 
 func (s *stepRun) Out(text string)        { s.j.out(s.num, text) }
@@ -38,7 +45,6 @@ func (s *stepRun) SetOutput(name, value string) {
 	s.j.state.SetOutput(s.st.ID, name, value)
 	s.j.mu.Unlock()
 }
-func (s *stepRun) SaveState(name, value string) {}
 func (s *stepRun) SetEnv(name, value string) {
 	s.j.mu.Lock()
 	s.j.state.SetEnv(name, value)
@@ -240,6 +246,7 @@ func (j *job) runStep(num int, st *workflow.Step) {
 		}
 	}
 	name := j.displayName(st, s.env)
+	s.name = name
 	rep.StepStarted(num, name, j.now())
 
 	complete := func(r stepResult) {
@@ -251,6 +258,7 @@ func (j *job) runStep(num int, st *workflow.Step) {
 			outcome = *s.outcome
 		}
 		j.state.SetStepResult(st.ID, string(outcome.conclusion()), string(res.conclusion()))
+		j.recordOutcome(num, outcome.conclusion())
 		if res == resFailed {
 			m := merge(j.result, resFailed)
 			j.result = &m
@@ -303,6 +311,8 @@ func (j *job) runStep(num int, st *workflow.Step) {
 	// cancelled and the step is stopped unless its condition still holds
 	// (always()).
 	stepCancel := make(chan struct{})
+	var cancelOnce sync.Once
+	closeCancel := func() { cancelOnce.Do(func() { close(stepCancel) }) }
 	stopWatch := make(chan struct{})
 	var watch sync.WaitGroup
 	if !cancelledAtStart {
@@ -322,14 +332,30 @@ func (j *job) runStep(num int, st *workflow.Step) {
 				keep, _ = cond()
 			}
 			if !keep {
-				close(stepCancel)
+				closeCancel()
 			}
 		}()
+	}
+
+	// timeout-minutes (StepsRunner.RunStepAsync, :280-296).
+	minutes := j.stepTimeout(s)
+	if minutes > 0 {
+		t := time.AfterFunc(time.Duration(minutes)*time.Minute+j.cfg.StepTimeoutSkew, func() {
+			s.timedOut.Store(true)
+			closeCancel()
+		})
+		defer t.Stop()
 	}
 
 	r := j.execute(s, stepCancel)
 	close(stopWatch)
 	watch.Wait()
+	if r == resCanceled && s.timedOut.Load() && !j.cancelRequested() {
+		// The step's own token fired, not the job's: the step failed with a
+		// message (StepsRunner.cs:323-330).
+		j.errorf(num, "%s", stepTimeoutMessage(name, minutes))
+		r = resFailed
+	}
 
 	// Merge the result of the commands (StepsRunner.cs:347-351).
 	if s.cmdResult != nil {
@@ -368,8 +394,6 @@ func notSupported(st *workflow.Step) string {
 	switch {
 	case st.Uses != nil:
 		return fmt.Sprintf("not supported yet: uses (%s)", st.Uses.Value)
-	case st.TimeoutMinutes != nil:
-		return "not supported yet: timeout-minutes"
 	}
 	return ""
 }
