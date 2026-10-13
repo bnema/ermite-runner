@@ -3,6 +3,7 @@
 package executor
 
 import (
+	"encoding/base64"
 	"fmt"
 	"path/filepath"
 	"runtime"
@@ -241,6 +242,8 @@ func NewState(contextsJSON, matrixJSON, jobKey string, r RunnerInfo, repoFallbac
 	s := &State{other: map[string]expr.Value{}, env: newOrdered(), steps: map[string]*stepCtx{}, status: "success"}
 
 	// github: token first, then what the server gave (ExecutionContext.cs:1023-1037).
+	// The token is the one the server sent in github.token (GitHub's
+	// system.github.token variable), empty when it sent none.
 	gh := expr.NewDictionary()
 	gh.Add("token", expr.String(""))
 	if v, ok := root.Get("github"); ok {
@@ -250,6 +253,9 @@ func NewState(contextsJSON, matrixJSON, jobKey string, r RunnerInfo, repoFallbac
 		}
 		for _, p := range d.Pairs() {
 			if strings.EqualFold(p.Key, "token") {
+				if t, isStr := p.Value.(expr.String); isStr {
+					gh = setKey(gh, "token", t)
+				}
 				continue
 			}
 			gh.Add(p.Key, p.Value)
@@ -258,6 +264,12 @@ func NewState(contextsJSON, matrixJSON, jobKey string, r RunnerInfo, repoFallbac
 	s.serverGitHub = expr.NewDictionary()
 	if v, ok := root.Get("github"); ok {
 		s.serverGitHub = v.(*expr.Dictionary)
+		// GitHub evaluates names with github.job empty (recorded:
+		// ctx-github-names): the job key is only added to the contexts the
+		// job runs with.
+		if _, has := s.serverGitHub.Get("job"); has {
+			s.serverGitHub = setKey(s.serverGitHub, "job", expr.String(""))
+		}
 	}
 	if str(gh, "job") == "" && jobKey != "" {
 		gh = setKeySorted(gh, "job", expr.String(jobKey))
@@ -457,12 +469,46 @@ func (s *State) Values(env *ordered) map[string]expr.Value {
 		"job":     s.job,
 		"env":     env.Dict(),
 		"steps":   s.stepsValue(),
-		"secrets": expr.NewDictionary(),
+		"secrets": s.secrets(),
 	}
 	for k, v := range s.other {
 		m[k] = v
 	}
 	return m
+}
+
+// secrets is the secrets context. Today it holds one entry, GITHUB_TOKEN, as
+// on GitHub (Variables.ToSecretsContext lists the secret variables but the
+// access token; GitHub's message carries the token as the secret GITHUB_TOKEN,
+// recorded: ctx-inputs-vars, secrets.GITHUB_TOKEN == github.token).
+//
+// Where the value comes from: the "token" key of the github context that the
+// server sends in Job.contexts, the same value as github.token. It must be a
+// token of its own, scoped to the job (the permissions "Set up job" prints) and
+// short lived. It must never be the "ermitejob_" job token: that one
+// authenticates the runner's calls to ermite, stays in the runner host process
+// and must not reach the sandbox (runner.proto, "Secrets and trust"). ermite
+// does not send a token yet (planned for CI-3, with the secrets of the
+// repository); until it does, github.token is empty, so is secrets, and
+// a test of secrets.GITHUB_TOKEN against the empty string is false. Without a
+// token nothing is masked.
+func (s *State) secrets() *expr.Dictionary {
+	d := expr.NewDictionary()
+	if t := s.GitHub("token"); t != "" {
+		d.Add("GITHUB_TOKEN", expr.String(t))
+	}
+	return d
+}
+
+// Secrets returns the values that must never leave the job: the token and the
+// base64 of "x-access-token:<token>" (ExecutionContext.cs:1026-1028); newMasker
+// adds their other encodings.
+func (s *State) Secrets() []string {
+	t := s.GitHub("token")
+	if t == "" {
+		return nil
+	}
+	return []string{t, base64.StdEncoding.EncodeToString([]byte("x-access-token:" + t))}
 }
 
 // ServerContexts returns the contexts that the server has when it evaluates

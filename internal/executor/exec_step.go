@@ -22,6 +22,10 @@ func (j *job) execute(s *stepRun, stepCancel <-chan struct{}) stepResult {
 		return resFailed
 	}
 	fail := func(err error) stepResult { j.errorf(num, "%s", err.Error()); return resFailed }
+	failTemplate := func(err error) stepResult {
+		j.errorf(num, "%s", templateNotValid(err, true))
+		return resFailed
+	}
 
 	if err := j.prepareFileCommands(st); err != nil {
 		return fail(err)
@@ -31,7 +35,7 @@ func (j *job) execute(s *stepRun, stepCancel <-chan struct{}) stepResult {
 
 	in, err := j.scriptInputs(s)
 	if err != nil {
-		return fail(err)
+		return failTemplate(err)
 	}
 	plan, err := j.printHeader(s, in)
 	if err != nil {
