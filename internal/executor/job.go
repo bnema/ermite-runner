@@ -642,7 +642,10 @@ func (j *job) jobDisplayName() string {
 	if err != nil {
 		return fallback("the name does not evaluate", err)
 	}
-	return name
+	// GitHub shows "Display name of", not "Display name of " (recorded:
+	// matrix-include-exclude, an empty last matrix value). The recordings only
+	// show trailing spaces; both ends are trimmed, as ermite's server does.
+	return strings.TrimSpace(name)
 }
 
 // comboIndex finds the combination of the strategy that is this job. Without a
