@@ -9,11 +9,13 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"time"
 
 	"github.com/bnema/zerowrap"
 
 	"bnema.dev/ermite-api/gen/ermite/ermiteconnect"
 
+	"bnema.dev/ermite-runner/internal/externals"
 	"bnema.dev/ermite-runner/internal/host"
 	"bnema.dev/ermite-runner/internal/sandbox"
 	"bnema.dev/ermite-runner/internal/sandbox/drivers"
@@ -29,6 +31,31 @@ func loadHostConfig() (sandbox.Config, host.Config, error) {
 	name, _ := os.Hostname()
 	hcfg, err := host.LoadConfig(os.Getenv, name, scfg.StateDir, scfg.Capacity, version)
 	return scfg, hcfg, err
+}
+
+// externalsWait is how long the start of the runner waits for the Node.js
+// downloads. A runner with a working network is then ready for its first job; one
+// without goes on after the first failure (nothing waits for a dead network), and
+// the downloads that are still running when the time is up finish in the
+// background.
+const externalsWait = 2 * time.Minute
+
+// setupExternals downloads the Node.js externals (README, "Externals") and hands
+// them to the sandbox drivers through scfg. It never fails the start: whatever
+// cannot be provided is reported to the jobs that need it.
+func setupExternals(ctx context.Context, scfg *sandbox.Config) {
+	log := zerowrap.FromCtx(ctx)
+	if !scfg.NodeExternals {
+		log.Info().Msg("Node.js externals are off (" + sandbox.EnvNode + "=0)")
+		return
+	}
+	m, ok := externals.New(scfg.StateDir)
+	if !ok {
+		log.Warn().Msg("no Node.js builds for this architecture: jobs get no externals")
+		return
+	}
+	m.Start(ctx, externalsWait)
+	scfg.Externals = m
 }
 
 func buildDriver(ctx context.Context, scfg sandbox.Config) (sandbox.Driver, error) {
@@ -116,6 +143,7 @@ func runCmd(ctx context.Context) int {
 		scfg.GuestForge = gf
 		hcfg.GuestForgeOrigin = gf.Origin
 	}
+	setupExternals(ctx, &scfg)
 	drv, err := buildDriver(ctx, scfg)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ermite-runner:", err)

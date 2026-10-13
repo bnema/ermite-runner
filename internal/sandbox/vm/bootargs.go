@@ -19,8 +19,9 @@ import (
 //   - root=/dev/vda ro: the exec disk; init=/ermite-runner -- init: the runner
 //     executable is PID 1 and runs its init subcommand;
 //   - ip=…: static address, gateway and DNS from the kernel, no DHCP client;
-//   - ermite.*: read by init from /proc/cmdline (connect target, gateway, time).
-func bootArgs(guest, gateway netip.Addr, unixSeconds int64) string {
+//   - ermite.*: read by init from /proc/cmdline (connect target, gateway, time,
+//     and whether the externals disk is attached as the fourth drive).
+func bootArgs(guest, gateway netip.Addr, unixSeconds int64, externals bool) string {
 	args := []string{
 		"console=ttyS0", "reboot=k", "panic=1", "pci=off", "acpi=off", "8250.nr_uarts=1",
 		"ipv6.disable=1", "random.trust_cpu=on", "i8042.noaux", "i8042.nomux", "i8042.nopnp", "i8042.dumbkbd",
@@ -31,8 +32,11 @@ func bootArgs(guest, gateway netip.Addr, unixSeconds int64) string {
 		sandbox.CmdlineConnect + "=vsock:" + strconv.Itoa(sandbox.VsockPort),
 		sandbox.CmdlineGateway + "=" + gateway.String(),
 		"ermite.time=" + strconv.FormatInt(unixSeconds, 10),
-		"--", "init",
 	}
+	if externals {
+		args = append(args, sandbox.CmdlineExternals+"=1")
+	}
+	args = append(args, "--", "init")
 	return strings.Join(args, " ")
 }
 

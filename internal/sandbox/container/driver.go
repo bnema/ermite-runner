@@ -13,8 +13,8 @@
 // it after a crash.
 //
 // The executor stream is a Unix socket in a per-job directory of the runner's
-// state directory, bind-mounted into the container. The runner executable is
-// bind-mounted read-only. Both paths are host paths given to the Docker daemon:
+// state directory, bind-mounted into the container. The runner executable and
+// the host's external tools (Node.js) are bind-mounted read-only. Both paths are host paths given to the Docker daemon:
 // the daemon must run on the same host (and mount namespace) as the runner.
 package container
 
@@ -435,6 +435,14 @@ func (s *containerSandbox) runNetwork(ctx context.Context, netw netpolicy.Net, l
 func (s *containerSandbox) runContainer(ctx context.Context, spec sandbox.JobSpec, netw netpolicy.Net, labels map[string]string) (<-chan exitResult, error) {
 	d := s.d
 	entry := sandbox.GuestExecDir + "/" + sandbox.GuestExecName
+	binds := []bindMount{
+		{Source: d.exe, Target: entry, ReadOnly: true},
+		{Source: d.sockDir(s.id), Target: sandbox.ContainerRunDir},
+		{Source: d.scratchDir(s.id), Target: sandbox.GuestScratch},
+		{Source: d.workDir(s.id), Target: containerWorkspace},
+		{Source: filepath.Join(d.scratchDir(s.id), "tmp"), Target: containerTmp},
+	}
+	binds = append(binds, externalBinds(d.cfg.ExternalsOf())...)
 	cid, err := d.eng.CreateContainer(ctx, containerSpec{
 		Name:       "ermite-" + s.id,
 		Image:      d.image,
@@ -446,16 +454,10 @@ func (s *containerSandbox) runContainer(ctx context.Context, spec sandbox.JobSpe
 		Network:    "ermite-" + s.id,
 		IPv4:       netw.Guest,
 		DNS:        netw.Gateway,
-		Binds: []bindMount{
-			{Source: d.exe, Target: entry, ReadOnly: true},
-			{Source: d.sockDir(s.id), Target: sandbox.ContainerRunDir},
-			{Source: d.scratchDir(s.id), Target: sandbox.GuestScratch},
-			{Source: d.workDir(s.id), Target: containerWorkspace},
-			{Source: filepath.Join(d.scratchDir(s.id), "tmp"), Target: containerTmp},
-		},
-		MemoryMiB: spec.MemoryMiB,
-		CPUs:      spec.CPUs,
-		Pids:      d.cfg.JobPids,
+		Binds:      binds,
+		MemoryMiB:  spec.MemoryMiB,
+		CPUs:       spec.CPUs,
+		Pids:       d.cfg.JobPids,
 	})
 	if err != nil {
 		return nil, err
@@ -466,6 +468,17 @@ func (s *containerSandbox) runContainer(ctx context.Context, spec sandbox.JobSpe
 		return nil, fmt.Errorf("start container: %w", err)
 	}
 	return exited, nil
+}
+
+// externalBinds are the read-only bind mounts of the host's external tools
+// (Node.js) at /home/runner/externals/<name>, GitHub's layout. A container needs
+// no more than the host path: it reads the tool directly.
+func externalBinds(set []sandbox.External) []bindMount {
+	var out []bindMount
+	for _, e := range set {
+		out = append(out, bindMount{Source: e.Dir, Target: sandbox.GuestExternalsDir + "/" + e.Name, ReadOnly: true})
+	}
+	return out
 }
 
 // waitExecutor waits for the executor to connect. Only ctx (the caller's
