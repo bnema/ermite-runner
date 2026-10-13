@@ -151,6 +151,15 @@ type job struct {
 	// masker hides the secrets in everything reported; it is set once the
 	// contexts are built, before any step runs.
 	masker atomic.Pointer[masker]
+	// extraSecrets are registered after the start (see addSecrets).
+	extraSecrets []string
+	// actions holds what the pre-job phase loaded (see prepareActions).
+	actions *actionState
+	// postStack is the post steps registered so far, last registered last.
+	postStack []qstep
+	// upgradedToNode24 are the actions that asked for node20 and got node24.
+	upgradedToNode24 []string
+	jobCtx           context.Context
 }
 
 func (j *job) mask(s string) string { return j.masker.Load().mask(s) }
@@ -195,6 +204,16 @@ func (j *job) run() Result {
 	// ---- Set up job (JobExtension.InitializeJob) ----
 	rep := j.cfg.Reporter
 	rep.StepStarted(1, SetUpJobName, j.now())
+	var cancelCtx context.CancelFunc
+	j.jobCtx, cancelCtx = context.WithCancel(context.Background())
+	defer cancelCtx()
+	go func() {
+		select {
+		case <-j.cancel.Done():
+			cancelCtx()
+		case <-j.jobCtx.Done():
+		}
+	}()
 	steps, err := j.setUp()
 	if err != nil {
 		j.errorf(1, "%s", err.Error())
@@ -205,13 +224,29 @@ func (j *job) run() Result {
 	rep.StepCompleted(1, SetUpJobName, ConclusionSuccess, j.now())
 
 	// ---- the steps (StepsRunner) ----
-	for i, st := range steps {
-		j.runStep(i+2, st)
+	// The queue is the pre-job steps then the steps of the job; the post steps
+	// registered while they run follow, last registered first
+	// (StepsRunner.cs:62-75).
+	num := 2
+	for _, q := range steps {
+		j.runStep(num, q)
+		num++
+	}
+	for {
+		j.mu.Lock()
+		if len(j.postStack) == 0 {
+			j.mu.Unlock()
+			break
+		}
+		q := j.postStack[len(j.postStack)-1]
+		j.postStack = j.postStack[:len(j.postStack)-1]
+		j.mu.Unlock()
+		j.runStep(num, q)
+		num++
 	}
 
 	// ---- Complete job (JobExtension.FinalizeJob) ----
-	last := len(steps) + 2
-	outputs := j.completeJob(last)
+	outputs := j.completeJob(num)
 
 	return j.finish(outputs)
 }
@@ -331,7 +366,7 @@ func (j *job) evalMap(m *template.Mapping, env *ordered) ([]Pair, error) {
 // setUp parses the workflow and prepares the job: JobExtension.InitializeJob
 // (JobExtension.cs:63-182) and the job-start code of JobRunner.cs:142-177. Its
 // log lines belong to step 1.
-func (j *job) setUp() ([]*workflow.Step, error) {
+func (j *job) setUp() ([]qstep, error) {
 	cfg := j.cfg
 	j.out(1, fmt.Sprintf("Current runner version: '%s'", cfg.RunnerVersion))
 	// Only a self-hosted runner prints its name and machine (JobExtension.cs:
@@ -458,6 +493,10 @@ func (j *job) setUp() ([]*workflow.Step, error) {
 	}
 
 	j.out(1, "Prepare all required actions")
+	queue, err := j.prepareJob()
+	if err != nil {
+		return nil, err
+	}
 	// JobExtension.cs:418-422: the display name of the job, which the server
 	// computes there (message.JobDisplayName). ermite's Job message has no such
 	// field, so the executor evaluates it (see jobDisplayName).
@@ -474,7 +513,7 @@ func (j *job) setUp() ([]*workflow.Step, error) {
 	for _, p := range snapshotProcesses() {
 		j.before[p.key()] = true
 	}
-	return jb.Steps, nil
+	return queue, nil
 }
 
 // own gives a file or directory created by the executor to the user the steps

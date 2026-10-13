@@ -6,6 +6,7 @@ import (
 	"context"
 	"net/http"
 	"strings"
+	"time"
 
 	"bnema.dev/ermite-actions/action"
 	"bnema.dev/ermite-actions/workflow"
@@ -40,6 +41,9 @@ type ActionsConfig struct {
 	// (HandlerFactory.cs, NodeUtil.DetermineActionsNodeVersion): ermite has no
 	// feature flags, so the default is pinned here.
 	Node24ByDefault bool
+	// Backoff, when set, replaces the random 10 to 30 s wait between download
+	// attempts (tests).
+	Backoff func() time.Duration
 }
 
 const defaultExternalsDir = "/home/runner/externals"
@@ -57,20 +61,27 @@ const (
 // (Runner.Common/Constants.cs:46).
 const compositeMaxDepth = 9
 
-// actionDef is a loaded action: its directory and manifest (ActionManager.
-// LoadAction's Definition). A docker:// step has no manifest and no directory.
+// kind is what an action runs.
+type kind int
+
+const (
+	kindScript kind = iota
+	kindNode
+	kindDocker
+	kindComposite
+)
+
+// actionDef is a loaded action (ActionManager.LoadAction's Definition).
 type actionDef struct {
-	uses action.Uses
-	// ref is "Name[/Path]@Ref" for repository actions, the path for local ones.
-	ref string
+	kind kind
+	// dir is the directory of the action ("" for docker://).
 	dir string
-	act *action.Action // nil for docker:// and Dockerfile-only actions
-	// image is what a container action runs: "docker://x" steps and docker://
-	// manifests give the image to pull, Dockerfile ones the path of the file.
-	image      string
-	dockerfile bool
-	// children are the loaded actions of a composite's steps, by step.
-	children map[*workflow.Step]*actionDef
+	act *action.Action // nil for docker:// and for a Dockerfile without manifest
+	// image is the "runs.image" of a container action, or the image of a
+	// docker:// step; "" for Dockerfile-only actions (see dockerfile).
+	image string
+	// dockerfile is the path of the Dockerfile of a Dockerfile-only action.
+	dockerfile string
 }
 
 func (d *actionDef) runs() *action.Runs {
@@ -80,42 +91,8 @@ func (d *actionDef) runs() *action.Runs {
 	return d.act.Runs
 }
 
-// hasPre and hasPost are ActionExecutionData.HasPre/HasPost.
-func (d *actionDef) hasPre() bool {
-	r := d.runs()
-	switch {
-	case r == nil:
-		return false
-	case r.Kind == action.RunsComposite:
-		return d.anyChild(func(c *actionDef) bool { return c.hasPre() && !c.local() })
-	}
-	return r.HasPre()
-}
-
-func (d *actionDef) hasPost() bool {
-	r := d.runs()
-	switch {
-	case r == nil:
-		return false
-	case r.Kind == action.RunsComposite:
-		return d.anyChild(func(c *actionDef) bool { return c.local() || c.hasPost() })
-	}
-	return r.HasPost()
-}
-
-func (d *actionDef) anyChild(f func(*actionDef) bool) bool {
-	for _, c := range d.children {
-		if c != nil && f(c) {
-			return true
-		}
-	}
-	return false
-}
-
-func (d *actionDef) local() bool { return d.uses.Kind == action.UsesLocal }
-
 // preIf and postIf are InitCondition and CleanupCondition: always() unless the
-// manifest says otherwise (action.Runs keeps them as written).
+// manifest says otherwise (ActionExecutionData, ActionManager.cs:1884-1900).
 func (d *actionDef) preIf() string  { return condOrAlways(d.runs(), true) }
 func (d *actionDef) postIf() string { return condOrAlways(d.runs(), false) }
 
@@ -131,4 +108,70 @@ func condOrAlways(r *action.Runs, pre bool) string {
 		return "always()"
 	}
 	return c
+}
+
+// node is one step of the job or of a composite action, with what the runner
+// keeps per action step: its intra-action state, and for a composite its
+// children and its pre and post steps (CompositeActionExecutionData).
+type node struct {
+	st     *workflow.Step
+	uses   action.Uses
+	parent *node
+	// scope is the name of the steps context of the step's children: the
+	// fully qualified context name (ExecutionContext.GetFullyQualifiedContextName).
+	scope string
+	state *ordered
+	// children are the nodes of a composite action's steps.
+	children []*node
+	// preSteps and postSteps are the embedded steps with a pre or a post, in
+	// declaration order (the runner's post steps are a stack: they run last
+	// to first).
+	preSteps, postSteps []*node
+	// image is the image the setup steps pulled or built for the step.
+	image string
+	def   *actionDef
+	// postRegistered is Root.StepsWithPostRegistered / EmbeddedStepsWithPostRegistered.
+	postRegistered bool
+	postCond       string
+	// preScope is the random steps context of the pre stage of a composite.
+	preScope string
+}
+
+func (n *node) isRun() bool { return n.st.Run != nil }
+
+// setState keeps a value of the intra-action state: keys compare without case
+// (the runner's dictionary is OrdinalIgnoreCase) and keep the first spelling.
+func (n *node) setState(k, v string) {
+	if n.state == nil {
+		n.state = newOrdered()
+	}
+	for _, have := range n.state.Keys() {
+		if strings.EqualFold(have, k) {
+			k = have
+			break
+		}
+	}
+	n.state.Set(k, v)
+}
+
+// newNodes makes the nodes of steps. The workflow reader has checked every
+// uses value.
+func newNodes(steps []*workflow.Step, parent *node, scope string) ([]*node, error) {
+	out := make([]*node, 0, len(steps))
+	for _, st := range steps {
+		n := &node{st: st, parent: parent}
+		n.scope = st.ID
+		if scope != "" {
+			n.scope = scope + "." + st.ID
+		}
+		if st.Uses != nil {
+			u, err := action.ParseUses(st.Uses.Value)
+			if err != nil {
+				return nil, err
+			}
+			n.uses = u
+		}
+		out = append(out, n)
+	}
+	return out, nil
 }

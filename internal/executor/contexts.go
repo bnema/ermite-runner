@@ -33,8 +33,15 @@ func (o *ordered) Set(k, v string) {
 }
 
 func (o *ordered) Get(k string) (string, bool) { v, ok := o.vals[k]; return v, ok }
-func (o *ordered) Len() int                    { return len(o.keys) }
-func (o *ordered) Keys() []string              { return slices.Clone(o.keys) }
+func (o *ordered) Remove(k string) {
+	if _, ok := o.vals[k]; !ok {
+		return
+	}
+	delete(o.vals, k)
+	o.keys = slices.DeleteFunc(o.keys, func(x string) bool { return x == k })
+}
+func (o *ordered) Len() int       { return len(o.keys) }
+func (o *ordered) Keys() []string { return slices.Clone(o.keys) }
 
 func (o *ordered) Clone() *ordered {
 	c := newOrdered()
@@ -213,9 +220,10 @@ type State struct {
 	// env is Global.EnvironmentVariables: the job-level environment and what
 	// GITHUB_ENV adds. A step's own env is not in it.
 	env *ordered
-	// steps is the steps context, in order of first mention.
-	stepOrder []string
-	steps     map[string]*stepCtx
+	// root is the steps context of the job; cur is the one in use: a composite
+	// action's steps see their own (see PushScope).
+	root, cur *stepsScope
+	scopes    map[string]*stepsScope
 	// prepend is Global.PrependPath in the order of the GITHUB_PATH entries.
 	prepend []string
 	// status is job.status: "success", "failure" or "cancelled".
@@ -242,7 +250,9 @@ func NewState(contextsJSON, matrixJSON, jobKey string, r RunnerInfo, repoFallbac
 		}
 		root = d
 	}
-	s := &State{other: map[string]expr.Value{}, env: newOrdered(), steps: map[string]*stepCtx{}, status: "success"}
+	s := &State{other: map[string]expr.Value{}, env: newOrdered(), status: "success", scopes: map[string]*stepsScope{}}
+	s.root = newScope()
+	s.cur = s.root
 
 	// github: token first, then what the server gave (ExecutionContext.cs:1023-1037).
 	// The token is the one the server sent in github.token (GitHub's
@@ -407,11 +417,11 @@ func (s *State) Status() string { return s.status }
 func stepIDVisible(id string) bool { return id != "" && !strings.HasPrefix(id, "__") }
 
 func (s *State) step(id string) *stepCtx {
-	c, ok := s.steps[id]
+	c, ok := s.cur.steps[id]
 	if !ok {
 		c = &stepCtx{outputs: newOrdered()}
-		s.steps[id] = c
-		s.stepOrder = append(s.stepOrder, id)
+		s.cur.steps[id] = c
+		s.cur.order = append(s.cur.order, id)
 	}
 	return c
 }
@@ -437,7 +447,7 @@ func (s *State) SetStepResult(id, outcome, conclusion string) {
 
 // Output returns an output of a step ("" when absent).
 func (s *State) Output(id, name string) string {
-	if c, ok := s.steps[id]; ok {
+	if c, ok := s.cur.steps[id]; ok {
 		v, _ := c.outputs.Get(name)
 		return v
 	}
@@ -446,8 +456,8 @@ func (s *State) Output(id, name string) string {
 
 func (s *State) stepsValue() *expr.Dictionary {
 	d := expr.NewDictionary()
-	for _, id := range s.stepOrder {
-		c := s.steps[id]
+	for _, id := range s.cur.order {
+		c := s.cur.steps[id]
 		sd := expr.NewDictionary()
 		sd.Add("outputs", c.outputs.Dict())
 		if c.outcome != "" {
@@ -476,6 +486,9 @@ func (s *State) Values(env *ordered) map[string]expr.Value {
 	}
 	for k, v := range s.other {
 		m[k] = v
+	}
+	if s.cur.inputs != nil {
+		m["inputs"] = s.cur.inputs
 	}
 	return m
 }

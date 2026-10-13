@@ -5,9 +5,7 @@ package executor
 import (
 	"context"
 	"errors"
-	"fmt"
 	"strings"
-	"sync"
 
 	"bnema.dev/ermite-actions/expr"
 	"bnema.dev/ermite-actions/template"
@@ -17,15 +15,56 @@ import (
 // ---------------------------------------------------------------- steps
 
 // stepRun is the state of one step being run; it implements Sink and
-// commandHost.
+// commandHost. An embedded step (inside a composite action) is a stepRun too,
+// with a parent and the number of the outer step: its log lines belong to it.
 type stepRun struct {
 	j         *job
 	num       int
 	st        *workflow.Step
+	n         *node
+	stage     stage
+	parent    *stepRun
 	env       *ordered // the step's environment: job env + step env
+	overrides *ordered // the step env of this step and of its composite parents
 	cmdResult *stepResult
 	outcome   *stepResult
 	cmds      *commandManager
+	// result is ExecutionContext.Result of a step that runs embedded steps: it
+	// gives action_status to them.
+	result *stepResult
+	// fc is the file commands of the step: the job's for a step of the job, a
+	// fork for an embedded one.
+	fc *FileCommands
+	// actEnv, when set, is the environment of the process of an action step
+	// (env context, STATE_ and INPUT_); rawEnv replaces the whole environment
+	// of the process (docker, whose -e options read it).
+	actEnv, rawEnv *ordered
+	rawEnvList     []string
+	quietExit      bool
+	// displayName is the name of the step in the log; def the action it runs.
+	displayName string
+	def         *actionDef
+	nodeVersion string
+}
+
+// depth is the number of composite actions around the step.
+func (s *stepRun) depth() int {
+	d := 0
+	for p := s.parent; p != nil; p = p.parent {
+		d++
+	}
+	return d
+}
+
+// procEnv is the environment of the process the step starts.
+func (s *stepRun) procEnv() []string {
+	if s.rawEnvList != nil {
+		return s.rawEnvList
+	}
+	if s.actEnv != nil {
+		return s.j.processEnv(s.actEnv)
+	}
+	return s.j.processEnv(s.env)
 }
 
 func (s *stepRun) Out(text string)        { s.j.out(s.num, text) }
@@ -38,7 +77,6 @@ func (s *stepRun) SetOutput(name, value string) {
 	s.j.state.SetOutput(s.st.ID, name, value)
 	s.j.mu.Unlock()
 }
-func (s *stepRun) SaveState(name, value string) {}
 func (s *stepRun) SetEnv(name, value string) {
 	s.j.mu.Lock()
 	s.j.state.SetEnv(name, value)
@@ -201,157 +239,6 @@ func formatStepName(prefix, name string) string {
 	return prefix + firstLine(name)
 }
 
-func (j *job) statusFuncs() workflow.StatusFuncs {
-	st := j.state.Status()
-	return workflow.StatusFuncs{Success: st == "success", Failure: st == "failure", Cancelled: st == "cancelled"}
-}
-
-// markCancelled records the cancellation of the job: job result Canceled and
-// job.status cancelled (StepsRunner.cs:152-155 and :190-196).
-func (j *job) markCancelledLocked() {
-	if j.cancelled {
-		return
-	}
-	j.cancelled = true
-	c := resCanceled
-	j.result = &c
-	j.state.SetStatus("cancelled")
-}
-
-func (j *job) runStep(num int, st *workflow.Step) {
-	rep := j.cfg.Reporter
-	s := &stepRun{j: j, num: num, st: st}
-	s.cmds = newCommandManager(s, j.cfg.Debug)
-
-	// Environment of the step (StepsRunner.cs:108-139): job env, then the step's
-	// own, evaluated against the job env.
-	j.mu.Lock()
-	// github.action is the id of the step, set before the step's env is
-	// evaluated (StepsRunner.cs:118), so that the env and the if of a step see
-	// its own id (the dump step of the recordings reads __run_6, not __run_5).
-	j.state.SetGitHub("action", st.ID)
-	jobEnv := j.state.JobEnv()
-	j.mu.Unlock()
-	s.env = jobEnv.Clone()
-	pairs, envErr := j.evalMap(st.Env, jobEnv)
-	if envErr == nil {
-		for _, p := range pairs {
-			s.env.Set(p.Key, p.Value)
-		}
-	}
-	name := j.displayName(st, s.env)
-	rep.StepStarted(num, name, j.now())
-
-	complete := func(r stepResult) {
-		res := r
-		j.mu.Lock()
-		// Update the steps context (ExecutionContext.UpdateGlobalStepsContext).
-		outcome := res
-		if s.outcome != nil {
-			outcome = *s.outcome
-		}
-		j.state.SetStepResult(st.ID, string(outcome.conclusion()), string(res.conclusion()))
-		if res == resFailed {
-			m := merge(j.result, resFailed)
-			j.result = &m
-			j.state.SetStatus(statusName(m))
-		}
-		j.mu.Unlock()
-		rep.StepCompleted(num, name, res.conclusion(), j.now())
-	}
-
-	if envErr != nil {
-		j.errorf(num, "%s", templateNotValid(envErr, true))
-		complete(resFailed)
-		return
-	}
-
-	// Cancellation seen before the step starts (StepsRunner.cs:188-197).
-	cancelledAtStart := false
-	select {
-	case <-j.cancel.Done():
-		cancelledAtStart = true
-		j.mu.Lock()
-		j.markCancelledLocked()
-		j.mu.Unlock()
-	default:
-	}
-
-	// Condition (StepsRunner.cs:200-261). On runner shutdown conditions are not
-	// evaluated and the step is skipped.
-	cond := func() (bool, error) {
-		j.mu.Lock()
-		defer j.mu.Unlock()
-		return st.EvaluateIf(context.Background(), j.evalEnv(s.env), j.statusFuncs())
-	}
-	if cancelledAtStart && j.cancel.Reason() == CancelShutdown {
-		complete(resSkipped)
-		return
-	}
-	ok, err := cond()
-	switch {
-	case err != nil:
-		j.errorf(num, "%s", templateNotValid(err, false))
-		complete(resFailed)
-		return
-	case !ok:
-		complete(resSkipped)
-		return
-	}
-
-	// Cancellation while the step runs (StepsRunner.cs:149-186): the job becomes
-	// cancelled and the step is stopped unless its condition still holds
-	// (always()).
-	stepCancel := make(chan struct{})
-	stopWatch := make(chan struct{})
-	var watch sync.WaitGroup
-	if !cancelledAtStart {
-		watch.Add(1)
-		go func() {
-			defer watch.Done()
-			select {
-			case <-j.cancel.Done():
-			case <-stopWatch:
-				return
-			}
-			j.mu.Lock()
-			j.markCancelledLocked()
-			j.mu.Unlock()
-			keep := false
-			if j.cancel.Reason() != CancelShutdown {
-				keep, _ = cond()
-			}
-			if !keep {
-				close(stepCancel)
-			}
-		}()
-	}
-
-	r := j.execute(s, stepCancel)
-	close(stopWatch)
-	watch.Wait()
-
-	// Merge the result of the commands (StepsRunner.cs:347-351).
-	if s.cmdResult != nil {
-		m := merge(&r, *s.cmdResult)
-		r = m
-	}
-	// continue-on-error (ExecutionContext.ApplyContinueOnError, :1422).
-	if r == resFailed && st.ContinueOnError != nil {
-		coe, cerr := template.EvaluateBool(context.Background(), st.ContinueOnError, j.evalEnv(s.env))
-		if cerr != nil {
-			j.errorf(num, "The step failed and an error occurred when attempting to determine whether to continue on error.")
-			j.errorf(num, "%s", cerr.Error())
-		}
-		if coe && cerr == nil {
-			o := resFailed
-			s.outcome = &o
-			r = resSucceeded
-		}
-	}
-	complete(r)
-}
-
 // statusName is the job.status for a result (TaskResult.ToActionResult).
 func statusName(r stepResult) string {
 	switch r {
@@ -361,15 +248,4 @@ func statusName(r stepResult) string {
 		return "cancelled"
 	}
 	return "success"
-}
-
-// notSupported is the failure of a step that uses a feature of a later phase.
-func notSupported(st *workflow.Step) string {
-	switch {
-	case st.Uses != nil:
-		return fmt.Sprintf("not supported yet: uses (%s)", st.Uses.Value)
-	case st.TimeoutMinutes != nil:
-		return "not supported yet: timeout-minutes"
-	}
-	return ""
 }
