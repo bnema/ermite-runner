@@ -590,3 +590,70 @@ func TestMissingManifestInDownloadedAction(t *testing.T) {
 		t.Fatalf("%+v\n%s", res, logOf(rec.steps[0]))
 	}
 }
+
+func TestRepositoryActionPrePostAndState(t *testing.T) {
+	act := "name: pp\nruns:\n  using: node20\n  pre: pre.sh\n  main: main.sh\n  post: post.sh\n  pre-if: always()\n  post-if: success()\n"
+	sc := "echo \"[$P] state=[$STATE_k]\"\necho \"::save-state name=k::from-$P\"\n"
+	forge := newForge(t, map[string][]byte{"/tarball/o/pp/v1": tarOf(t, "o-pp-x", files{
+		"action.yml": act, "pre.sh": "P=pre\n" + sc, "main.sh": "P=main\n" + sc, "post.sh": "P=post\n" + sc})})
+	rec, res := actionRun(t, files{}, "      - run: echo first\n      - uses: o/pp@v1\n      - run: echo last\n", func(c *Config) { c.Actions.Resolver = forge.resolver("") })
+	if res.Conclusion != ConclusionSuccess {
+		t.Fatalf("%+v %v", res, rec.names())
+	}
+	want := "Set up job|Pre Run o/pp@v1|Run echo first|Run o/pp@v1|Run echo last|Post Run o/pp@v1|Complete job"
+	if got := strings.Join(rec.names(), "|"); got != want {
+		t.Fatalf("%s", got)
+	}
+	if got := logOf(rec.steps[1]); !strings.Contains(got, "[pre] state=[]") || !strings.Contains(got, "##[group]Run o/pp@v1") {
+		t.Errorf("pre:\n%s", got)
+	}
+	if got := logOf(rec.steps[3]); !strings.Contains(got, "[main] state=[from-pre]") {
+		t.Errorf("main sees the state of pre:\n%s", got)
+	}
+	if got := logOf(rec.steps[5]); !strings.Contains(got, "Post job cleanup.") || !strings.Contains(got, "[post] state=[from-main]") {
+		t.Errorf("post:\n%s", got)
+	}
+}
+
+func TestDockerPrePostEntrypoints(t *testing.T) {
+	forge := newForge(t, map[string][]byte{"/tarball/o/dk/v1": tarOf(t, "o-dk-x", files{
+		"action.yml": "name: dk\nruns:\n  using: docker\n  image: docker://alpine:3\n  pre-entrypoint: /pre.sh\n  entrypoint: /main.sh\n  post-entrypoint: /post.sh\n"})})
+	d, lf := fakeDocker(t, 0)
+	rec, res := actionRun(t, files{}, "      - uses: o/dk@v1\n", func(c *Config) {
+		c.Actions.DockerPath = d
+		c.Actions.Resolver = forge.resolver("")
+	})
+	if res.Conclusion != ConclusionSuccess {
+		t.Fatalf("%+v %v", res, rec.names())
+	}
+	want := "Set up job|Pull alpine:3|Pre Run o/dk@v1|Run o/dk@v1|Post Run o/dk@v1|Complete job"
+	if got := strings.Join(rec.names(), "|"); got != want {
+		t.Fatalf("%s", got)
+	}
+	var eps []string
+	for _, c := range calls(t, lf) {
+		if c[0] != "run" {
+			continue
+		}
+		for i, a := range c {
+			if a == "--entrypoint" {
+				eps = append(eps, c[i+1])
+			}
+		}
+	}
+	if strings.Join(eps, ",") != "/pre.sh,/main.sh,/post.sh" {
+		t.Errorf("entrypoints %v", eps)
+	}
+}
+
+func TestRepositoryActionInputsAreMaskedAndTokenNotInEnv(t *testing.T) {
+	forge := newForge(t, map[string][]byte{"/tarball/o/t/v1": tarOf(t, "o-t-x", files{
+		"action.yml": nodeAction, "main.sh": "env | grep -c archive-secret || true\n"})})
+	rec, res := actionRun(t, files{}, "      - uses: o/t@v1\n", func(c *Config) { c.Actions.Resolver = forge.resolver("archive-secret") })
+	if res.Conclusion != ConclusionSuccess {
+		t.Fatalf("%+v", res)
+	}
+	if got := logOf(rec.steps[1]); !strings.HasSuffix(got, "\n0") {
+		t.Errorf("the archive token is not in the environment of actions:\n%s", got)
+	}
+}
