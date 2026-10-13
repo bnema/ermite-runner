@@ -4,8 +4,6 @@ package executor
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -224,15 +222,5 @@ func TestSaveStateInRunStep(t *testing.T) {
 		if !strings.Contains(log, w) {
 			t.Errorf("log lacks %q:\n%s", w, log)
 		}
-	}
-}
-
-func writeFile(t *testing.T, p, s string) {
-	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(p, []byte(s), 0o644); err != nil {
-		t.Fatal(err)
 	}
 }

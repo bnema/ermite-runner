@@ -323,3 +323,18 @@ func TestStepTimeoutExpressionError(t *testing.T) {
 		t.Fatal(res)
 	}
 }
+
+// save-state keeps the state per step, for the post phase of an action (F);
+// names are case-insensitive (IntraActionState uses OrdinalIgnoreCase).
+func TestSaveStateIsKeptPerStep(t *testing.T) {
+	j := &job{}
+	j.saveState("2", "Foo", "bar")
+	j.saveState("2", "FOO", "baz")
+	j.saveState("3", "x", "y")
+	if got := j.intraActionState("2"); len(got) != 1 || got["foo"] != "baz" {
+		t.Errorf("%v", got)
+	}
+	if got := j.intraActionState("4"); len(got) != 0 {
+		t.Errorf("%v", got)
+	}
+}

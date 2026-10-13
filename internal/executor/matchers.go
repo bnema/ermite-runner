@@ -4,7 +4,6 @@ package executor
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -32,7 +31,7 @@ func (o *optInt) UnmarshalJSON(b []byte) error {
 	s = strings.Trim(s, `"`)
 	var n int
 	if _, err := fmt.Sscanf(s, "%d", &n); err != nil {
-		return fmt.Errorf("Error converting value %s to type 'System.Nullable`1[System.Int32]'.", string(b))
+		return ghErrorf("Error converting value %s to type 'System.Nullable`1[System.Int32]'.", string(b))
 	}
 	o.set, o.v = true, n
 	return nil
@@ -48,7 +47,7 @@ func (o *optBool) UnmarshalJSON(b []byte) error {
 	case "false", "null":
 		*o = false
 	default:
-		return fmt.Errorf("Error converting value %s to type 'System.Boolean'.", string(b))
+		return ghErrorf("Error converting value %s to type 'System.Boolean'.", string(b))
 	}
 	return nil
 }
@@ -113,7 +112,7 @@ func (c *matchersConfig) validate() error {
 		}
 		lo := strings.ToLower(m.Owner)
 		if owners[lo] {
-			return fmt.Errorf("Duplicate owner name '%s'", m.Owner)
+			return ghErrorf("Duplicate owner name '%s'", m.Owner)
 		}
 		owners[lo] = true
 	}
@@ -123,15 +122,15 @@ func (c *matchersConfig) validate() error {
 // validate is IssueMatcherConfig.Validate (IssueMatcher.cs:376).
 func (m *matcherConfig) validate() error {
 	if m.Owner == "" {
-		return errors.New("Owner must not be empty")
+		return ghErrorf("Owner must not be empty")
 	}
 	switch strings.ToUpper(m.Severity) {
 	case "", "ERROR", "WARNING", "NOTICE":
 	default:
-		return fmt.Errorf("Matcher '%s' contains unexpected default severity '%s'", m.Owner, m.Severity)
+		return ghErrorf("Matcher '%s' contains unexpected default severity '%s'", m.Owner, m.Severity)
 	}
 	if len(m.Patterns) == 0 {
-		return fmt.Errorf("Matcher '%s' does not contain any patterns", m.Owner)
+		return ghErrorf("Matcher '%s' does not contain any patterns", m.Owner)
 	}
 	var file, line, column, severity, code, message, fromPath *int
 	for i := range m.Patterns {
@@ -141,7 +140,7 @@ func (m *matcherConfig) validate() error {
 		}
 	}
 	if message == nil {
-		return errors.New("At least one pattern must set 'message'")
+		return ghErrorf("At least one pattern must set 'message'")
 	}
 	return nil
 }
@@ -149,10 +148,10 @@ func (m *matcherConfig) validate() error {
 // validate is IssuePatternConfig.Validate (IssueMatcher.cs:495).
 func (p *patternConfig) validate(isFirst, isLast bool, file, line, column, severity, code, message, fromPath **int) error {
 	if bool(p.Loop) && (isFirst || !isLast) {
-		return errors.New("Only the last pattern in a multiline matcher may set 'loop'")
+		return ghErrorf("Only the last pattern in a multiline matcher may set 'loop'")
 	}
 	if bool(p.Loop) && !p.Message.set {
-		return errors.New("The loop pattern must set 'message'")
+		return ghErrorf("The loop pattern must set 'message'")
 	}
 	re, err := compilePattern(p.Regexp)
 	if err != nil {
@@ -172,10 +171,10 @@ func (p *patternConfig) validate(isFirst, isLast bool, file, line, column, sever
 			continue
 		}
 		if *f.to != nil {
-			return fmt.Errorf("The property '%s' is set twice", f.name)
+			return ghErrorf("The property '%s' is set twice", f.name)
 		}
 		if f.v.v < 0 || f.v.v >= groupCount {
-			return fmt.Errorf("The property '%s' is set to %d which is out of range", f.name, f.v.v)
+			return ghErrorf("The property '%s' is set to %d which is out of range", f.name, f.v.v)
 		}
 		n := f.v.v
 		*f.to = &n
@@ -184,7 +183,7 @@ func (p *patternConfig) validate(isFirst, isLast bool, file, line, column, sever
 }
 
 // errMatchTimeout is the RegexMatchTimeoutException; its message is .NET's.
-var errMatchTimeout = errors.New("The Regex engine has timed out while trying to match a pattern to an input string. This can occur for many reasons, including very large inputs or excessive backtracking caused by nested quantifiers, back-references and other factors.")
+var errMatchTimeout = msgError("The Regex engine has timed out while trying to match a pattern to an input string. This can occur for many reasons, including very large inputs or excessive backtracking caused by nested quantifiers, back-references and other factors.")
 
 // issuePattern is IssuePattern.
 type issuePattern struct {
