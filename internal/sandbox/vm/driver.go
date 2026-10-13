@@ -68,9 +68,12 @@ type Driver struct {
 	fcPath   string
 	jailer   string
 	execDisk string
-	store    store
-	net      netsetup.Plumbing
-	lock     *sandbox.HostLock
+	// extMu serialises the building of the externals disk with the linking of it
+	// into a sandbox (see shareExternals).
+	extMu sync.Mutex
+	store store
+	net   netsetup.Plumbing
+	lock  *sandbox.HostLock
 
 	mu    sync.Mutex
 	slots *sandbox.Slots
@@ -370,7 +373,7 @@ func (s *vmSandbox) bootVMM(ctx context.Context, spec sandbox.JobSpec) (*apiClie
 }
 
 // vmFiles are the paths Firecracker is given.
-type vmFiles struct{ execDisk, baseDisk, kernel string }
+type vmFiles struct{ execDisk, baseDisk, kernel, externals string }
 
 // bootFiles makes the shared files available and creates the scratch disk.
 func (s *vmSandbox) bootFiles(ctx context.Context, spec sandbox.JobSpec) (vmFiles, error) {
@@ -386,11 +389,35 @@ func (s *vmSandbox) bootFiles(ctx context.Context, spec sandbox.JobSpec) (vmFile
 	if f.kernel, err = s.lay.share(d.cfg.KernelPath(), "kernel"); err != nil {
 		return f, err
 	}
+	f.externals = s.shareExternals(ctx)
 	owner := -1
 	if s.lay.jailed {
 		owner = s.lay.uid
 	}
 	return f, disk.CreateScratch(ctx, d.opt.Run, s.lay.host("scratch.ext4"), spec.DiskMiB, owner)
+}
+
+// shareExternals makes the read-only disk of the host's external tools available
+// to Firecracker; "" means the sandbox has none. A disk that cannot be built
+// does not stop the job: it starts without the tools and the failure is logged.
+func (s *vmSandbox) shareExternals(ctx context.Context) string {
+	d := s.d
+	set := d.cfg.ExternalsOf()
+	if len(set) == 0 {
+		return ""
+	}
+	log := zerowrap.FromCtx(ctx)
+	d.extMu.Lock()
+	defer d.extMu.Unlock()
+	path, err := ensureExternalsDisk(ctx, d.opt.Run, set, d.cfg.StateDir)
+	if err == nil && path != "" {
+		path, err = s.lay.share(path, "externals.ext4")
+	}
+	if err != nil {
+		log.Error().Err(err).Str("vm", s.id).Msg("external tools (Node.js) not attached to this job")
+		return ""
+	}
+	return path
 }
 
 // bootVsock listens on the host side of the vsock stream: Firecracker connects
@@ -476,14 +503,19 @@ func checkJailBaseInfo(dir string, fi fs.FileInfo, euid int) error {
 
 func (s *vmSandbox) vmConfig(spec sandbox.JobSpec, netw netpolicy.Net, f vmFiles) vmConfig {
 	cfg := s.d.cfg
+	// The order decides the guest device names (vda, vdb, ...): new drives go last.
+	drives := []drive{
+		{DriveID: "rootfs", PathOnHost: f.execDisk, IsRootDevice: true, IsReadOnly: true},
+		{DriveID: "base", PathOnHost: f.baseDisk, IsReadOnly: true},
+		{DriveID: "scratch", PathOnHost: s.lay.fc("scratch.ext4"), RateLimiter: diskLimiter(cfg.DiskBandwidthMiB, cfg.DiskIOPS)},
+	}
+	if f.externals != "" {
+		drives = append(drives, drive{DriveID: "externals", PathOnHost: f.externals, IsReadOnly: true})
+	}
 	return vmConfig{
 		Machine: machineConfig{VcpuCount: spec.CPUs, MemSizeMiB: spec.MemoryMiB},
-		Boot:    bootSource{KernelImagePath: f.kernel, BootArgs: bootArgs(netw.Guest, netw.Gateway, time.Now().Unix())},
-		Drives: []drive{
-			{DriveID: "rootfs", PathOnHost: f.execDisk, IsRootDevice: true, IsReadOnly: true},
-			{DriveID: "base", PathOnHost: f.baseDisk, IsReadOnly: true},
-			{DriveID: "scratch", PathOnHost: s.lay.fc("scratch.ext4"), RateLimiter: diskLimiter(cfg.DiskBandwidthMiB, cfg.DiskIOPS)},
-		},
+		Boot:    bootSource{KernelImagePath: f.kernel, BootArgs: bootArgs(netw.Guest, netw.Gateway, time.Now().Unix(), f.externals != "")},
+		Drives:  drives,
 		Net: networkInterface{
 			IfaceID: "eth0", HostDevName: s.tap, GuestMAC: macFor(s.slot),
 			RxRateLimiter: netLimiter(cfg.NetMbit), TxRateLimiter: netLimiter(cfg.NetMbit),

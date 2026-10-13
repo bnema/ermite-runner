@@ -36,6 +36,9 @@ const (
 	EnvJobDiskBW       = "ERMITE_RUNNER_JOB_DISK_BANDWIDTH"
 	EnvJobDiskIOPS     = "ERMITE_RUNNER_JOB_DISK_IOPS"
 	EnvJobNetBandwidth = "ERMITE_RUNNER_JOB_NET_BANDWIDTH"
+	// EnvNode=0 turns the Node.js externals off (nothing is downloaded or
+	// attached).
+	EnvNode = "ERMITE_RUNNER_NODE"
 )
 
 // Defaults.
@@ -117,6 +120,14 @@ type Config struct {
 	GuestForge *GuestForge
 	// Rate limits of micro-VMs; zero disables.
 	DiskBandwidthMiB, DiskIOPS, NetMbit int
+
+	// NodeExternals is false when ERMITE_RUNNER_NODE=0: the caller then sets no
+	// Externals.
+	NodeExternals bool
+	// Externals, when not nil, is the host's set of external tools (Node.js),
+	// attached read-only to every sandbox at GuestExternalsDir. The caller sets
+	// it before building the drivers, like GuestForge.
+	Externals ExternalsSource
 }
 
 // LoadConfig reads the sandbox settings from getenv (os.Getenv in production).
@@ -133,6 +144,8 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 		DNSPort:      53,
 		JobPids:      DefaultJobPids,
 		LockFile:     DefaultLockFile,
+
+		NodeExternals: true,
 
 		DiskBandwidthMiB: DefaultDiskBandwidthMiB,
 		DiskIOPS:         DefaultDiskIOPS,
@@ -202,6 +215,13 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 		c.GuestForgeEnabled = true
 	default:
 		return c, fmt.Errorf("%s: %q is not 0 or 1", EnvGuestForge, getenv(EnvGuestForge))
+	}
+	switch strings.ToLower(strings.TrimSpace(getenv(EnvNode))) {
+	case "", "1", "true", "yes":
+	case "0", "false", "no":
+		c.NodeExternals = false
+	default:
+		return c, fmt.Errorf("%s: %q is not 0 or 1", EnvNode, getenv(EnvNode))
 	}
 	if v := getenv(EnvLockFile); v != "" {
 		if !filepath.IsAbs(v) {

@@ -621,7 +621,7 @@ func TestJailedShareHardLinks(t *testing.T) {
 }
 
 func TestBootArgs(t *testing.T) {
-	a := bootArgs(mustAddr("10.200.0.6"), mustAddr("10.200.0.5"), 1791818522)
+	a := bootArgs(mustAddr("10.200.0.6"), mustAddr("10.200.0.5"), 1791818522, false)
 	for _, want := range []string{
 		"ipv6.disable=1", "root=/dev/vda ro", "init=/ermite-runner", "reboot=k", "panic=1",
 		"ip=10.200.0.6::10.200.0.5:255.255.255.252:ermite-job:eth0:off:10.200.0.5",
@@ -633,6 +633,12 @@ func TestBootArgs(t *testing.T) {
 	}
 	if !strings.HasSuffix(a, "-- init") {
 		t.Errorf("init subcommand missing: %s", a)
+	}
+	if strings.Contains(a, "ermite.externals") {
+		t.Errorf("externals announced without a disk: %s", a)
+	}
+	if b := bootArgs(mustAddr("10.200.0.6"), mustAddr("10.200.0.5"), 1791818522, true); !strings.Contains(b, " ermite.externals=1 -- init") {
+		t.Errorf("externals not announced: %s", b)
 	}
 	if macFor(0) != "06:00:ac:10:00:00" || macFor(257) != "06:00:ac:10:01:01" {
 		t.Fatal(macFor(257))
@@ -1346,5 +1352,180 @@ func TestGuestForgeIsAttachedAndWarnedAtEveryJob(t *testing.T) {
 	}
 	if n := strings.Count(buf.String(), msg); n != 3 {
 		t.Fatalf("the warning must be logged at every job start (1 + 2), got %d", n)
+	}
+}
+
+// The host's external tools ride on a fourth, read-only drive, keyed by their
+// content: a new Node.js builds a new disk and leaves the exec disk alone.
+func TestExternalsDiskIsAttachedReadOnlyAndKeyedByContent(t *testing.T) {
+	e := newEnv(t, "")
+	src := &sandboxtest.Externals{}
+	n24 := sandboxtest.MakeExternal(t, "node24", "node24-24.21.0-x64-aaaa", "v24.21.0")
+	n20 := sandboxtest.MakeExternal(t, "node20", "node20-20.20.2-x64-bbbb", "v20.20.2")
+	src.Set(n24, n20)
+	e.cfg.Externals = src
+	d := e.driver(t)
+	execDisk := d.execDisk
+
+	boot := func() (drives []string, log string) {
+		t.Helper()
+		_ = os.Remove(e.log)
+		sb, _ := d.New()
+		conn, err := sb.Start(context.Background(), sandbox.JobSpec{JobID: "j"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		runStub(t, conn)
+		defer func() { _ = sb.Stop(context.Background()) }()
+		b, _ := os.ReadFile(e.log)
+		log = string(b)
+		for _, l := range strings.Split(log, "\n") {
+			if f := strings.Fields(l); len(f) >= 2 && f[0] == "PUT" && strings.HasPrefix(f[1], "/drives/") {
+				drives = append(drives, f[1])
+			}
+		}
+		return drives, log
+	}
+	drives, log := boot()
+	if strings.Join(drives, ",") != "/drives/rootfs,/drives/base,/drives/scratch,/drives/externals" {
+		t.Fatalf("drives: %v", drives)
+	}
+	if !strings.Contains(log, `"drive_id":"externals"`) || !strings.Contains(log, `"is_root_device":false,"is_read_only":true`) || !strings.Contains(log, "ermite.externals=1") {
+		t.Fatalf("API log:\n%s", log)
+	}
+	// The scratch drive is still the third (vdc), and the only writable one.
+	if strings.Count(log, `"is_read_only":false`) != 1 {
+		t.Errorf("only the scratch drive is writable:\n%s", log)
+	}
+	first, _ := filepath.Glob(filepath.Join(e.cfg.StateDir, "cache", "extdisk-*"))
+	if len(first) != 1 {
+		t.Fatalf("externals disks: %v", first)
+	}
+	mkfs := func() (n int) {
+		for _, c := range e.run.Calls {
+			if c.Name == "mkfs.ext4" && len(c.Args) > 1 {
+				for _, a := range c.Args {
+					if a == "ermite-ext" {
+						n++
+					}
+				}
+			}
+		}
+		return
+	}
+	if mkfs() != 1 {
+		t.Fatalf("externals disk built %d times", mkfs())
+	}
+
+	// A second job with the same tools reuses the disk.
+	boot()
+	if mkfs() != 1 {
+		t.Fatal("externals disk rebuilt for the same content")
+	}
+
+	// A new Node.js: another disk, and the exec disk is untouched.
+	src.Set(sandboxtest.MakeExternal(t, "node24", "node24-24.22.0-x64-cccc", "v24.22.0"), n20)
+	boot()
+	if mkfs() != 2 {
+		t.Fatal("externals disk not rebuilt for a new version")
+	}
+	if d.execDisk != execDisk {
+		t.Fatal("exec disk changed")
+	}
+	if _, err := os.Stat(execDisk); err != nil {
+		t.Fatal("exec disk removed")
+	}
+	if now, _ := filepath.Glob(filepath.Join(e.cfg.StateDir, "cache", "extdisk-*")); len(now) != 2 || (now[0] != first[0] && now[1] != first[0]) {
+		// The previous disk may still be linked by a starting VM: kept for an hour.
+		t.Fatalf("externals disks: %v", now)
+	}
+}
+
+func TestNoExternalsMeansThreeDrives(t *testing.T) {
+	for _, src := range []sandbox.ExternalsSource{nil, &sandboxtest.Externals{}} {
+		e := newEnv(t, "")
+		e.cfg.Externals = src
+		d := e.driver(t)
+		sb, _ := d.New()
+		conn, err := sb.Start(context.Background(), sandbox.JobSpec{JobID: "j"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		runStub(t, conn)
+		b, _ := os.ReadFile(e.log)
+		if strings.Contains(string(b), "externals") {
+			t.Errorf("externals attached without any:\n%s", b)
+		}
+		_ = sb.Stop(context.Background())
+		if left, _ := filepath.Glob(filepath.Join(e.cfg.StateDir, "cache", "extdisk-*")); len(left) != 0 {
+			t.Errorf("disk built for nothing: %v", left)
+		}
+	}
+}
+
+func TestExternalsDiskFailureDoesNotStopTheJob(t *testing.T) {
+	e := newEnv(t, "")
+	src := &sandboxtest.Externals{}
+	src.Set(sandbox.External{Name: "node24", ID: "x", Dir: filepath.Join(t.TempDir(), "missing")})
+	e.cfg.Externals = src
+	var buf bytes.Buffer
+	ctx := zerowrap.WithCtx(context.Background(), zerowrap.New(zerowrap.Config{Level: "debug", Format: "json", Output: &buf}))
+	d := e.driver(t)
+	sb, _ := d.New()
+	conn, err := sb.Start(ctx, sandbox.JobSpec{JobID: "j"})
+	if err != nil {
+		t.Fatalf("a broken externals set must not stop the job: %v", err)
+	}
+	runStub(t, conn)
+	_ = sb.Stop(ctx)
+	if !strings.Contains(buf.String(), "external tools (Node.js) not attached") {
+		t.Fatalf("failure not logged: %s", buf.String())
+	}
+	b, _ := os.ReadFile(e.log)
+	if strings.Contains(string(b), `"externals"`) {
+		t.Fatal("drive attached after a failure")
+	}
+}
+
+// With the real mkfs.ext4 the disk holds <name>/bin/node at its root, which the
+// guest mounts at /home/runner/externals.
+func TestExternalsDiskContent(t *testing.T) {
+	if _, err := exec.LookPath("mkfs.ext4"); err != nil {
+		t.Skip("mkfs.ext4 needed")
+	}
+	dbg, err := exec.LookPath("debugfs")
+	if err != nil {
+		t.Skip("debugfs needed")
+	}
+	set := []sandbox.External{
+		sandboxtest.MakeExternal(t, "node24", "a", "v24"),
+		sandboxtest.MakeExternal(t, "node20", "b", "v20"),
+	}
+	path, err := ensureExternalsDisk(context.Background(), cmdrun.Exec{}, set, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := func(cmd string) string {
+		b, err := exec.Command(dbg, "-R", cmd, path).CombinedOutput()
+		if err != nil {
+			t.Fatalf("debugfs %s: %v\n%s", cmd, err, b)
+		}
+		_, body, _ := strings.Cut(string(b), "\n") // the banner line
+		return body
+	}
+	if ls := out("ls -l /"); !strings.Contains(ls, "node24") || !strings.Contains(ls, "node20") {
+		t.Fatalf("root:\n%s", ls)
+	}
+	if got := out("cat /node24/bin/node"); got != "v24" {
+		t.Fatalf("node24/bin/node: %q", got)
+	}
+	if ls := out("stat /node20/bin/node"); !strings.Contains(ls, "Mode:  0755") {
+		t.Fatalf("mode:\n%s", ls)
+	}
+	if ls := out("stat /node20/nodejs"); !strings.Contains(ls, "Type: symlink") || !strings.Contains(ls, `"bin/node"`) {
+		t.Fatalf("symlink:\n%s", ls)
+	}
+	if st, _ := os.Stat(path); st.Size() > 64<<20 {
+		t.Fatalf("a tiny tree gave a %d byte disk", st.Size())
 	}
 }

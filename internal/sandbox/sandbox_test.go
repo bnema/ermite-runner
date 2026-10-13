@@ -269,3 +269,35 @@ func TestCheckStatic(t *testing.T) {
 		t.Skip("/bin/sh is static here")
 	}
 }
+
+func TestNodeSettingAndExternalsKey(t *testing.T) {
+	c, err := LoadConfig(env(nil))
+	if err != nil || !c.NodeExternals {
+		t.Fatalf("on by default: %+v %v", c, err)
+	}
+	for v, want := range map[string]bool{"0": false, "false": false, "NO": false, "1": true, "yes": true, "": true} {
+		c, err := LoadConfig(env(map[string]string{EnvNode: v}))
+		if err != nil || c.NodeExternals != want {
+			t.Errorf("%s=%q: %v %v", EnvNode, v, c.NodeExternals, err)
+		}
+	}
+	if _, err := LoadConfig(env(map[string]string{EnvNode: "maybe"})); err == nil || !strings.Contains(err.Error(), EnvNode) {
+		t.Errorf("got %v", err)
+	}
+
+	a := External{Name: "node24", ID: "x1", Dir: "/a"}
+	b := External{Name: "node20", ID: "y1", Dir: "/b"}
+	k := ExternalsKey([]External{a, b})
+	if k != ExternalsKey([]External{b, a}) {
+		t.Error("the key depends on the order")
+	}
+	if k != ExternalsKey([]External{{Name: "node24", ID: "x1", Dir: "/elsewhere"}, b}) {
+		t.Error("the key depends on the host path, which does not change the content")
+	}
+	if k == ExternalsKey([]External{{Name: "node24", ID: "x2"}, b}) || k == ExternalsKey([]External{a}) {
+		t.Error("a change of content keeps the key")
+	}
+	if (Config{}).ExternalsOf() != nil {
+		t.Error("no source, no externals")
+	}
+}

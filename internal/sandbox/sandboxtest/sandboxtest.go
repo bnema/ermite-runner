@@ -9,11 +9,13 @@ import (
 	"io"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 
 	"bnema.dev/ermite-runner/internal/cmdrun"
 	"bnema.dev/ermite-runner/internal/netpolicy"
+	"bnema.dev/ermite-runner/internal/sandbox"
 )
 
 // NoMountRunner runs real commands except mount and umount, which succeed
@@ -104,4 +106,37 @@ func (p *Plumbing) Live() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return len(p.Attached)
+}
+
+// Externals is a fixed, replaceable sandbox.ExternalsSource.
+type Externals struct {
+	mu  sync.Mutex
+	set []sandbox.External
+}
+
+// Set replaces the set the drivers see.
+func (e *Externals) Set(set ...sandbox.External) { e.mu.Lock(); e.set = set; e.mu.Unlock() }
+
+// Externals implements sandbox.ExternalsSource.
+func (e *Externals) Externals() []sandbox.External {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]sandbox.External(nil), e.set...)
+}
+
+// MakeExternal creates a host directory holding bin/node with content and
+// returns it as an external called name.
+func MakeExternal(t testing.TB, name, id, content string) sandbox.External {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), name)
+	if err := os.MkdirAll(filepath.Join(dir, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "bin", "node"), []byte(content), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("bin/node", filepath.Join(dir, "nodejs")); err != nil {
+		t.Fatal(err)
+	}
+	return sandbox.External{Name: name, ID: id, Dir: dir}
 }

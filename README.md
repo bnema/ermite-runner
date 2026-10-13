@@ -16,7 +16,7 @@ Both modes run the same executable, the runner's own, attached **read-only** to 
 ### vm
 
 - Firecracker is driven through its HTTP API on a unix socket with `net/http`, not through `firecracker-go-sdk` (its last release, v1.0.0 from 2022, predates Firecracker 1.17 and pulls CNI, go-openapi and netlink for a handful of PUT requests).
-- Disks: the runner executable (read-only boot root, ext4 built with `mkfs.ext4 -d`, cached by the executable's hash), the shared read-only base image, and a per-job sparse scratch disk (`ERMITE_RUNNER_JOB_DISK`). The guest init builds an overlayfs root (lower = base, upper = scratch) and keeps dockerd's data root on the scratch disk. The scratch disk and `eth0` are rate limited (defaults 400 MiB/s and 20000 IOPS, 1 Gbit/s each way; `ERMITE_RUNNER_JOB_DISK_BANDWIDTH` in MiB/s, `_JOB_DISK_IOPS`, `_JOB_NET_BANDWIDTH` in Mbit/s; 0 disables).
+- Disks: the runner executable (read-only boot root, ext4 built with `mkfs.ext4 -d`, cached by the executable's hash), the shared read-only base image, a per-job sparse scratch disk (`ERMITE_RUNNER_JOB_DISK`) and, when there are externals (below), a fourth read-only disk with the host's Node.js builds, cached by their content. The guest init builds an overlayfs root (lower = base, upper = scratch), mounts the externals disk (`/dev/vdd`) at `/home/runner/externals` and keeps dockerd's data root on the scratch disk. The scratch disk and `eth0` are rate limited (defaults 400 MiB/s and 20000 IOPS, 1 Gbit/s each way; `ERMITE_RUNNER_JOB_DISK_BANDWIDTH` in MiB/s, `_JOB_DISK_IOPS`, `_JOB_NET_BANDWIDTH` in Mbit/s; 0 disables).
 - The jailer runs each VM as uid/gid `ERMITE_RUNNER_UID_BASE` + slot in its own chroot under the state directory, in a new PID namespace and in a cgroup v2 with `memory.max` (guest memory + 256 MiB for the VMM) and `pids.max`. The kernel, the base image and the state directory must be on the same filesystem (files are hard-linked into the jail) and the kernel and base image must be world-readable.
 - **The state directory and every parent of it must be owned by root and not writable by group or others.** The jailer runs as root and builds the chroots under `<state dir>/jail`; the driver checks that `jail` itself is a real directory, root-owned and not group/other-writable, but it does not walk the parents: a user who can rename or replace a parent directory can still redirect root's file operations. `/var/lib/ermite-runner` (the default, created by the unit's `StateDirectory`) is fine; do not point `ERMITE_RUNNER_STATE_DIR` into a home directory or `/tmp`.
 - One TAP (`ertap<slot>`) per VM with a /30 from `ERMITE_RUNNER_NETWORK` (default `10.200.0.0/16`), vsock for the executor stream, IPv6 disabled in the guest.
@@ -30,6 +30,25 @@ Both modes run the same executable, the runner's own, attached **read-only** to 
 - Disk: the job's writable space is enforced like in `vm`: a sparse ext4 file of `ERMITE_RUNNER_JOB_DISK`, **loop-mounted on the host** (so this mode needs root, like the rest of it) and bind-mounted at `/scratch`. The nested dockerd's data root, `/home/runner/work` and `/tmp` are directories of that disk; the container's own writable layer stays small. A job that fills its disk gets "no space left on device" instead of filling the host.
 - Per job: a bridge network (`erbr<slot>`), the scratch disk, a Unix socket in a bind-mounted per-job directory of the state directory (the job sees only that directory, not the scratch file). Every Docker object carries the label `dev.bnema.ermite-runner.job`; leftovers are reaped by label at start. The state directory path must keep the socket path under 107 bytes.
 - The Docker daemon must run on the same host as the runner (host paths are bind-mounted).
+
+### Externals (Node.js)
+
+The host provides Node.js to the jobs **outside the image**, like its own executable, so that a runner upgrade or a new Node.js version never needs an image rebuild. The builds are the ones of `actions/runner` (`Misc/externals.sh`), pinned in `internal/externals/table.go` with the SHA-256 of each archive:
+
+| Name | Node.js | Source | Architectures |
+| --- | --- | --- | --- |
+| `node20` | 20.20.2 | `nodejs.org/dist/v20.20.2/node-v20.20.2-linux-<arch>.tar.gz` | x64, arm64 |
+| `node24` | 24.21.0 | `nodejs.org/dist/v24.21.0/node-v24.21.0-linux-<arch>.tar.gz` | x64, arm64 |
+| `node20_alpine` | 20.20.2 | `github.com/actions/alpine_nodejs` release `v20.20.2` | x64 |
+| `node24_alpine` | 24.21.0 | `github.com/actions/alpine_nodejs` release `v24.21.0` | x64 |
+
+- **Download.** `ermite-runner run` (and `sandbox-check`) fetch what is missing at start, into `$ERMITE_RUNNER_STATE_DIR/externals/<name>-<version>-<arch>/`, in the background; the start waits for them at most 2 minutes (a runner with a network normally takes its first job with everything in place, one without never waits long). The archive is the `.tar.gz` (the Go standard library has no xz); its SHA-256 is checked **before** anything is unpacked. Redirects must stay on https.
+- **Extraction** keeps the top directory out and refuses absolute names, `..`, devices and fifos, symbolic links that are absolute or climb out of the tree, entries below a link, hard links to anything but an unpacked file, and archives over 200,000 entries or 2 GiB; writes go through `os.Root`. The tree is built in a temporary directory and renamed into place, so a directory under its final name is always complete.
+- **Only pinned versions are kept**: at every start everything else in `externals/` (other versions, other architectures, interrupted downloads) is removed.
+- **Layout in the sandbox** (GitHub's): `/home/runner/externals/node20/bin/node`, `/node24/bin/node`, and the alpine ones for job containers, read-only. In `container` mode they are read-only bind mounts of the host directories; in `vm` mode one ext4 disk (`mkfs.ext4 -d`) named after the content of the set (`cache/extdisk-<key>.ext4`), so a new Node.js builds a new disk and leaves the executable's disk and the base image alone. Superseded disks are removed an hour after the last build. The set is read at every job start: a download that finishes later is used by the next job.
+- **When a build cannot be provided** (offline, HTTP error, wrong checksum, unsafe archive, no build for the architecture) the runner **still runs**: it logs why, retries network failures every 5 minutes in the background, and attaches in its place a directory with the file `UNAVAILABLE` and a `bin/node` script that prints the reason on stderr and exits 1, so a job that needs the tool fails with a message such as `node24 (Node.js 24.21.0) is not available on this runner: download …: SHA-256 mismatch …` rather than `No such file or directory`.
+- **The alpine builds are not available yet.** They are hosted on github.com (`actions/alpine_nodejs`) and their SHA-256 is not recorded in `table.go` yet: nothing is downloaded for them, and a job container that needs `node20_alpine` or `node24_alpine` fails with `… is not available yet on this runner: the checksum of the actions/alpine_nodejs build has not been recorded in this runner yet`.
+- `ERMITE_RUNNER_NODE=0` turns all of this off: nothing is downloaded or attached.
 
 ### One runner per host
 
@@ -209,8 +228,8 @@ mounts, nftables in the host namespace, Docker.
 
 A job runs in the image named by `ERMITE_RUNNER_IMAGE` (container: an OCI
 reference; vm: the directory with `vmlinux` and `base.ext4`, both built from
-`images/ubuntu-24.04/Dockerfile`). The runner binary is attached to the sandbox
-by the host and is never part of the image. What the executor needs from the
+`images/ubuntu-24.04/Dockerfile`). The runner binary and Node.js (see "Externals") are attached to the sandbox
+by the host and are never part of the image. What the executor needs from the
 image:
 
 - a user **`runner`** with uid and gid 1001 and the home `/home/runner`; the
@@ -261,6 +280,7 @@ the moment it starts.
 | `ERMITE_RUNNER_JOB_PIDS` | `32768` | container process limit |
 | `ERMITE_RUNNER_DENY_PRIVILEGED` | `0` | `1` refuses container mode without sysbox |
 | `ERMITE_RUNNER_GUEST_FORGE` | `0` | `1` lets sandboxes reach the host and port of `ERMITE_RUNNER_URL` on the host (staging only, see "Guest forge access") |
+| `ERMITE_RUNNER_NODE` | `1` | `0` turns the Node.js externals off (see "Externals") |
 | `ERMITE_RUNNER_LOCK_FILE` | `/run/ermite-runner.lock` | host-wide single-instance lock (tests only) |
 | `ERMITE_RUNNER_JOB_DISK_BANDWIDTH`, `_JOB_DISK_IOPS`, `_JOB_NET_BANDWIDTH` | `400`, `20000`, `1000` | VM rate limits in MiB/s, IOPS and Mbit/s; 0 disables |
 | `ERMITE_RUNNER_UID_BASE` | `900000` | jailer uid pool start |
@@ -317,6 +337,7 @@ ERMITE_RUNNER_IT_E2E=1 ERMITE_RUNNER_TEST_IMAGE=ermite-runner-ubuntu-24.04:dev G
 - `TestContainerRunsAJobAsTheRunnerUser` and `TestContainerCancelStopsTheJobAndOrphans` drive a job over the stream: steps run as `runner` (1001), file ownership, `GITHUB_PATH` and `GITHUB_ENV`, `python`, cancellation by SIGINT, the `always()` step, and the orphan cleanup of "Complete job".
 - `TestChainCorpus` runs the whole chain: a fake `RunnerService` (`internal/host/hosttest`, which checks the offsets, limits and tokens of `runner.proto`) hands out 22 jobs of the ermite-conformance corpus, the real host loop starts them in containers (two at a time), and what the fake stored (steps, conclusions, outputs, log lines) is compared with the recordings made on github.com. It reads `ERMITE_CONFORMANCE_DIR` (default: a sibling checkout of ermite-conformance) and never writes to it.
 - `TestVMRunsAJob` (`internal/sandbox/integration`, run by `scripts/it-vm-userns.sh`) does the first of these in a micro-VM.
+- `TestVMNodeExternals` (same place) downloads the pinned `node24` (or takes it from `ERMITE_RUNNER_IT_NODE_DIR`, a directory with `node-v24.21.0-linux-x64.tar.gz`, for an offline host; the checksum and the extraction are the real ones), boots a micro-VM and runs `/home/runner/externals/node24/bin/node -e 'console.log(process.version)'` in it, checking that the mount is read-only.
 
 Checked as root on a real KVM host (Arch Linux, kernel 6.18 LTS, Firecracker and jailer 1.17, rootful podman as the Docker API): the jailer (uid drop, chroot, `memory.max` and `pids.max` cgroups, PID namespace), the VM and container integration scenarios, the firewall policy and NAT, the nested `dockerd` on the loop-mounted scratch disk (full disk gives `ENOSPC`), and `internal/e2e` including `TestChainCorpus`. Not checked: sysbox, and a real Docker Engine (podman's compatibility API is not a drop-in, see below).
 

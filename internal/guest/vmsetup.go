@@ -18,6 +18,9 @@ import (
 const (
 	devBase    = "/dev/vdb" // shared read-only base image (ext4)
 	devScratch = "/dev/vdc" // per-job scratch disk (ext4)
+	// devExternals is the host's external tools (Node.js), attached last and only
+	// when the command line says ermite.externals=1.
+	devExternals = "/dev/vdd"
 )
 
 // KernelArg names of the clock and DNS settings (not part of the contract
@@ -77,6 +80,16 @@ func setupVM(log zerowrap.Logger, args map[string]string) error {
 		"/mnt/newroot" + sandbox.GuestExecDir} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			return err
+		}
+	}
+	// The host's external tools, read-only, in GitHub's layout. A failure is not
+	// fatal: only the jobs that need Node.js are affected, and they say so.
+	if args[sandbox.CmdlineExternals] == "1" {
+		dst := "/mnt/newroot" + sandbox.GuestExternalsDir
+		if err := os.MkdirAll(dst, 0o755); err != nil {
+			log.Warn().Err(err).Msg("init: externals mountpoint")
+		} else if err := mount(devExternals, dst, "ext4", unix.MS_RDONLY|unix.MS_NOSUID|unix.MS_NODEV, ""); err != nil {
+			log.Warn().Err(err).Msg("init: mount the externals disk")
 		}
 	}
 	// Scratch and the exec disk stay reachable after the pivot.

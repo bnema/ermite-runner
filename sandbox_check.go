@@ -29,6 +29,7 @@ func sandboxCheck(ctx context.Context, args []string) int {
 		fmt.Fprintln(os.Stderr, "ermite-runner:", err)
 		return 2
 	}
+	setupExternals(ctx, &cfg)
 	drv, err := sandbox.Select(ctx, cfg, drivers.Factories(), sandbox.Prober{})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ermite-runner:", err)

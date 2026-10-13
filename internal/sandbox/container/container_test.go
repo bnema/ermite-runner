@@ -1084,3 +1084,85 @@ func TestNoGuestForgeByDefault(t *testing.T) {
 		t.Fatalf("override %q", n)
 	}
 }
+
+// The host's external tools are bind-mounted read-only at
+// /home/runner/externals/<name> (GitHub's layout), whichever the isolation.
+func TestExternalsAreBoundReadOnly(t *testing.T) {
+	e := newCEnv(t)
+	src := &sandboxtest.Externals{}
+	n24 := sandboxtest.MakeExternal(t, "node24", "a", "v24")
+	n20 := sandboxtest.MakeExternal(t, "node20", "b", "v20")
+	gone := sandbox.External{Name: "node24_alpine", ID: "c", Dir: "/state/externals/.unavailable/x", Unavailable: true}
+	src.Set(n24, n20, gone)
+	e.cfg.Externals = src
+	d := e.driver(t)
+	run := func() containerSpec {
+		t.Helper()
+		sb, _ := d.New()
+		conn, err := sb.Start(context.Background(), sandbox.JobSpec{JobID: "j"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		stub(t, conn)
+		e.eng.mu.Lock()
+		var spec containerSpec
+		for _, s := range e.eng.containers {
+			spec = s
+		}
+		e.eng.mu.Unlock()
+		_ = sb.Stop(context.Background())
+		return spec
+	}
+	spec := run()
+	got := map[string]bindMount{}
+	for _, b := range spec.Binds {
+		got[b.Target] = b
+	}
+	for _, w := range []sandbox.External{n24, n20, gone} {
+		b, ok := got["/home/runner/externals/"+w.Name]
+		if !ok || !b.ReadOnly || b.Source != w.Dir {
+			t.Errorf("%s: %+v (binds %+v)", w.Name, b, spec.Binds)
+		}
+	}
+	// The executable and the other binds are untouched.
+	if b := got["/opt/ermite/ermite-runner"]; !b.ReadOnly || b.Source != e.cfg.Executable {
+		t.Errorf("executable bind: %+v", b)
+	}
+	if len(spec.Binds) != 5+3 {
+		t.Errorf("binds: %+v", spec.Binds)
+	}
+
+	// A new Node.js is picked up by the next job, without a driver restart.
+	src.Set(sandboxtest.MakeExternal(t, "node24", "d", "v24.22"))
+	spec = run()
+	n := 0
+	for _, b := range spec.Binds {
+		if strings.HasPrefix(b.Target, "/home/runner/externals/") {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("externals binds after the change: %+v", spec.Binds)
+	}
+}
+
+func TestNoExternalsNoBinds(t *testing.T) {
+	e := newCEnv(t)
+	d := e.driver(t)
+	sb, _ := d.New()
+	conn, err := sb.Start(context.Background(), sandbox.JobSpec{JobID: "j"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stub(t, conn)
+	defer func() { _ = sb.Stop(context.Background()) }()
+	e.eng.mu.Lock()
+	defer e.eng.mu.Unlock()
+	for _, s := range e.eng.containers {
+		for _, b := range s.Binds {
+			if strings.Contains(b.Target, "externals") {
+				t.Errorf("unexpected bind %+v", b)
+			}
+		}
+	}
+}

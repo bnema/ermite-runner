@@ -4,7 +4,9 @@ package integration
 
 import (
 	"context"
+	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
@@ -12,6 +14,7 @@ import (
 
 	"bnema.dev/ermite-runner/internal/execstream"
 	"bnema.dev/ermite-runner/internal/execstream/execpb"
+	"bnema.dev/ermite-runner/internal/externals"
 	"bnema.dev/ermite-runner/internal/sandbox"
 	"bnema.dev/ermite-runner/internal/sandbox/drivers"
 )
@@ -207,4 +210,98 @@ jobs:
 		t.Fatalf("cancel: %v\n%s", res, all)
 	}
 	t.Logf("cancelled job ended %v after the start", time.Since(start))
+}
+
+// nodeCache serves the pinned Node.js archives from a local directory
+// (ERMITE_RUNNER_IT_NODE_DIR holding node-v24.21.0-linux-x64.tar.gz, say): the
+// sandbox of the VM tests has no internet, and this way the real archive is
+// still checked against the pinned SHA-256 and unpacked by the real code.
+type nodeCache string
+
+func (d nodeCache) RoundTrip(r *http.Request) (*http.Response, error) {
+	f, err := os.Open(filepath.Join(string(d), filepath.Base(r.URL.Path)))
+	if err != nil {
+		return &http.Response{StatusCode: http.StatusNotFound, Status: "404 Not Found", Body: http.NoBody, Request: r}, nil
+	}
+	return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Body: f, Request: r}, nil
+}
+
+// TestVMNodeExternals runs the pinned Node.js 24, provided by the host outside
+// the image, inside a job's micro-VM: the externals disk is the fourth drive,
+// mounted read-only at /home/runner/externals, in GitHub's layout.
+//
+// Needs the archive of the pinned node24 for this architecture, either in
+// ERMITE_RUNNER_IT_NODE_DIR (offline) or downloadable from nodejs.org.
+func TestVMNodeExternals(t *testing.T) {
+	if os.Getenv("ERMITE_RUNNER_IT_VM") != "1" {
+		t.Skip("set ERMITE_RUNNER_IT_VM=1 (needs KVM, firecracker, a kernel and a base image; see README)")
+	}
+	need(t, "mkfs.ext4")
+	needNetAdmin(t)
+	ctx := ctxWithLog(t)
+	cfg := loadConfig(t, sandbox.VM)
+	if why := sandbox.VMUnavailable(cfg, sandbox.Prober{}); len(why) > 0 {
+		t.Fatalf("vm isolation is not available here: %s", strings.Join(why, "; "))
+	}
+
+	m := &externals.Manager{Dir: filepath.Join(cfg.StateDir, "externals"), Arch: externals.HostArch()}
+	for _, a := range externals.ForArch(externals.Pinned, m.Arch) {
+		if a.Name == "node24" {
+			m.Table = append(m.Table, a)
+		}
+	}
+	if len(m.Table) != 1 {
+		t.Skipf("no pinned node24 for %q", m.Arch)
+	}
+	if dir := os.Getenv("ERMITE_RUNNER_IT_NODE_DIR"); dir != "" {
+		m.Client = &http.Client{Transport: nodeCache(dir)}
+	}
+	if err := m.Sync(ctx); err != nil {
+		t.Skipf("cannot get the pinned Node.js (set ERMITE_RUNNER_IT_NODE_DIR to a directory with %s): %v", filepath.Base(m.Table[0].URL), err)
+	}
+	cfg.Externals = m
+
+	drv, err := sandbox.Select(ctx, cfg, drivers.Factories(), sandbox.Prober{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = drv.Close()
+		if d2, err := sandbox.Select(context.Background(), cfg, drivers.Factories(), sandbox.Prober{}); err == nil {
+			_ = d2.Reap(context.Background())
+			_ = d2.Close()
+		}
+	})
+	if err := drv.Reap(ctx); err != nil {
+		t.Fatal(err)
+	}
+	sb, err := drv.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = sb.Stop(context.Background()) }()
+	conn, err := sb.Start(ctx, sandbox.JobSpec{JobID: "node-externals"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := runJob(ctx, conn, `
+N=/home/runner/externals/node24/bin/node
+$N -e 'console.log(process.version)'
+echo "has-node24: $(test -x /home/runner/externals/node24/bin/node && echo yes)"
+touch /home/runner/externals/node24/probe 2>/dev/null && echo "WRITABLE" || echo "read-only"
+grep ' /home/runner/externals ' /proc/mounts
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Log("\n" + r.out + r.errOut)
+	want := m.Table[0].Version
+	for _, w := range []string{"v" + want + "\n", "has-node24: yes\n", "read-only\n", "/dev/vdd /home/runner/externals ext4 ro"} {
+		if !strings.Contains(r.out, w) {
+			t.Errorf("output lacks %q", w)
+		}
+	}
+	if strings.Contains(r.out, "WRITABLE") {
+		t.Error("the externals are writable from the guest")
+	}
 }
