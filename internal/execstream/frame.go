@@ -115,6 +115,10 @@ type JobHandler struct {
 	StepCompleted func(*execpb.StepCompleted)
 	Log           func(*execpb.Log)
 	JobResult     func(*execpb.JobResult)
+	// Resolve answers the executor's ResolveRequest frames. It is called in its
+	// own goroutine (the call goes to the server), the answer is sent as a
+	// ResolveResponse frame carrying the id of the request.
+	Resolve func(*execpb.ResolveRequest) *execpb.ResolveResponse
 }
 
 // DriveJob is Drive for a session that carries a job: besides Output frames it
@@ -179,6 +183,16 @@ func DriveJob(rw io.ReadWriter, run *execpb.Run, cancel <-chan *execpb.Cancel, h
 			if h.JobResult != nil {
 				h.JobResult(b.JobResult)
 			}
+		case *execpb.Frame_ResolveRequest:
+			req := b.ResolveRequest
+			go func() {
+				resp := &execpb.ResolveResponse{Id: req.Id, Error: "the host cannot resolve actions"}
+				if h.Resolve != nil {
+					resp = h.Resolve(req)
+					resp.Id = req.Id
+				}
+				_ = c.Send(&execpb.Frame{Body: &execpb.Frame_ResolveResponse{ResolveResponse: resp}})
+			}()
 		case *execpb.Frame_Exit:
 			return hello, b.Exit, nil
 		}

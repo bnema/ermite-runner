@@ -130,6 +130,8 @@ type Layout struct {
 	RunnerWorkspace string
 	// Workspace is GITHUB_WORKSPACE: <WorkRoot>/<repo>/<repo>.
 	Workspace string
+	// Actions is where the actions of the job are downloaded: <WorkRoot>/_actions.
+	Actions string
 }
 
 // DefaultToolCache is RUNNER_TOOL_CACHE on the ermite image.
@@ -145,6 +147,7 @@ func NewLayout(home, repo, toolCache string) Layout {
 	return Layout{
 		Home: home, WorkRoot: work, Temp: filepath.Join(work, "_temp"), ToolCache: toolCache,
 		RunnerWorkspace: filepath.Join(work, repo), Workspace: filepath.Join(work, repo, repo),
+		Actions: filepath.Join(work, "_actions"),
 	}
 }
 

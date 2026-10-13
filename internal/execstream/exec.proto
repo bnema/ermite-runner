@@ -25,6 +25,8 @@ message Frame {
     StepCompleted step_completed = 7; // executor -> host
     Log log = 8;                      // executor -> host
     JobResult job_result = 9;         // executor -> host, before Exit
+    ResolveRequest resolve_request = 10;   // executor -> host
+    ResolveResponse resolve_response = 11; // host -> executor, answers a ResolveRequest
   }
 }
 
@@ -144,4 +146,34 @@ message JobResult {
   map<string, string> outputs = 2;
   string error = 3;
   bool runner_shutdown = 4;
+}
+
+// ResolveRequest asks the host to resolve actions with RunnerService.
+// ResolveActions: the job token stays in the host, so the executor cannot call
+// it. The executor sends one per level of composite actions (the runner's own
+// "one more round per level") and waits for the ResolveResponse with the same id.
+message ResolveRequest {
+  int64 id = 1;
+  repeated string uses = 2; // "owner/repo[/path]@ref", at most 100
+}
+
+// ResolveResponse answers a ResolveRequest. error is set when the call itself
+// failed (the executor fails the job); actions has one entry per uses otherwise.
+message ResolveResponse {
+  int64 id = 1;
+  string error = 2;
+  repeated ResolvedAction actions = 3;
+}
+
+// ResolvedAction mirrors ermite.ResolvedAction (the token is a secret: the
+// executor masks it).
+message ResolvedAction {
+  string ref = 1;
+  string name_with_owner = 2;
+  string path = 3;
+  string resolved_sha = 4;
+  string tarball_url = 5;
+  string token = 6;
+  string source = 7;
+  string error = 8;
 }

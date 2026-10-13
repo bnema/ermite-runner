@@ -75,6 +75,9 @@ type Config struct {
 	BaseEnv []string
 	// Debug turns ##[debug] lines on (ACTIONS_STEP_DEBUG).
 	Debug bool
+	// Actions configures the actions of the job (resolution, downloads, Node.js,
+	// docker).
+	Actions ActionsConfig
 
 	Reporter Reporter
 	// Log receives the runner's own diagnostics (not the job log); the zero value

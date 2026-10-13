@@ -31,6 +31,7 @@ type jobClient interface {
 	Heartbeat(context.Context, *connect.Request[ermite.HeartbeatRequest]) (*connect.Response[ermite.HeartbeatResponse], error)
 	WatchJob(context.Context, *connect.Request[ermite.WatchJobRequest]) (*connect.ServerStreamForClient[ermite.WatchJobResponse], error)
 	CompleteJob(context.Context, *connect.Request[ermite.CompleteJobRequest]) (*connect.Response[ermite.CompleteJobResponse], error)
+	ResolveActions(context.Context, *connect.Request[ermite.ResolveActionsRequest]) (*connect.Response[ermite.ResolveActionsResponse], error)
 }
 
 var _ jobClient = ermiteconnect.RunnerServiceClient(nil)
@@ -570,6 +571,10 @@ func (j *jobRun) execute(ctx context.Context, rt *Runner, stopHard <-chan struct
 		j.failEarly(fmt.Sprintf("The job's contexts cannot be prepared: %v", err))
 		return failure()
 	}
+	if j.contexts, err = SetGitHubToken(j.contexts, j.job.GithubToken); err != nil {
+		j.failEarly(fmt.Sprintf("The job's contexts cannot be prepared: %v", err))
+		return failure()
+	}
 	sb, err := rt.Driver.New()
 	if err != nil {
 		j.failEarly(fmt.Sprintf("The runner has no free sandbox: %v", err))
@@ -648,6 +653,7 @@ func (j *jobRun) drive(conn sandbox.Conn, rt *Runner) (*execpb.Exit, error) {
 		StepStarted: j.stepStarted, StepCompleted: j.stepCompleted,
 		Log:       j.logLine,
 		JobResult: func(r *execpb.JobResult) { j.mu.Lock(); j.result = r; j.mu.Unlock() },
+		Resolve:   j.resolveActions,
 	})
 	return exit, err
 }
