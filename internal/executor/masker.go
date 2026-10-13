@@ -3,6 +3,9 @@
 package executor
 
 import (
+	"encoding/base64"
+	"encoding/json"
+	"net/url"
 	"slices"
 	"strings"
 	"time"
@@ -10,8 +13,10 @@ import (
 
 // masker replaces secret values by *** in text that leaves the executor
 // (HostContext.SecretMasker). A value is masked as is and in the forms the
-// official runner registers for it (HostContext.cs:103-113, ValueEncoders).
-// Longer forms are replaced first.
+// official runner registers for it (HostContext.cs:103-113, ValueEncoders): its
+// base64 at the three byte offsets a prefix of one or two bytes can give
+// ("user:" + secret is base64-encoded as a whole), and its JSON and URI
+// escapes. Longer forms are replaced first.
 type masker struct{ values []string }
 
 const maskedValue = "***"
@@ -36,7 +41,22 @@ func newMasker(secrets ...string) *masker {
 }
 
 // secretEncodings are the other forms of v that the runner masks.
-func secretEncodings(string) []string { return nil }
+func secretEncodings(v string) []string {
+	var out []string
+	b := []byte(v)
+	for shift := range 3 {
+		if len(b) > shift {
+			out = append(out, base64.StdEncoding.EncodeToString(b[shift:]))
+		} else if shift == 0 {
+			out = append(out, base64.StdEncoding.EncodeToString(b))
+		}
+	}
+	if j, err := json.Marshal(v); err == nil && len(j) > 2 {
+		out = append(out, string(j[1:len(j)-1]))
+	}
+	out = append(out, url.QueryEscape(v), url.PathEscape(v))
+	return out
+}
 
 // mask returns s with every secret replaced.
 func (m *masker) mask(s string) string {

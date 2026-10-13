@@ -3,6 +3,7 @@
 package executor
 
 import (
+	"encoding/base64"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +13,47 @@ const testToken = "ghs_testtoken123"
 
 func tokenContexts() string {
 	return strings.Replace(testGitHubContext("main"), `"github":{`, `"github":{"token":"`+testToken+`",`, 1)
+}
+
+func TestMaskerForms(t *testing.T) {
+	m := newMasker(testToken)
+	for _, tc := range []struct{ name, text string }{
+		{"plain", "x " + testToken + " y"},
+		{"base64", "Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte(testToken))},
+		{"base64, one byte of prefix", base64.StdEncoding.EncodeToString([]byte("u" + testToken))},
+		{"base64, two bytes of prefix", base64.StdEncoding.EncodeToString([]byte("us" + testToken))},
+		{"base64, three bytes of prefix", base64.StdEncoding.EncodeToString([]byte("usr" + testToken))},
+	} {
+		if got := m.mask(tc.text); strings.Contains(got, testToken) || got == tc.text || !strings.Contains(got, "***") {
+			t.Errorf("%s: %q -> %q", tc.name, tc.text, got)
+		}
+		if !m.has(tc.text) {
+			t.Errorf("%s: has() is false", tc.name)
+		}
+	}
+	// base64 at the three offsets: the secret's own text is found in every form
+	for shift := 0; shift < 3; shift++ {
+		prefix := strings.Repeat("p", shift)
+		enc := base64.StdEncoding.EncodeToString([]byte(prefix + testToken))
+		if got := m.mask("[" + enc + "]"); strings.Contains(got, enc[4:len(enc)-4]) {
+			t.Errorf("shift %d: %q", shift, got)
+		}
+	}
+	for _, tc := range []string{"", "nothing here", "ghs_other"} {
+		if m.has(tc) {
+			t.Errorf("%q must not be masked", tc)
+		}
+	}
+	if !newMasker().has("") == false || newMasker().mask("a") != "a" {
+		t.Error("an empty masker changes text")
+	}
+	// special characters: the JSON and URL forms
+	s := newMasker(`a"b/c d`)
+	for _, text := range []string{`a"b/c d`, `a\"b/c d`, `a%22b%2Fc+d`, `a%22b%2Fc%20d`} {
+		if got := s.mask(text); strings.Contains(got, "b") {
+			t.Errorf("%q -> %q", text, got)
+		}
+	}
 }
 
 // The name of a step that holds the token is masked before it reaches the
