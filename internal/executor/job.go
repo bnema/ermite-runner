@@ -169,6 +169,8 @@ type job struct {
 	// upgradedToNode24 are the actions that asked for node20 and got node24.
 	upgradedToNode24 []string
 	jobCtx           context.Context
+	// cs is the containers of the job (nil container and no services: none).
+	cs *containerSet
 
 	// Results of the commands (see issues.go, matchers.go, results.go).
 	matchers   *matcherRoot
@@ -435,10 +437,6 @@ func (j *job) setUp() ([]qstep, error) {
 	switch {
 	case jb.IsReusable():
 		return nil, errors.New("not supported yet: reusable workflows (jobs.<id>.uses)")
-	case jb.Container != nil:
-		return nil, errors.New("not supported yet: jobs.<id>.container")
-	case jb.Services != nil:
-		return nil, errors.New("not supported yet: jobs.<id>.services")
 	}
 
 	j.printTokenInfo()
@@ -506,6 +504,17 @@ func (j *job) setUp() ([]qstep, error) {
 			return nil, err
 		}
 		j.runDefaults.shell, j.runDefaults.workingDirectory = shell, wd
+	}
+
+	// JobExtension.cs:250-275: the job container and the services are
+	// evaluated after the job environment, before the actions are prepared.
+	j.debug(1, "Evaluating job container")
+	jc, svcs, err := j.evalContainers()
+	if err != nil {
+		return nil, err
+	}
+	if jc != nil || len(svcs) > 0 {
+		j.cs = &containerSet{job: jc, services: svcs}
 	}
 
 	j.out(1, "Prepare all required actions")

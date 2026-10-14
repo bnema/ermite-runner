@@ -125,6 +125,7 @@ const dispatchBatchDelay = 2 * time.Millisecond
 // which is visible with `bash -x` (the corpus recording of shell-custom).
 type dispatcher struct {
 	fn       func(string)
+	errFn    func(string) // when set, stderr lines go here instead of fn
 	mu       sync.Mutex
 	outQ     []string
 	errQ     []string
@@ -159,6 +160,10 @@ func (d *dispatcher) drain() {
 	d.errQ, d.outQ = nil, nil
 	d.mu.Unlock()
 	for _, l := range errs {
+		if d.errFn != nil {
+			d.errFn(l)
+			continue
+		}
 		d.fn(l)
 	}
 	for _, l := range outs {
@@ -199,6 +204,11 @@ type procSpec struct {
 	// OnLine receives the lines of stdout and stderr, one call at a time, in
 	// the order of dispatcher.
 	OnLine func(line string)
+	// OnErrLine, when set, receives the lines of stderr instead of OnLine.
+	OnErrLine func(line string)
+	// Stdin, when set, is written to the standard input of the process (the
+	// password of docker login); otherwise stdin is empty.
+	Stdin string
 	// Cancel starts the SIGINT, SIGTERM, SIGKILL escalation when closed.
 	Cancel <-chan struct{}
 
@@ -248,6 +258,10 @@ func runProcess(spec procSpec) (procResult, error) {
 	cmd.Env = spec.Env
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Credential: spec.Credential}
 	disp := newDispatcher(spec.OnLine)
+	disp.errFn = spec.OnErrLine
+	if spec.Stdin != "" {
+		cmd.Stdin = strings.NewReader(spec.Stdin)
+	}
 	cmd.Stdout, cmd.Stderr = disp.out, disp.err
 	cmd.WaitDelay = spec.WaitDelay
 	if err := cmd.Start(); err != nil {
