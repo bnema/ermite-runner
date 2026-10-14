@@ -26,6 +26,9 @@ type actionState struct {
 	// resolved caches the download info by "name@ref" (ActionManager's legacy
 	// path asks again at every level; ermite's server caches per run).
 	downloaded map[string]bool
+	// infos are the resolutions of the job by "Name@Ref": an action that a local
+	// composite action brings again is not asked for again.
+	infos map[string]ResolvedAction
 }
 
 type buildInfo struct{ repository, dockerfile, workDir string }
@@ -34,7 +37,7 @@ func newActionState() *actionState {
 	return &actionState{
 		pulled: map[string]string{}, built: map[string]string{}, buildInfo: map[string]buildInfo{},
 		pullUsers: map[string][]*node{}, buildUsers: map[string][]*node{}, pre: map[*node]bool{},
-		downloaded: map[string]bool{},
+		downloaded: map[string]bool{}, infos: map[string]ResolvedAction{},
 	}
 }
 
@@ -138,6 +141,20 @@ func (j *job) downloadInfo(ctx context.Context, num int, nodes []*node) (map[str
 	if len(uses) == 0 {
 		return out, nil
 	}
+	// What the job resolved already is not asked again: the host would not call
+	// the server for it either (host/resolve.go), but the round trip is saved.
+	var askUses, askKeys []string
+	for i, k := range keys {
+		if ra, ok := j.actions.infos[k]; ok {
+			out[k] = ra
+			continue
+		}
+		askUses, askKeys = append(askUses, uses[i]), append(askKeys, k)
+	}
+	if len(askUses) == 0 {
+		return out, nil
+	}
+	uses, keys = askUses, askKeys
 	if j.cfg.Actions.Resolver == nil {
 		return nil, ghErrorf("Failed to resolve action download info.")
 	}
@@ -158,6 +175,7 @@ func (j *job) downloadInfo(ctx context.Context, num int, nodes []*node) (map[str
 			ra.NameWithOwner = strings.SplitN(keys[i], "@", 2)[0]
 		}
 		out[keys[i]] = ra
+		j.actions.infos[keys[i]] = ra
 	}
 	return out, nil
 }

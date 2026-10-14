@@ -19,6 +19,11 @@ func compositeGitHubKeys() []string {
 	return keys
 }
 
+// maxLocalDepth is the nesting of composite actions the executor allows. It is
+// ermite's guard against a local composite action that uses itself, not a limit
+// of GitHub's, whose runner has none for local actions.
+const maxLocalDepth = 100
+
 // prepareLocalComposite is the first part of ActionRunner.RunAsync for a local
 // composite action (ActionRunner.cs:77-96): its steps are prepared when the
 // step runs, in the log of the step, and the pulls and builds they need run
@@ -28,14 +33,19 @@ func (j *job) prepareLocalComposite(s *stepRun, def *actionDef, cancel <-chan st
 	if n.children != nil {
 		return nil // pre and post stages reuse the nodes of the main stage
 	}
-	// Depth restarts at 1 for the steps of a local composite action, as in the
-	// runner (ActionRunner.cs:77-96 calls PrepareActionsAsync with depth 1), so a
-	// chain of local composites has no depth limit here
-	// (TestLocalCompositeChainHasNoDepthLimit). Whether github.com limits it is
-	// to be settled by the recording of ermite-conformance
-	// corpus/act-composite-depth. Every level that needs a resolution is counted
-	// by the host's per-job budget (host/resolve.go), so the server is safe
-	// whatever is decided.
+	// Local composite actions have no depth limit on GitHub: the recording of
+	// ermite-conformance corpus/act-composite-depth has composites of 9, 10 and 12
+	// levels, all of which succeed. The runner prepares the steps of a local
+	// composite when its step runs, with the depth restarting at 1
+	// (ActionRunner.cs:77-96), which is why. This port does the same, and the
+	// resolutions it needs are cached and budgeted by the host (host/resolve.go).
+	//
+	// The one guard that is ermite's own, not GitHub's: a local composite that
+	// uses itself (directly or in a cycle) would recurse until the executor
+	// crashes, so the nesting of composite actions is capped at maxLocalDepth.
+	if d := s.depth(); d >= maxLocalDepth {
+		return ghErrorf("Composite action depth exceeded max depth %d", maxLocalDepth)
+	}
 	kids, err := newNodes(def.act.Runs.Steps, n, n.scope)
 	if err != nil {
 		return err

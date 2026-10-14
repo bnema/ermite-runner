@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -429,18 +430,68 @@ func TestCompositeDepthLimit(t *testing.T) {
 	}
 }
 
-func TestLocalCompositeChainHasNoDepthLimit(t *testing.T) {
-	tree := files{}
-	for i := 0; i < 12; i++ {
-		next := ""
-		if i < 11 {
-			next = "    - uses: ./d" + string(rune('a'+i+1)) + "\n"
+// Local composites are not limited on GitHub (the recording act-composite-depth
+// has 9, 10 and 12 levels succeed); only ermite's guard against recursion stops
+// a composite that uses itself.
+func TestLocalCompositeDepth(t *testing.T) {
+	chain := func(n int) files {
+		tree := files{}
+		for i := 0; i < n; i++ {
+			next := ""
+			if i < n-1 {
+				next = "    - uses: ./d" + strconv.Itoa(i+1) + "\n"
+			}
+			tree["d"+strconv.Itoa(i)+"/action.yml"] = "name: d\nruns:\n  using: composite\n  steps:\n    - shell: bash\n      run: echo level\n" + next
 		}
-		tree["d"+string(rune('a'+i))+"/action.yml"] = "name: d\nruns:\n  using: composite\n  steps:\n    - shell: bash\n      run: echo level\n" + next
+		return tree
 	}
-	rec, res := actionRun(t, tree, "      - uses: ./da\n", nil)
-	if res.Conclusion != ConclusionSuccess || strings.Count(logOf(rec.step(t, "Run ./da")), "\nlevel") != 12 {
-		t.Fatalf("%+v\n%s", res, logOf(rec.step(t, "Run ./da")))
+	for _, n := range []int{9, 10, 12} {
+		rec, res := actionRun(t, chain(n), "      - uses: ./d0\n", nil)
+		if res.Conclusion != ConclusionSuccess || strings.Count(logOf(rec.step(t, "Run ./d0")), "\nlevel") != n {
+			t.Fatalf("%d levels: %+v\n%s", n, res, logOf(rec.step(t, "Run ./d0")))
+		}
+	}
+	// Up to the guard.
+	if _, res := actionRun(t, chain(maxLocalDepth), "      - uses: ./d0\n", nil); res.Conclusion != ConclusionSuccess {
+		t.Fatalf("%d levels: %+v", maxLocalDepth, res)
+	}
+	// A composite that uses itself fails cleanly, and the job goes on.
+	self := files{"s/action.yml": "name: s\nruns:\n  using: composite\n  steps:\n    - uses: ./s\n"}
+	rec, res := actionRun(t, self, "      - uses: ./s\n      - if: always()\n        run: echo after\n", nil)
+	if res.Conclusion != ConclusionFailure {
+		t.Fatalf("%+v", res)
+	}
+	if got := logOf(rec.step(t, "Run ./s")); strings.Count(got, "##[error]Composite action depth exceeded max depth 100") != 1 {
+		t.Errorf("%s", got[:min(len(got), 600)])
+	}
+	if got := rec.step(t, "Run echo after").Conclusion; got != ConclusionSuccess {
+		t.Errorf("the step after: %s", got)
+	}
+	// Two actions that use each other.
+	cyc := files{
+		"a/action.yml": "name: a\nruns:\n  using: composite\n  steps:\n    - uses: ./b\n",
+		"b/action.yml": "name: b\nruns:\n  using: composite\n  steps:\n    - uses: ./a\n",
+	}
+	if _, res := actionRun(t, cyc, "      - uses: ./a\n", nil); res.Conclusion != ConclusionFailure {
+		t.Errorf("cycle: %+v", res)
+	}
+}
+
+// A repository composite used twice, and by a local composite used many times,
+// is resolved and downloaded once.
+func TestResolutionsAreReusedAcrossLocalComposites(t *testing.T) {
+	forge := newForge(t, map[string][]byte{"/tarball/o/leaf/v1": tarOf(t, "o-leaf-x", files{"action.yml": nodeAction, "main.sh": "echo leaf\n"})})
+	tree := files{"c/action.yml": "name: c\nruns:\n  using: composite\n  steps:\n    - uses: o/leaf@v1\n"}
+	var yaml string
+	for i := 0; i < 5; i++ {
+		yaml += "      - uses: ./c\n"
+	}
+	rec, res := actionRun(t, tree, yaml, func(c *Config) { c.Actions.Resolver = forge.resolver("") })
+	if res.Conclusion != ConclusionSuccess || strings.Count(logOf(rec.steps[1])+logOf(rec.steps[2])+logOf(rec.steps[5]), "leaf") < 3 {
+		t.Fatalf("%+v %v", res, rec.names())
+	}
+	if len(forge.asked) != 1 || forge.hits.Load() != 1 {
+		t.Errorf("asked %v, downloaded %d times: once is enough", forge.asked, forge.hits.Load())
 	}
 }
 

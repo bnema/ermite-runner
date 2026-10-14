@@ -47,6 +47,15 @@ type stepRun struct {
 	nodeVersion string
 }
 
+// depth is the number of composite actions around the step.
+func (s *stepRun) depth() int {
+	d := 0
+	for p := s.parent; p != nil; p = p.parent {
+		d++
+	}
+	return d
+}
+
 // procEnv is the environment of the process the step starts.
 func (s *stepRun) procEnv() []string {
 	if s.rawEnvList != nil {
