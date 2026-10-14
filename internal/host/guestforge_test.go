@@ -112,6 +112,10 @@ func TestOriginOf(t *testing.T) {
 		"https://Ermite.example/x": "https://ermite.example", "http://a.test:80": "http://a.test",
 		"http://a.test:8088/p": "http://a.test:8088", "https://a.test:443": "https://a.test",
 		"ftp://a.test": "", "a.test": "", "https://u@a.test": "", "": "",
+		// GO-012: an IPv6 host stays in brackets, and the host "::1:8443" is not the
+		// host "::1" on port 8443.
+		"https://[::1]:8443/x": "https://[::1]:8443", "https://[::1:8443]/x": "https://[::1:8443]", "https://[::1]:443/": "https://[::1]",
+		"http://[2001:DB8::1]:80": "http://[2001:db8::1]",
 	} {
 		if got := originOf(in); got != want {
 			t.Errorf("originOf(%q) = %q, want %q", in, got, want)
@@ -144,5 +148,20 @@ func TestJobContextsAreRewrittenOnlyWithGuestForge(t *testing.T) {
 		if !on && seen != publicContexts {
 			t.Errorf("contexts changed while off: %s", seen)
 		}
+	}
+}
+
+// GO-012: guest forge access on an IPv6 address. The URLs of the contexts are
+// rewritten to the runner's origin, the brackets and the port kept, and the
+// origin of the other host with the look-alike spelling is not touched.
+func TestRewriteServerURLsIPv6(t *testing.T) {
+	in := `{"github":{"server_url":"https://[::1]:8443","api_url":"https://[::1]:8443/-/github/api","graphql_url":"https://[::1:8443]/x"}}`
+	got, err := RewriteServerURLs(in, "http://[fd00::2]:8088")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"github":{"server_url":"http://[fd00::2]:8088","api_url":"http://[fd00::2]:8088/-/github/api","graphql_url":"https://[::1:8443]/x"}}`
+	if got != want {
+		t.Errorf("got  %s\nwant %s", got, want)
 	}
 }

@@ -31,6 +31,7 @@ type jobClient interface {
 	Heartbeat(context.Context, *connect.Request[ermite.HeartbeatRequest]) (*connect.Response[ermite.HeartbeatResponse], error)
 	WatchJob(context.Context, *connect.Request[ermite.WatchJobRequest]) (*connect.ServerStreamForClient[ermite.WatchJobResponse], error)
 	CompleteJob(context.Context, *connect.Request[ermite.CompleteJobRequest]) (*connect.Response[ermite.CompleteJobResponse], error)
+	ResolveActions(context.Context, *connect.Request[ermite.ResolveActionsRequest]) (*connect.Response[ermite.ResolveActionsResponse], error)
 }
 
 var _ jobClient = ermiteconnect.RunnerServiceClient(nil)
@@ -70,6 +71,11 @@ type jobRun struct {
 	// contexts is Job.Contexts as handed to the executor: with the server URLs
 	// pointed at the runner's URL when guest forge access is on.
 	contexts string
+	// Origins that are ermite for the archive tokens (see resolveResponse), and
+	// the budget of resolution requests of the job (see resolveActions).
+	publicOrigin, serverOrigin, guestForge string
+	resolveRounds, resolveRefs             int
+	resolved                               map[string]*execpb.ResolvedAction // by "uses", for the job
 	// features is what the server accepts; annLists are the annotations the
 	// executor sent for steps that have not completed yet (see results.go).
 	features jobFeatures
@@ -600,7 +606,12 @@ func failure() outcome { return outcome{conclusion: ermite.CiConclusion_CI_CONCL
 // execute starts the sandbox, runs the job in it and returns how it ended.
 func (j *jobRun) execute(ctx context.Context, rt *Runner, stopHard <-chan struct{}) outcome {
 	var err error
+	j.setOrigins(j.job.Contexts, rt.Cfg.URL, rt.Cfg.GuestForgeOrigin)
 	if j.contexts, err = RewriteServerURLs(j.job.Contexts, rt.Cfg.GuestForgeOrigin); err != nil {
+		j.failEarly(fmt.Sprintf("The job's contexts cannot be prepared: %v", err))
+		return failure()
+	}
+	if j.contexts, err = SetGitHubToken(j.contexts, j.job.GithubToken); err != nil {
 		j.failEarly(fmt.Sprintf("The job's contexts cannot be prepared: %v", err))
 		return failure()
 	}
@@ -684,6 +695,7 @@ func (j *jobRun) drive(conn sandbox.Conn, rt *Runner) (*execpb.Exit, error) {
 		StepStarted: j.stepStarted, StepCompleted: j.stepCompleted,
 		Log:             j.logLine,
 		JobResult:       func(r *execpb.JobResult) { j.mu.Lock(); j.result = r; j.mu.Unlock() },
+		Resolve:         j.resolveActions,
 		StepAnnotations: j.stepAnnotations, StepSummary: j.stepSummary,
 	})
 	return exit, err

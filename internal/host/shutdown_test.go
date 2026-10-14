@@ -50,6 +50,10 @@ func (c *stubClient) WatchJob(context.Context, *connect.Request[ermite.WatchJobR
 	return nil, connect.NewError(connect.CodeUnimplemented, nil)
 }
 
+func (c *stubClient) ResolveActions(context.Context, *connect.Request[ermite.ResolveActionsRequest]) (*connect.Response[ermite.ResolveActionsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, nil)
+}
+
 func (c *stubClient) CompleteJob(ctx context.Context, _ *connect.Request[ermite.CompleteJobRequest]) (*connect.Response[ermite.CompleteJobResponse], error) {
 	c.mu.Lock()
 	c.deadline, _ = ctx.Deadline()

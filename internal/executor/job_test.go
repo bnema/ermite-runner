@@ -194,28 +194,23 @@ jobs:
 
 func TestNotSupportedYet(t *testing.T) {
 	needTools(t, "bash")
-	rec, res := runLocal(t, wfHead+`    steps:
-      - uses: actions/checkout@v4
-      - name: after
-        if: always()
-        run: echo still-runs
-      - run: echo skipped
-`, "j", nil)
-	if res.Conclusion != ConclusionFailure {
-		t.Fatalf("%+v", res)
-	}
-	u := rec.step(t, "Run actions/checkout@v4")
-	if u.Conclusion != ConclusionFailure || !strings.Contains(logOf(u), "##[error]not supported yet: uses (actions/checkout@v4)") {
-		t.Fatalf("%+v", u)
-	}
-	if rec.step(t, "after").Conclusion != ConclusionSuccess {
-		t.Error("always() steps still run after a failure")
-	}
 	for _, f := range []string{"container: alpine", "services:\n      s:\n        image: x"} {
 		rec2, res2 := runLocal(t, wfHead+"    "+f+"\n    steps:\n      - run: echo hi\n", "j", nil)
 		if res2.Conclusion != ConclusionFailure || res2.Error == "" || !strings.Contains(logOf(rec2.steps[0]), "not supported yet") {
 			t.Errorf("%q: %+v %v", f, res2, rec2.names())
 		}
+	}
+}
+
+// Without a resolver (a host without the feature) an action fails "Set up job"
+// before any step, with the runner's message.
+func TestActionWithoutResolverFailsSetUp(t *testing.T) {
+	rec, res := runLocal(t, wfHead+"    steps:\n      - uses: actions/checkout@v4\n      - run: echo NO\n", "j", nil)
+	if res.Conclusion != ConclusionFailure || len(rec.steps) != 1 {
+		t.Fatalf("%+v %v", res, rec.names())
+	}
+	if got := logOf(rec.steps[0]); !strings.Contains(got, "##[error]Failed to resolve action download info.") {
+		t.Fatalf("%s", got)
 	}
 }
 

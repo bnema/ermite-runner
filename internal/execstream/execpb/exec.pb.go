@@ -257,6 +257,8 @@ type Frame struct {
 	//	*Frame_JobResult
 	//	*Frame_StepAnnotations
 	//	*Frame_StepSummary
+	//	*Frame_ResolveRequest
+	//	*Frame_ResolveResponse
 	Body          isFrame_Body `protobuf_oneof:"body"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -398,6 +400,24 @@ func (x *Frame) GetStepSummary() *StepSummary {
 	return nil
 }
 
+func (x *Frame) GetResolveRequest() *ResolveRequest {
+	if x != nil {
+		if x, ok := x.Body.(*Frame_ResolveRequest); ok {
+			return x.ResolveRequest
+		}
+	}
+	return nil
+}
+
+func (x *Frame) GetResolveResponse() *ResolveResponse {
+	if x != nil {
+		if x, ok := x.Body.(*Frame_ResolveResponse); ok {
+			return x.ResolveResponse
+		}
+	}
+	return nil
+}
+
 type isFrame_Body interface {
 	isFrame_Body()
 }
@@ -446,6 +466,14 @@ type Frame_StepSummary struct {
 	StepSummary *StepSummary `protobuf:"bytes,11,opt,name=step_summary,json=stepSummary,proto3,oneof"` // executor -> host, before the StepCompleted of the step
 }
 
+type Frame_ResolveRequest struct {
+	ResolveRequest *ResolveRequest `protobuf:"bytes,12,opt,name=resolve_request,json=resolveRequest,proto3,oneof"` // executor -> host
+}
+
+type Frame_ResolveResponse struct {
+	ResolveResponse *ResolveResponse `protobuf:"bytes,13,opt,name=resolve_response,json=resolveResponse,proto3,oneof"` // host -> executor, answers a ResolveRequest
+}
+
 func (*Frame_Hello) isFrame_Body() {}
 
 func (*Frame_Run) isFrame_Body() {}
@@ -467,6 +495,10 @@ func (*Frame_JobResult) isFrame_Body() {}
 func (*Frame_StepAnnotations) isFrame_Body() {}
 
 func (*Frame_StepSummary) isFrame_Body() {}
+
+func (*Frame_ResolveRequest) isFrame_Body() {}
+
+func (*Frame_ResolveResponse) isFrame_Body() {}
 
 type Hello struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -1416,12 +1448,244 @@ func (x *JobResult) GetRunnerShutdown() bool {
 	return false
 }
 
+// ResolveRequest asks the host to resolve actions with RunnerService.
+// ResolveActions: the job token stays in the host, so the executor cannot call
+// it. The executor sends one per level of composite actions (the runner's own
+// "one more round per level") and waits for the ResolveResponse with the same id.
+type ResolveRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            int64                  `protobuf:"varint,1,opt,name=id,proto3" json:"id,omitempty"`
+	Uses          []string               `protobuf:"bytes,2,rep,name=uses,proto3" json:"uses,omitempty"` // "owner/repo[/path]@ref", at most 100
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ResolveRequest) Reset() {
+	*x = ResolveRequest{}
+	mi := &file_exec_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ResolveRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ResolveRequest) ProtoMessage() {}
+
+func (x *ResolveRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_exec_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ResolveRequest.ProtoReflect.Descriptor instead.
+func (*ResolveRequest) Descriptor() ([]byte, []int) {
+	return file_exec_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *ResolveRequest) GetId() int64 {
+	if x != nil {
+		return x.Id
+	}
+	return 0
+}
+
+func (x *ResolveRequest) GetUses() []string {
+	if x != nil {
+		return x.Uses
+	}
+	return nil
+}
+
+// ResolveResponse answers a ResolveRequest. error is set when the call itself
+// failed (the executor fails the job); actions has one entry per uses otherwise.
+type ResolveResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            int64                  `protobuf:"varint,1,opt,name=id,proto3" json:"id,omitempty"`
+	Error         string                 `protobuf:"bytes,2,opt,name=error,proto3" json:"error,omitempty"`
+	Actions       []*ResolvedAction      `protobuf:"bytes,3,rep,name=actions,proto3" json:"actions,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ResolveResponse) Reset() {
+	*x = ResolveResponse{}
+	mi := &file_exec_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ResolveResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ResolveResponse) ProtoMessage() {}
+
+func (x *ResolveResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_exec_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ResolveResponse.ProtoReflect.Descriptor instead.
+func (*ResolveResponse) Descriptor() ([]byte, []int) {
+	return file_exec_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *ResolveResponse) GetId() int64 {
+	if x != nil {
+		return x.Id
+	}
+	return 0
+}
+
+func (x *ResolveResponse) GetError() string {
+	if x != nil {
+		return x.Error
+	}
+	return ""
+}
+
+func (x *ResolveResponse) GetActions() []*ResolvedAction {
+	if x != nil {
+		return x.Actions
+	}
+	return nil
+}
+
+// ResolvedAction mirrors ermite.ResolvedAction (the token is a secret: the
+// executor masks it).
+type ResolvedAction struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Ref           string                 `protobuf:"bytes,1,opt,name=ref,proto3" json:"ref,omitempty"`
+	NameWithOwner string                 `protobuf:"bytes,2,opt,name=name_with_owner,json=nameWithOwner,proto3" json:"name_with_owner,omitempty"`
+	Path          string                 `protobuf:"bytes,3,opt,name=path,proto3" json:"path,omitempty"`
+	ResolvedSha   string                 `protobuf:"bytes,4,opt,name=resolved_sha,json=resolvedSha,proto3" json:"resolved_sha,omitempty"`
+	TarballUrl    string                 `protobuf:"bytes,5,opt,name=tarball_url,json=tarballUrl,proto3" json:"tarball_url,omitempty"`
+	Token         string                 `protobuf:"bytes,6,opt,name=token,proto3" json:"token,omitempty"`
+	Source        string                 `protobuf:"bytes,7,opt,name=source,proto3" json:"source,omitempty"`
+	Error         string                 `protobuf:"bytes,8,opt,name=error,proto3" json:"error,omitempty"`
+	// auth_origin (scheme://host[:port], as the sandbox reaches it) is the only
+	// origin the token may be sent to; empty means the token is never sent. The
+	// host sets it for archives served by the ermite server, from its own
+	// configuration, never from the URL alone.
+	AuthOrigin    string `protobuf:"bytes,9,opt,name=auth_origin,json=authOrigin,proto3" json:"auth_origin,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ResolvedAction) Reset() {
+	*x = ResolvedAction{}
+	mi := &file_exec_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ResolvedAction) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ResolvedAction) ProtoMessage() {}
+
+func (x *ResolvedAction) ProtoReflect() protoreflect.Message {
+	mi := &file_exec_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ResolvedAction.ProtoReflect.Descriptor instead.
+func (*ResolvedAction) Descriptor() ([]byte, []int) {
+	return file_exec_proto_rawDescGZIP(), []int{16}
+}
+
+func (x *ResolvedAction) GetRef() string {
+	if x != nil {
+		return x.Ref
+	}
+	return ""
+}
+
+func (x *ResolvedAction) GetNameWithOwner() string {
+	if x != nil {
+		return x.NameWithOwner
+	}
+	return ""
+}
+
+func (x *ResolvedAction) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+func (x *ResolvedAction) GetResolvedSha() string {
+	if x != nil {
+		return x.ResolvedSha
+	}
+	return ""
+}
+
+func (x *ResolvedAction) GetTarballUrl() string {
+	if x != nil {
+		return x.TarballUrl
+	}
+	return ""
+}
+
+func (x *ResolvedAction) GetToken() string {
+	if x != nil {
+		return x.Token
+	}
+	return ""
+}
+
+func (x *ResolvedAction) GetSource() string {
+	if x != nil {
+		return x.Source
+	}
+	return ""
+}
+
+func (x *ResolvedAction) GetError() string {
+	if x != nil {
+		return x.Error
+	}
+	return ""
+}
+
+func (x *ResolvedAction) GetAuthOrigin() string {
+	if x != nil {
+		return x.AuthOrigin
+	}
+	return ""
+}
+
 var File_exec_proto protoreflect.FileDescriptor
 
 const file_exec_proto_rawDesc = "" +
 	"\n" +
 	"\n" +
-	"exec.proto\x12\x15ermite.runner.exec.v1\"\xc3\x05\n" +
+	"exec.proto\x12\x15ermite.runner.exec.v1\"\xea\x06\n" +
 	"\x05Frame\x124\n" +
 	"\x05hello\x18\x01 \x01(\v2\x1c.ermite.runner.exec.v1.HelloH\x00R\x05hello\x12.\n" +
 	"\x03run\x18\x02 \x01(\v2\x1a.ermite.runner.exec.v1.RunH\x00R\x03run\x127\n" +
@@ -1435,7 +1699,9 @@ const file_exec_proto_rawDesc = "" +
 	"job_result\x18\t \x01(\v2 .ermite.runner.exec.v1.JobResultH\x00R\tjobResult\x12S\n" +
 	"\x10step_annotations\x18\n" +
 	" \x01(\v2&.ermite.runner.exec.v1.StepAnnotationsH\x00R\x0fstepAnnotations\x12G\n" +
-	"\fstep_summary\x18\v \x01(\v2\".ermite.runner.exec.v1.StepSummaryH\x00R\vstepSummaryB\x06\n" +
+	"\fstep_summary\x18\v \x01(\v2\".ermite.runner.exec.v1.StepSummaryH\x00R\vstepSummary\x12P\n" +
+	"\x0fresolve_request\x18\f \x01(\v2%.ermite.runner.exec.v1.ResolveRequestH\x00R\x0eresolveRequest\x12S\n" +
+	"\x10resolve_response\x18\r \x01(\v2&.ermite.runner.exec.v1.ResolveResponseH\x00R\x0fresolveResponseB\x06\n" +
 	"\x04body\"W\n" +
 	"\x05Hello\x12\x18\n" +
 	"\aversion\x18\x01 \x01(\tR\aversion\x12\x18\n" +
@@ -1520,7 +1786,26 @@ const file_exec_proto_rawDesc = "" +
 	"\x0frunner_shutdown\x18\x04 \x01(\bR\x0erunnerShutdown\x1a:\n" +
 	"\fOutputsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01*Y\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"4\n" +
+	"\x0eResolveRequest\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\x03R\x02id\x12\x12\n" +
+	"\x04uses\x18\x02 \x03(\tR\x04uses\"x\n" +
+	"\x0fResolveResponse\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\x03R\x02id\x12\x14\n" +
+	"\x05error\x18\x02 \x01(\tR\x05error\x12?\n" +
+	"\aactions\x18\x03 \x03(\v2%.ermite.runner.exec.v1.ResolvedActionR\aactions\"\x87\x02\n" +
+	"\x0eResolvedAction\x12\x10\n" +
+	"\x03ref\x18\x01 \x01(\tR\x03ref\x12&\n" +
+	"\x0fname_with_owner\x18\x02 \x01(\tR\rnameWithOwner\x12\x12\n" +
+	"\x04path\x18\x03 \x01(\tR\x04path\x12!\n" +
+	"\fresolved_sha\x18\x04 \x01(\tR\vresolvedSha\x12\x1f\n" +
+	"\vtarball_url\x18\x05 \x01(\tR\n" +
+	"tarballUrl\x12\x14\n" +
+	"\x05token\x18\x06 \x01(\tR\x05token\x12\x16\n" +
+	"\x06source\x18\a \x01(\tR\x06source\x12\x14\n" +
+	"\x05error\x18\b \x01(\tR\x05error\x12\x1f\n" +
+	"\vauth_origin\x18\t \x01(\tR\n" +
+	"authOrigin*Y\n" +
 	"\n" +
 	"StreamKind\x12\x1b\n" +
 	"\x17STREAM_KIND_UNSPECIFIED\x10\x00\x12\x16\n" +
@@ -1558,7 +1843,7 @@ func file_exec_proto_rawDescGZIP() []byte {
 }
 
 var file_exec_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
-var file_exec_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
+var file_exec_proto_msgTypes = make([]protoimpl.MessageInfo, 19)
 var file_exec_proto_goTypes = []any{
 	(StreamKind)(0),         // 0: ermite.runner.exec.v1.StreamKind
 	(CancelKind)(0),         // 1: ermite.runner.exec.v1.CancelKind
@@ -1578,8 +1863,11 @@ var file_exec_proto_goTypes = []any{
 	(*StepSummary)(nil),     // 15: ermite.runner.exec.v1.StepSummary
 	(*Log)(nil),             // 16: ermite.runner.exec.v1.Log
 	(*JobResult)(nil),       // 17: ermite.runner.exec.v1.JobResult
-	nil,                     // 18: ermite.runner.exec.v1.Run.EnvEntry
-	nil,                     // 19: ermite.runner.exec.v1.JobResult.OutputsEntry
+	(*ResolveRequest)(nil),  // 18: ermite.runner.exec.v1.ResolveRequest
+	(*ResolveResponse)(nil), // 19: ermite.runner.exec.v1.ResolveResponse
+	(*ResolvedAction)(nil),  // 20: ermite.runner.exec.v1.ResolvedAction
+	nil,                     // 21: ermite.runner.exec.v1.Run.EnvEntry
+	nil,                     // 22: ermite.runner.exec.v1.JobResult.OutputsEntry
 }
 var file_exec_proto_depIdxs = []int32{
 	5,  // 0: ermite.runner.exec.v1.Frame.hello:type_name -> ermite.runner.exec.v1.Hello
@@ -1593,21 +1881,24 @@ var file_exec_proto_depIdxs = []int32{
 	17, // 8: ermite.runner.exec.v1.Frame.job_result:type_name -> ermite.runner.exec.v1.JobResult
 	14, // 9: ermite.runner.exec.v1.Frame.step_annotations:type_name -> ermite.runner.exec.v1.StepAnnotations
 	15, // 10: ermite.runner.exec.v1.Frame.step_summary:type_name -> ermite.runner.exec.v1.StepSummary
-	18, // 11: ermite.runner.exec.v1.Run.env:type_name -> ermite.runner.exec.v1.Run.EnvEntry
-	7,  // 12: ermite.runner.exec.v1.Run.job:type_name -> ermite.runner.exec.v1.JobSpec
-	0,  // 13: ermite.runner.exec.v1.Output.stream:type_name -> ermite.runner.exec.v1.StreamKind
-	1,  // 14: ermite.runner.exec.v1.Cancel.kind:type_name -> ermite.runner.exec.v1.CancelKind
-	3,  // 15: ermite.runner.exec.v1.StepCompleted.conclusion:type_name -> ermite.runner.exec.v1.StepConclusion
-	3,  // 16: ermite.runner.exec.v1.StepCompleted.outcome:type_name -> ermite.runner.exec.v1.StepConclusion
-	2,  // 17: ermite.runner.exec.v1.Annotation.level:type_name -> ermite.runner.exec.v1.AnnotationLevel
-	13, // 18: ermite.runner.exec.v1.StepAnnotations.annotations:type_name -> ermite.runner.exec.v1.Annotation
-	3,  // 19: ermite.runner.exec.v1.JobResult.conclusion:type_name -> ermite.runner.exec.v1.StepConclusion
-	19, // 20: ermite.runner.exec.v1.JobResult.outputs:type_name -> ermite.runner.exec.v1.JobResult.OutputsEntry
-	21, // [21:21] is the sub-list for method output_type
-	21, // [21:21] is the sub-list for method input_type
-	21, // [21:21] is the sub-list for extension type_name
-	21, // [21:21] is the sub-list for extension extendee
-	0,  // [0:21] is the sub-list for field type_name
+	18, // 11: ermite.runner.exec.v1.Frame.resolve_request:type_name -> ermite.runner.exec.v1.ResolveRequest
+	19, // 12: ermite.runner.exec.v1.Frame.resolve_response:type_name -> ermite.runner.exec.v1.ResolveResponse
+	21, // 13: ermite.runner.exec.v1.Run.env:type_name -> ermite.runner.exec.v1.Run.EnvEntry
+	7,  // 14: ermite.runner.exec.v1.Run.job:type_name -> ermite.runner.exec.v1.JobSpec
+	0,  // 15: ermite.runner.exec.v1.Output.stream:type_name -> ermite.runner.exec.v1.StreamKind
+	1,  // 16: ermite.runner.exec.v1.Cancel.kind:type_name -> ermite.runner.exec.v1.CancelKind
+	3,  // 17: ermite.runner.exec.v1.StepCompleted.conclusion:type_name -> ermite.runner.exec.v1.StepConclusion
+	3,  // 18: ermite.runner.exec.v1.StepCompleted.outcome:type_name -> ermite.runner.exec.v1.StepConclusion
+	2,  // 19: ermite.runner.exec.v1.Annotation.level:type_name -> ermite.runner.exec.v1.AnnotationLevel
+	13, // 20: ermite.runner.exec.v1.StepAnnotations.annotations:type_name -> ermite.runner.exec.v1.Annotation
+	3,  // 21: ermite.runner.exec.v1.JobResult.conclusion:type_name -> ermite.runner.exec.v1.StepConclusion
+	22, // 22: ermite.runner.exec.v1.JobResult.outputs:type_name -> ermite.runner.exec.v1.JobResult.OutputsEntry
+	20, // 23: ermite.runner.exec.v1.ResolveResponse.actions:type_name -> ermite.runner.exec.v1.ResolvedAction
+	24, // [24:24] is the sub-list for method output_type
+	24, // [24:24] is the sub-list for method input_type
+	24, // [24:24] is the sub-list for extension type_name
+	24, // [24:24] is the sub-list for extension extendee
+	0,  // [0:24] is the sub-list for field type_name
 }
 
 func init() { file_exec_proto_init() }
@@ -1627,6 +1918,8 @@ func file_exec_proto_init() {
 		(*Frame_JobResult)(nil),
 		(*Frame_StepAnnotations)(nil),
 		(*Frame_StepSummary)(nil),
+		(*Frame_ResolveRequest)(nil),
+		(*Frame_ResolveResponse)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -1634,7 +1927,7 @@ func file_exec_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_exec_proto_rawDesc), len(file_exec_proto_rawDesc)),
 			NumEnums:      4,
-			NumMessages:   16,
+			NumMessages:   19,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

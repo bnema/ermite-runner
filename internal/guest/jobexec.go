@@ -212,6 +212,7 @@ func runJob(ctx context.Context, conn *execstream.Conn, cfg ExecConfig, spec *ex
 	}
 	canceller := executor.NewCanceller()
 	rep := &frameReporter{conn: conn, failed: make(chan struct{})}
+	res := newResolver(conn)
 
 	// Frames from the host while the job runs: a Cancel stops the job; a lost
 	// host does too, like a runner shutdown. The reader ends with the stream: the
@@ -229,6 +230,9 @@ func runJob(ctx context.Context, conn *execstream.Conn, cfg ExecConfig, spec *ex
 			if c := f.GetCancel(); c != nil {
 				canceller.Cancel(cancelKind(c.GetKind()))
 			}
+			if r := f.GetResolveResponse(); r != nil {
+				res.deliver(r)
+			}
 		}
 	}()
 	// The executor's own context (SIGTERM forwarded by init: the sandbox is
@@ -245,18 +249,18 @@ func runJob(ctx context.Context, conn *execstream.Conn, cfg ExecConfig, spec *ex
 	}()
 
 	env := spec.GetRunnerEnvironment()
-	res := executor.Run(canceller, executor.Config{
+	result := executor.Run(canceller, executor.Config{
 		WorkflowPath: spec.GetWorkflowPath(), WorkflowYAML: []byte(spec.GetWorkflowYaml()), JobKey: spec.GetJobKey(),
 		ContextsJSON: spec.GetContexts(), MatrixJSON: spec.GetMatrix(), Repo: spec.GetRepo(),
 		TimeoutMinutes: int(spec.GetTimeoutMinutes()), Deadline: time.Duration(spec.GetDeadlineMs()) * time.Millisecond,
 		Runner:        executor.RunnerInfo{Name: spec.GetRunnerName(), Environment: env},
 		RunnerVersion: spec.GetRunnerVersion(),
 		Home:          su.Home, ToolCache: os.Getenv("RUNNER_TOOL_CACHE"), BaseEnv: stepEnv(os.Environ(), su), Credential: su.Credential,
-		Debug: spec.GetDebug(), Reporter: rep, Log: zerowrap.FromCtx(ctx),
+		Debug: spec.GetDebug(), Reporter: rep, Actions: executor.ActionsConfig{Resolver: res.resolve}, Log: zerowrap.FromCtx(ctx),
 		SendAnnotations: spec.GetSendAnnotations(), SendSummaries: spec.GetSendSummaries(),
 		TermAfter: cfg.TermAfter, KillAfter: cfg.KillAfter, WaitDelay: cfg.WaitDelay,
 	})
-	if res.Conclusion == executor.ConclusionSuccess {
+	if result.Conclusion == executor.ConclusionSuccess {
 		return 0
 	}
 	return 1

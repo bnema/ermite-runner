@@ -27,6 +27,8 @@ message Frame {
     JobResult job_result = 9;         // executor -> host, before Exit
     StepAnnotations step_annotations = 10; // executor -> host, before the StepCompleted of the step
     StepSummary step_summary = 11;         // executor -> host, before the StepCompleted of the step
+    ResolveRequest resolve_request = 12;   // executor -> host
+    ResolveResponse resolve_response = 13; // host -> executor, answers a ResolveRequest
   }
 }
 
@@ -191,4 +193,39 @@ message JobResult {
   map<string, string> outputs = 2;
   string error = 3;
   bool runner_shutdown = 4;
+}
+
+// ResolveRequest asks the host to resolve actions with RunnerService.
+// ResolveActions: the job token stays in the host, so the executor cannot call
+// it. The executor sends one per level of composite actions (the runner's own
+// "one more round per level") and waits for the ResolveResponse with the same id.
+message ResolveRequest {
+  int64 id = 1;
+  repeated string uses = 2; // "owner/repo[/path]@ref", at most 100
+}
+
+// ResolveResponse answers a ResolveRequest. error is set when the call itself
+// failed (the executor fails the job); actions has one entry per uses otherwise.
+message ResolveResponse {
+  int64 id = 1;
+  string error = 2;
+  repeated ResolvedAction actions = 3;
+}
+
+// ResolvedAction mirrors ermite.ResolvedAction (the token is a secret: the
+// executor masks it).
+message ResolvedAction {
+  string ref = 1;
+  string name_with_owner = 2;
+  string path = 3;
+  string resolved_sha = 4;
+  string tarball_url = 5;
+  string token = 6;
+  string source = 7;
+  string error = 8;
+  // auth_origin (scheme://host[:port], as the sandbox reaches it) is the only
+  // origin the token may be sent to; empty means the token is never sent. The
+  // host sets it for archives served by the ermite server, from its own
+  // configuration, never from the URL alone.
+  string auth_origin = 9;
 }

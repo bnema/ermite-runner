@@ -6,20 +6,13 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
-
-	"bnema.dev/ermite-actions/workflow"
 )
 
 // execute is ActionRunner.RunAsync plus ScriptHandler for one run step.
 func (j *job) execute(s *stepRun, stepCancel <-chan struct{}) stepResult {
 	num, st := s.num, s.st
-	if msg := notSupported(st); msg != "" {
-		if st.Uses != nil {
-			j.out(num, "##[group]Run "+st.Uses.Value)
-			j.out(num, "##[endgroup]")
-		}
-		j.errorf(num, "%s", msg)
-		return resFailed
+	if st.Uses != nil {
+		return j.runAction(s, stepCancel)
 	}
 	fail := func(err error) stepResult { j.errorf(num, "%s", err.Error()); return resFailed }
 	failTemplate := func(err error) stepResult {
@@ -27,11 +20,11 @@ func (j *job) execute(s *stepRun, stepCancel <-chan struct{}) stepResult {
 		return resFailed
 	}
 
-	if err := j.prepareFileCommands(st); err != nil {
+	if err := j.prepareFileCommands(s); err != nil {
 		return fail(err)
 	}
 	// ProcessFiles runs after the handler, even when it failed (a finally block).
-	defer j.fc.Process(s)
+	defer s.fc.Process(s)
 
 	in, err := j.scriptInputs(s)
 	if err != nil {
@@ -67,7 +60,10 @@ func (j *job) scriptInputs(s *stepRun) (scriptIn, error) {
 	if in.shell, err = j.evalString(st.Shell, s.env); err != nil {
 		return in, err
 	}
-	if in.shell == "" {
+	// defaults.run applies to the steps of the job only, not to the ones of a
+	// composite action (ScriptHandler.cs:158-181: ScopeName is empty).
+	top := s.parent == nil
+	if in.shell == "" && top {
 		in.shell = j.runDefaults.shell
 	}
 	if st.WorkingDirectory != nil {
@@ -76,7 +72,7 @@ func (j *job) scriptInputs(s *stepRun) (scriptIn, error) {
 			return in, err
 		}
 	}
-	if !in.hasWorkingDirectory {
+	if !in.hasWorkingDirectory && top {
 		in.workingDirectory = j.runDefaults.workingDirectory
 	}
 	return in, nil
@@ -85,18 +81,25 @@ func (j *job) scriptInputs(s *stepRun) (scriptIn, error) {
 // prepareFileCommands creates the files of the step, puts their paths in the
 // github context (FileCommandManager.InitializeFiles) and writes event.json
 // (ExecutionContext.WriteWebhookPayload).
-func (j *job) prepareFileCommands(st *workflow.Step) error {
+func (j *job) prepareFileCommands(s *stepRun) error {
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	files, err := j.fc.Init()
+	if s.fc == nil {
+		s.fc = j.fc
+	}
+	files, err := s.fc.Init()
 	if err != nil {
 		return err
 	}
 	for _, c := range fileCommands {
 		j.state.SetGitHub(c.ContextName, files[envVarName(c.ContextName)])
 	}
-	j.state.SetGitHub("action_repository", "")
-	j.state.SetGitHub("action_ref", "")
+	if s.n == nil || s.n.st.Uses == nil {
+		// ActionRunner.cs:149-165 sets them for every action step, a run step
+		// included (its reference is a script, so they are empty).
+		j.state.SetGitHub("action_repository", "")
+		j.state.SetGitHub("action_ref", "")
+	}
 	if ev := j.state.EventJSON(); ev != "" {
 		if p, err := j.writeEvent(ev); err == nil {
 			j.state.SetGitHub("event_path", p)
@@ -191,17 +194,26 @@ func (j *job) processEnv(stepEnv *ordered) []string {
 // startProcess runs the script and turns how it ended into the result of the
 // step.
 func (j *job) startProcess(s *stepRun, plan ShellPlan, dir string, argv []string, stepCancel <-chan struct{}) stepResult {
+	return j.runProc(s, plan.CommandPath, dir, argv, "", stepCancel)
+}
+
+// runProc starts a process (exitDebug, when set, is the format of the debug line that
+// replaces the error about the exit code) for the step and streams its output through the
+// commands of the step. A script reports its exit code (ScriptHandler.cs:
+// 267-275); the handlers of actions only mark the step failed (NodeScriptAction
+// Handler.cs:178-184), a failing action says why itself.
+func (j *job) runProc(s *stepRun, shown, dir string, argv []string, exitDebug string, stepCancel <-chan struct{}) stepResult {
 	num := s.num
 	om := newOutputManager(s, stepCancel)
 	defer om.dispose()
 	res, err := runProcess(procSpec{
-		Argv: argv, Dir: dir, Env: j.processEnv(s.env), Credential: j.cfg.Credential,
+		Argv: argv, Dir: dir, Env: s.procEnv(), Credential: j.cfg.Credential,
 		OnLine: om.onData,
 		Cancel: stepCancel, TermAfter: j.cfg.TermAfter, KillAfter: j.cfg.KillAfter,
 		WaitDelay: j.cfg.WaitDelay, Signal: j.cfg.Signal,
 	})
 	if err != nil {
-		j.errorf(num, "%s", startError(plan.CommandPath, dir, err))
+		j.errorf(num, "%s", startError(shown, dir, err))
 		return resFailed
 	}
 	if res.Cancelled {
@@ -211,8 +223,13 @@ func (j *job) startProcess(s *stepRun, plan ShellPlan, dir string, argv []string
 		s.logCanceled()
 		return resCanceled
 	}
+	if exitDebug != "" {
+		j.debug(num, fmt.Sprintf(exitDebug, res.ExitCode))
+	}
 	if res.ExitCode != 0 {
-		j.errorf(num, "Process completed with exit code %d.", res.ExitCode)
+		if exitDebug == "" {
+			j.errorf(num, "Process completed with exit code %d.", res.ExitCode)
+		}
 		return resFailed
 	}
 	return resSucceeded
