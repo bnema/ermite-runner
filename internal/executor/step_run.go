@@ -5,6 +5,7 @@ package executor
 import (
 	"context"
 	"sync"
+	"time"
 
 	"bnema.dev/ermite-actions/action"
 	"bnema.dev/ermite-actions/expr"
@@ -303,6 +304,16 @@ func (j *job) runGuarded(s *stepRun, q qstep, ok bool) stepResult {
 	stopTimeout, minutes := func() (func(), int) { return func() {}, 0 }()
 	if q.setup == nil {
 		stopTimeout, minutes = j.armStepTimeout(s, closeCancel)
+		if minutes > 0 {
+			s.deadline = j.now().Add(time.Duration(minutes)*time.Minute + j.cfg.StepTimeoutSkew)
+		}
+		if p := s.parent; p != nil && !p.deadline.IsZero() {
+			// The inner step has the time that is left to the step around it, and
+			// no timeout of its own (the schema refuses one).
+			s.deadline = p.deadline
+			t := time.AfterFunc(time.Until(p.deadline), func() { s.timedOut.Store(true); closeCancel() })
+			stopTimeout = func() { t.Stop() }
+		}
 	}
 	if q.setup != nil {
 		r = q.setup(s, stepCancel)
@@ -312,7 +323,15 @@ func (j *job) runGuarded(s *stepRun, q qstep, ok bool) stepResult {
 	stopTimeout()
 	close(stopWatch)
 	watch.Wait()
-	r = j.stepTimedOut(s, r, minutes)
+	if minutes > 0 {
+		r = j.stepTimedOut(s, r, minutes)
+	}
+	if s.parent != nil && r == resCanceled && s.timedOut.Load() && !j.cancelRequested() {
+		// CompositeActionHandler.RunStepAsync (:497-506): an inner step stopped by
+		// the timeout it inherited fails with a message that names no step.
+		j.errorf(num, "The action has timed out.")
+		r = resFailed
+	}
 
 	// Merge the result of the commands (StepsRunner.cs:347-351).
 	if s.cmdResult != nil {

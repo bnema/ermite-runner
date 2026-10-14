@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"time"
 
 	"bnema.dev/ermite-actions/action"
 	"bnema.dev/ermite-actions/expr"
@@ -50,6 +51,10 @@ type stepRun struct {
 	scope    stepScope
 	name     string
 	timedOut timedOutFlag
+	// deadline is when the timeout-minutes of the step, or of the step around it,
+	// ends: zero for none. An inner step of a composite action inherits what is
+	// left of it (ExecutionContext.CreateEmbeddedChild, :498).
+	deadline time.Time
 }
 
 // depth is the number of composite actions around the step.
