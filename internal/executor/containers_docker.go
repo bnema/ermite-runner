@@ -23,14 +23,57 @@ func eqOpt(flag, value string) dockerPart {
 	return dockerPart{line: flag + `="` + value + `"`, args: []string{flag + "=" + value}}
 }
 
-// envKV is DockerUtil.CreateEscapedOption("-e", key, value), or ("-e", key)
-// for an empty value (docker then reads it from its own environment).
-func envKV(key, value string) dockerPart {
-	if value == "" {
-		return envOpt(key)
+// cliSensitive are the variables the docker CLI itself reads (its daemon, its
+// configuration, its proxy and TLS settings, the loader): handing one of them
+// to the process of docker as the value of a container variable would change
+// what the CLI does, so these are the only values that stay in the arguments.
+func cliSensitive(name string) bool {
+	u := strings.ToUpper(name)
+	switch u {
+	case "HOME", "TMPDIR", "USER", "LOGNAME", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY",
+		"GODEBUG", "GOMAXPROCS", "GOGC", "GOMEMLIMIT", "GOTRACEBACK", "KUBECONFIG", ProcessTrackingID:
+		return true
 	}
-	kv := key + "=" + value
-	return dockerPart{line: "-e " + escapeDockerArg(kv), args: []string{"-e", kv}}
+	for _, pre := range []string{"DOCKER_", "XDG_", "LD_", "SSL_CERT", "BUILDKIT_", "COMPOSE_", "CONTAINERD_", "REGISTRY_"} {
+		if strings.HasPrefix(u, pre) {
+			return true
+		}
+	}
+	return false
+}
+
+// envForCLI is how one container variable reaches `docker create`/`exec`:
+// "-e NAME" with the value in the environment of the docker process, so that
+// it is on no command line (visible to every user of the sandbox in /proc) —
+// except for the variables the CLI reads itself, unless their value is the one
+// the process has anyway. An empty value is set explicitly, so that the CLI
+// cannot inherit one from the executor. echo is the text the runner logs.
+func (j *job) envForCLI(key, value, echo string) dockerPart {
+	if cliSensitive(key) {
+		if v, ok := envLookup(j.baseEnv, key); ok && v == value {
+			return dockerPart{line: echo, args: []string{"-e", key}}
+		}
+		return dockerPart{line: echo, args: []string{"-e", key + "=" + value}}
+	}
+	return dockerPart{line: echo, args: []string{"-e", key}, env: []string{key + "=" + value}}
+}
+
+func envLookup(env []string, key string) (string, bool) {
+	for i := len(env) - 1; i >= 0; i-- {
+		if k, v, ok := strings.Cut(env[i], "="); ok && k == key {
+			return v, true
+		}
+	}
+	return "", false
+}
+
+// envKV is DockerUtil.CreateEscapedOption("-e", key, value), or ("-e", key)
+// for an empty value, as the runner echoes it.
+func (j *job) envKV(key, value string) dockerPart {
+	if value == "" {
+		return j.envForCLI(key, "", "-e "+escapeDockerArg(key))
+	}
+	return j.envForCLI(key, value, "-e "+escapeDockerArg(key+"="+value))
 }
 
 // mountOpt is the -v option of DockerCommandManager.DockerCreate (:164-185).
@@ -70,7 +113,7 @@ func (j *job) dockerList(s *stepRun, c dockerCmd, cancel <-chan struct{}) ([]str
 	j.out(s.num, "##[command]"+c.line)
 	var lines []string
 	res, err := runProcess(procSpec{
-		Argv: c.argv, Dir: dirOrCwd(j.githubValue("workspace")), Env: j.processEnv(newOrdered()), Credential: j.cfg.Credential,
+		Argv: c.argv, Dir: dirOrCwd(j.githubValue("workspace")), Env: append(j.processEnv(newOrdered()), c.env...), Credential: j.cfg.Credential,
 		OnLine: func(l string) {
 			if l != "" {
 				lines = append(lines, l)

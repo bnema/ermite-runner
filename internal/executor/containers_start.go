@@ -28,7 +28,7 @@ func (j *job) createCmd(c *container) dockerCmd {
 	parts = append(parts, optionsParts(c.options))
 	for _, k := range c.env.Keys() {
 		v, _ := c.env.Get(k)
-		parts = append(parts, envKV(k, v))
+		parts = append(parts, j.envKV(k, v))
 	}
 	parts = append(parts, raw("-e", "GITHUB_ACTIONS=true"))
 	if _, ok := c.env.Get("CI"); !ok {

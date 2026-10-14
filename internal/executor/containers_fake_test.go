@@ -28,7 +28,7 @@ func newFakeCtr(t *testing.T) *fakeCtr {
 	f := &fakeCtr{dir: d, bin: filepath.Join(d, "docker"), log: filepath.Join(d, "calls")}
 	script := `#!/bin/sh
 D=` + d + `
-{ echo "--"; for a in "$@"; do printf "%s\n" "$a"; done; } >> $D/calls
+{ echo "--"; for a in "$@"; do printf "%s\n" "$a"; done; echo "ENV:CVAR=$CVAR:EMPTYV=${EMPTYV-unset}:PATH=$PATH"; } >> $D/calls
 [ "$1" = "--config" ] && { cat > $D/login_stdin_$$ 2>/dev/null </dev/null; shift 2; }
 case "$1" in
 version) echo "'1.48'" ;;
@@ -47,7 +47,8 @@ inspect) case "$*" in
 port) [ -f $D/ports ] && cat $D/ports ;;
 logs) echo "service log of $3" ;;
 rm) echo "$3" ;;
-exec) [ -f $D/exec_env ] && echo "ENV GITHUB_WORKSPACE=$GITHUB_WORKSPACE RUNNER_TEMP=$RUNNER_TEMP HOME=${HOME:-<unset>} GITHUB_OUTPUT=$GITHUB_OUTPUT GITHUB_EVENT_PATH=$GITHUB_EVENT_PATH"
+exec) if [ -f $D/add_path ]; then f=$(echo "$GITHUB_PATH" | sed "s#^/__w#$(cat $D/add_path)#"); echo /added >> "$f"; fi
+  [ -f $D/exec_env ] && echo "ENV GITHUB_WORKSPACE=$GITHUB_WORKSPACE RUNNER_TEMP=$RUNNER_TEMP HOME=${HOME:-<unset>} GITHUB_OUTPUT=$GITHUB_OUTPUT GITHUB_EVENT_PATH=$GITHUB_EVENT_PATH"
   [ -f $D/hang_exec ] && { trap 'exit 130' INT TERM; while :; do sleep 0.05; done; }
   [ -f $D/exec_out ] && cat $D/exec_out
   if [ -f $D/exec_exit ]; then n=$(cat $D/exec_exit); [ "$n" != 0 ] && echo 0 > $D/exec_exit && exit $n; fi ;;

@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/google/uuid"
@@ -54,6 +55,10 @@ func escapeDockerArg(v string) string {
 type dockerCmd struct {
 	line string
 	argv []string
+	// env is added to the environment of the docker process, after its own:
+	// "-e NAME" options read their values there, so that they are neither on
+	// the command line nor in the echoed text.
+	env []string
 }
 
 // newDockerCmd builds "docker <command> <options>" the way the runner does
@@ -62,12 +67,14 @@ type dockerCmd struct {
 func (j *job) newDockerCmd(command string, parts ...dockerPart) dockerCmd {
 	lines := []string{}
 	argv := []string{j.dockerPath(), command}
+	var env []string
 	for _, p := range parts {
 		lines = append(lines, p.line)
 		argv = append(argv, p.args...)
+		env = append(env, p.env...)
 	}
 	line := strings.TrimSpace(command + " " + strings.Join(lines, " "))
-	return dockerCmd{line: j.dockerPath() + " " + line, argv: argv}
+	return dockerCmd{line: j.dockerPath() + " " + line, argv: argv, env: env}
 }
 
 // dockerPart is one piece of a docker command: its text in the echoed line and
@@ -75,6 +82,7 @@ func (j *job) newDockerCmd(command string, parts ...dockerPart) dockerCmd {
 type dockerPart struct {
 	line string
 	args []string
+	env  []string // NAME=value for the process of docker, see dockerCmd.env
 }
 
 func raw(args ...string) dockerPart { return dockerPart{line: strings.Join(args, " "), args: args} }
@@ -172,6 +180,7 @@ func (j *job) runDockerCmd(s *stepRun, c dockerCmd, dir string, env []string, ca
 	if env == nil {
 		env = j.processEnv(newOrdered())
 	}
+	env = append(slices.Clone(env), c.env...)
 	res, err := runProcess(procSpec{
 		Argv: c.argv, Dir: dir, Env: env, Credential: j.cfg.Credential,
 		OnLine: func(line string) { j.write(s.num, line) },

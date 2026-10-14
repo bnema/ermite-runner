@@ -104,7 +104,7 @@ func TestNodeActionInContainerUsesExternalsAndAlpine(t *testing.T) {
 		if len(ex) != 2 {
 			t.Fatalf("%s: exec calls %v", tc.node, ex)
 		}
-		if got := strings.Join(ex[0][len(ex[0])-3:], " "); got != "sh -c "+alpineCheck {
+		if got := strings.Join(ex[0][len(ex[0])-4:len(ex[0])-1], " "); got != "sh -c "+alpineCheck {
 			t.Errorf("probe: %v", ex[0])
 		}
 		run := strings.Join(ex[1], "\n")

@@ -53,8 +53,15 @@ func (j *job) execArgv(c *container, workDir string, env *ordered, command strin
 	cenv := newOrdered()
 	for _, k := range env.Keys() {
 		v, _ := env.Get(k)
-		argv = append(argv, "-e", k)
-		cenv.Set(k, c.translateToContainer(v))
+		v = c.translateToContainer(v)
+		// PATH is set below. The docker process is started by its absolute
+		// path, so the variables of the container are not read by it, except
+		// those the CLI itself reads.
+		p := j.envForCLI(k, v, "")
+		argv = append(argv, p.args...)
+		for _, kv := range p.env {
+			cenv.Set(k, strings.TrimPrefix(kv, k+"="))
+		}
 	}
 	j.mu.Lock()
 	prepend := j.state.Prepend()
@@ -68,7 +75,10 @@ func (j *job) execArgv(c *container, workDir string, env *ordered, command strin
 		if c.runtimePath != "" {
 			full += ":" + c.runtimePath
 		}
-		argv = append(argv, "-e", "PATH="+full)
+		// The value is in the environment of docker.exec only: the process is
+		// started by absolute path and `docker exec` runs nothing of its own.
+		argv = append(argv, "-e", "PATH")
+		cenv.Set("PATH", full)
 	}
 	argv = append(argv, c.id, command)
 	argv = append(argv, args...)
