@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"time"
 
 	"google.golang.org/protobuf/proto"
 
@@ -106,6 +107,38 @@ func Drive(rw io.ReadWriter, run *execpb.Run, cancel <-chan *execpb.Cancel, onOu
 	return DriveJob(rw, run, cancel, JobHandler{Output: onOutput})
 }
 
+// resolveJoinGrace is how long DriveJob waits for the resolution worker to
+// finish once the session is over before it interrupts a write that is stuck
+// (a guest that stopped reading): the write deadline is set to now, and the
+// stream is closed if it cannot be interrupted otherwise. The session is over at
+// that point, the caller closes the stream anyway.
+var resolveJoinGrace = 2 * time.Second
+
+// joinResolver waits for the worker. A worker in a Send that cannot finish
+// because the peer does not read would block DriveJob for ever, so the write is
+// interrupted after the grace period.
+func joinResolver(rw io.ReadWriter, workers *sync.WaitGroup) {
+	finished := make(chan struct{})
+	go func() { workers.Wait(); close(finished) }()
+	select {
+	case <-finished:
+		return
+	case <-time.After(resolveJoinGrace):
+	}
+	if d, ok := rw.(interface{ SetWriteDeadline(time.Time) error }); ok {
+		_ = d.SetWriteDeadline(time.Now())
+	}
+	select {
+	case <-finished:
+		return
+	case <-time.After(resolveJoinGrace):
+	}
+	if cl, ok := rw.(io.Closer); ok {
+		_ = cl.Close()
+		<-finished
+	}
+}
+
 // resolveQueue is how many ResolveRequest frames may wait for the worker.
 const resolveQueue = 2
 
@@ -167,13 +200,16 @@ func DriveJob(rw io.ReadWriter, run *execpb.Run, cancel <-chan *execpb.Cancel, h
 			case req := <-resolveCh:
 				resp := h.Resolve(rctx, req)
 				resp.Id = req.Id
+				if rctx.Err() != nil {
+					return // the session is over: nobody reads the answer
+				}
 				_ = c.Send(resolveFrame(resp))
 			case <-rctx.Done():
 				return
 			}
 		}
 	}()
-	defer func() { rcancel(); workers.Wait() }()
+	defer func() { rcancel(); joinResolver(rw, &workers) }()
 	if cancel != nil {
 		go func() {
 			select {

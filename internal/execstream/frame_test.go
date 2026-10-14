@@ -260,3 +260,71 @@ func TestDriveJobResolveBurst(t *testing.T) {
 	}
 	close(release)
 }
+
+// GO-009: the resolution worker is in a Send that cannot finish because the
+// guest stopped reading, and the guest ends the session with Exit. DriveJob
+// must return, not wait for the write for ever.
+func TestDriveJobReturnsWhenTheResolverWriteIsStuck(t *testing.T) {
+	old := resolveJoinGrace
+	resolveJoinGrace = 50 * time.Millisecond
+	defer func() { resolveJoinGrace = old }()
+	hostSide, guestSide := net.Pipe() // synchronous: a write needs a reader
+	defer func() { _ = guestSide.Close() }()
+	gc := NewConn(guestSide)
+	go func() {
+		_ = gc.Send(&execpb.Frame{Body: &execpb.Frame_Hello{Hello: &execpb.Hello{}}})
+		if _, err := gc.Recv(); err != nil { // the Run frame
+			return
+		}
+		_ = gc.Send(&execpb.Frame{Body: &execpb.Frame_ResolveRequest{ResolveRequest: &execpb.ResolveRequest{Id: 1, Uses: []string{"a/b@v1"}}}})
+		time.Sleep(100 * time.Millisecond) // the answer is being written: nobody reads it
+		_ = gc.Send(&execpb.Frame{Body: &execpb.Frame_Exit{Exit: &execpb.Exit{}}})
+	}()
+	done := make(chan error, 1)
+	go func() {
+		_, exit, err := DriveJob(hostSide, &execpb.Run{}, nil, JobHandler{Resolve: func(context.Context, *execpb.ResolveRequest) *execpb.ResolveResponse {
+			return &execpb.ResolveResponse{}
+		}})
+		if err == nil && exit == nil {
+			err = errors.New("no exit")
+		}
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("DriveJob is blocked by a write nobody reads")
+	}
+}
+
+// And a worker that has an answer when the session ends does not write it.
+func TestDriveJobDoesNotSendAfterTheSession(t *testing.T) {
+	hostSide, guestSide := net.Pipe()
+	defer func() { _ = guestSide.Close() }()
+	gc := NewConn(guestSide)
+	release := make(chan struct{})
+	go func() {
+		_ = gc.Send(&execpb.Frame{Body: &execpb.Frame_Hello{Hello: &execpb.Hello{}}})
+		_, _ = gc.Recv()
+		_ = gc.Send(&execpb.Frame{Body: &execpb.Frame_ResolveRequest{ResolveRequest: &execpb.ResolveRequest{Id: 1, Uses: []string{"a/b@v1"}}}})
+		_ = gc.Send(&execpb.Frame{Body: &execpb.Frame_Exit{Exit: &execpb.Exit{}}})
+		close(release)
+	}()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _, _ = DriveJob(hostSide, &execpb.Run{}, nil, JobHandler{Resolve: func(ctx context.Context, _ *execpb.ResolveRequest) *execpb.ResolveResponse {
+			<-ctx.Done() // returns only when the session ends
+			return &execpb.ResolveResponse{}
+		}})
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("DriveJob did not return")
+	}
+	<-release
+}
