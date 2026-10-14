@@ -175,6 +175,10 @@ func (j *job) runAction(s *stepRun, cancel <-chan struct{}) stepResult {
 		j.registerPost(s, def)
 	}
 	j.setActionRepository(n)
+	// ActionRunner.cs:157-164: with a job container, the container must exist.
+	if err := j.containerReady(); err != nil {
+		return fail(err)
+	}
 	if err := j.prepareFileCommands(s); err != nil {
 		return fail(err)
 	}

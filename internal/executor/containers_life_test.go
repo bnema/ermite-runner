@@ -171,3 +171,23 @@ func TestStopContainersRunsAfterAFailedStepAndPostStepsRunInTheContainer(t *test
 		t.Errorf("both steps run through docker exec: %v", f.execCalls(t))
 	}
 }
+
+// After a failed "Initialize containers" an always() step has no container:
+// the runner fails it before its header with a null ContainerId (recorded:
+// the ermite-dump step of ctr-errors).
+func TestStepAfterFailedInitFailsWithNullContainerId(t *testing.T) {
+	f := newFakeCtr(t)
+	f.set(t, "create_fail", "1")
+	tree := files{".github/actions/x/action.yml": "name: x\nruns:\n  using: node20\n  main: i.js\n", ".github/actions/x/i.js": "x\n"}
+	rec, res := ctrRun(t, f, ctrJob, "      - name: run\n        if: always()\n        run: echo no\n      - name: act\n        if: always()\n        uses: ./.github/actions/x\n", func(c *Config) {
+		writeFiles(t, c.Layout.Workspace, tree)
+	})
+	if res.Conclusion != ConclusionFailure {
+		t.Fatalf("%+v", res)
+	}
+	for _, n := range []string{"run", "act"} {
+		if got := logOf(rec.step(t, n)); got != "##[error]Value cannot be null. (Parameter 'ContainerId')" || rec.concl(n) != ConclusionFailure {
+			t.Errorf("%s: %q %s", n, got, rec.concl(n))
+		}
+	}
+}
