@@ -5,6 +5,7 @@ package executor
 import (
 	"context"
 	"fmt"
+	"path"
 	"regexp"
 	"strings"
 
@@ -96,10 +97,19 @@ func (c *container) translateToContainer(p string) string {
 	return p
 }
 
-// translateToHost is TranslateToHostPath (ContainerInfo.cs:230-268).
+// translateToHost is TranslateToHostPath (ContainerInfo.cs:230-268) for a path
+// the container printed. An absolute path is normalised first, so that
+// "/__w/../outside/x" is "/outside/x" and is not found below /__w: the runner
+// joins the text as it is, which would read <work>/../outside/x on the host.
+// What comes out of a mapping is the host directory and a cleaned relative
+// part, so it is always inside the host directory of that mapping. Paths that
+// match no mapping are returned as given (relative ones included).
 func (c *container) translateToHost(p string) string {
 	if p == "" {
 		return p
+	}
+	if strings.HasPrefix(p, "/") {
+		p = path.Clean(p)
 	}
 	for _, m := range c.maps {
 		if p == m.container {
@@ -110,6 +120,20 @@ func (c *container) translateToHost(p string) string {
 		}
 	}
 	return p
+}
+
+// insideMappings reports whether a host path (cleaned) is a mapped host
+// directory or below one: the only host files a path printed by the container
+// can stand for. A path of the container that no mount covers (/etc/passwd of
+// the image) is not a file of the host.
+func (c *container) insideMappings(host string) bool {
+	host = path.Clean(host)
+	for _, m := range c.maps {
+		if host == m.host || strings.HasPrefix(host, m.host+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 // resolvePathForStepHost is ContainerStepHost.ResolvePathForStepHost

@@ -3,6 +3,8 @@
 package executor
 
 import (
+	"path"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -139,5 +141,47 @@ func TestServiceNamesAndContainerIDs(t *testing.T) {
 		if c[0] == "start" {
 			t.Errorf("started %v", c)
 		}
+	}
+}
+
+func TestTranslateToHostDoesNotEscapeTheMapping(t *testing.T) {
+	c := &container{maps: []pathMap{{"/h/work", "/__w"}, {"/opt/tc", "/__t"}}}
+	for in, want := range map[string]string{
+		"/__w/a/b":            "/h/work/a/b",
+		"/__w/a/../b":         "/h/work/b",
+		"/__w/../outside/x":   "/outside/x",
+		"/__w/a/../../../etc": "/etc",
+		"/__w//a///b/":        "/h/work/a/b",
+		"/__w":                "/h/work",
+		"/__t/../__w/x":       "/h/work/x",
+		"/__wx/y":             "/__wx/y",
+		"rel/../x":            "rel/../x",
+	} {
+		got := c.translateToHost(in)
+		if got != want {
+			t.Errorf("%q -> %q, want %q", in, got, want)
+		}
+		if strings.HasPrefix(in, "/__w") && !strings.HasPrefix(got, "/h/work") && got != path.Clean(in) {
+			t.Errorf("%q escaped to %q", in, got)
+		}
+	}
+}
+
+// A matcher file named by a command of the container is read only when it is
+// in a directory shared with the host: ".." cannot reach another host file.
+func TestMatcherPathFromTheContainerStaysInside(t *testing.T) {
+	f := newFakeCtr(t)
+	var outside string
+	rec, res := ctrRun(t, f, ctrJob, "      - name: s\n        run: echo\n", func(c *Config) {
+		outside = filepath.Join(filepath.Dir(c.Layout.WorkRoot), "outside")
+		writeFiles(t, filepath.Dir(c.Layout.WorkRoot), files{"outside/m.json": `{"problemMatcher":[{"owner":"leak","pattern":[{"regexp":"x"}]}]}`})
+		f.set(t, "exec_out", "::add-matcher::/__w/../outside/m.json\n::add-matcher::"+outside+"/m.json\n::add-matcher::/etc/hostname\n")
+	})
+	if res.Conclusion != ConclusionFailure {
+		t.Fatalf("%+v", res)
+	}
+	log := logOf(rec.step(t, "s"))
+	if strings.Contains(log, "leak") || strings.Count(log, "##[error]") < 2 || !strings.Contains(log, "Could not find file") && !strings.Contains(log, "ould not find") {
+		t.Errorf("log:\n%s", log)
 	}
 }

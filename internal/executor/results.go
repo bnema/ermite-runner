@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"strings"
 	"sync/atomic"
@@ -79,6 +80,12 @@ const maxMatcherFile = 1 << 20
 
 // ReadMatcherFile reads a problem matcher file.
 func (s *stepRun) ReadMatcherFile(path string) ([]byte, error) {
+	// With a job container the path came from a command of the container: it
+	// is read only when it is a file of a directory the container shares with
+	// the host, never the host's own file of the same name.
+	if c := s.j.stepContainer(); c != nil && !c.insideMappings(path) {
+		return nil, &fs.PathError{Op: "open", Path: path, Err: fs.ErrNotExist}
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
