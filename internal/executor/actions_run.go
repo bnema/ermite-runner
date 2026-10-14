@@ -67,7 +67,7 @@ func (j *job) setActionRepository(n *node) {
 // only the fact is recorded, the composite's own post runs the step.
 func (j *job) registerPost(s *stepRun, def *actionDef) {
 	n := s.n
-	name := s.displayName
+	name := s.name
 	if s.stage == stagePre && strings.HasPrefix(strings.ToLower(name), "pre ") {
 		name = name[len("Pre "):]
 	}
@@ -184,9 +184,10 @@ func (j *job) runAction(s *stepRun, cancel <-chan struct{}) stepResult {
 	}
 	j.debug(num, "Loading env")
 	env := s.env.Clone()
-	for _, k := range n.state.keysOrNil() {
-		v, _ := n.state.Get(k)
-		env.Set("STATE_"+k, v)
+	// The intra-action state, applied last (ActionRunner.cs:255-258): names as
+	// first spelled, in the order they were saved.
+	for _, p := range j.intraActionState(n.stateKey) {
+		env.Set("STATE_"+p.Key, p.Value)
 	}
 	s.actEnv = env
 	if err := j.nodeVersionFor(s, def); err != nil {
@@ -216,11 +217,4 @@ func (n *node) hasPostOf(def *actionDef) bool {
 		return r.HasPost()
 	}
 	return false
-}
-
-func (o *ordered) keysOrNil() []string {
-	if o == nil {
-		return nil
-	}
-	return o.Keys()
 }

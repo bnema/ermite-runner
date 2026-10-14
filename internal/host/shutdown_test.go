@@ -27,6 +27,10 @@ func (c *stubClient) UpdateJob(context.Context, *connect.Request[ermite.UpdateJo
 	return connect.NewResponse(&ermite.UpdateJobResponse{}), nil
 }
 
+func (c *stubClient) UploadSummary(context.Context, *connect.Request[ermite.UploadSummaryRequest]) (*connect.Response[ermite.UploadSummaryResponse], error) {
+	return connect.NewResponse(&ermite.UploadSummaryResponse{}), nil
+}
+
 func (c *stubClient) AppendLog(ctx context.Context, r *connect.Request[ermite.AppendLogRequest]) (*connect.Response[ermite.AppendLogResponse], error) {
 	c.mu.Lock()
 	hang := c.hang

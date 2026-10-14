@@ -25,8 +25,10 @@ message Frame {
     StepCompleted step_completed = 7; // executor -> host
     Log log = 8;                      // executor -> host
     JobResult job_result = 9;         // executor -> host, before Exit
-    ResolveRequest resolve_request = 10;   // executor -> host
-    ResolveResponse resolve_response = 11; // host -> executor, answers a ResolveRequest
+    StepAnnotations step_annotations = 10; // executor -> host, before the StepCompleted of the step
+    StepSummary step_summary = 11;         // executor -> host, before the StepCompleted of the step
+    ResolveRequest resolve_request = 12;   // executor -> host
+    ResolveResponse resolve_response = 13; // host -> executor, answers a ResolveRequest
   }
 }
 
@@ -68,6 +70,11 @@ message JobSpec {
   // executor, and booting the sandbox takes time. 0 means "use
   // timeout_minutes from now".
   int64 deadline_ms = 12;
+  // send_annotations and send_summaries say that the server keeps annotations
+  // (feature ci.annotations) and step summaries (ci.summaries). The executor
+  // sends StepAnnotations and StepSummary frames only when they are set.
+  bool send_annotations = 13;
+  bool send_summaries = 14;
 }
 
 enum StreamKind {
@@ -119,6 +126,46 @@ message StepCompleted {
   string name = 2;
   StepConclusion conclusion = 3;
   int64 unix_nano = 4;
+  // outcome is steps.<id>.outcome: the result before continue-on-error. It
+  // differs from conclusion only for a failed step with continue-on-error.
+  // UNSPECIFIED means the same as conclusion.
+  StepConclusion outcome = 5;
+}
+
+enum AnnotationLevel {
+  ANNOTATION_LEVEL_UNSPECIFIED = 0;
+  ANNOTATION_LEVEL_NOTICE = 1;
+  ANNOTATION_LEVEL_WARNING = 2;
+  ANNOTATION_LEVEL_FAILURE = 3;
+}
+
+// Annotation is one ::notice, ::warning or ::error (or a problem matcher
+// match), masked. The host validates every field again before it sends them.
+message Annotation {
+  AnnotationLevel level = 1;
+  string title = 2;
+  string message = 3;
+  string file = 4; // relative to the repository when the file is in it
+  int32 start_line = 5;
+  int32 end_line = 6;
+  int32 start_column = 7;
+  int32 end_column = 8;
+}
+
+// StepAnnotations is the complete list of the annotations of a step (the ones
+// the runner keeps: at most 10 per level), replacing any earlier list of that
+// step. Annotations of the steps inside a composite action are those of the
+// step of the workflow that uses it.
+message StepAnnotations {
+  int32 step = 1;
+  repeated Annotation annotations = 2;
+}
+
+// StepSummary is the masked content of GITHUB_STEP_SUMMARY after a step, at
+// most 1 MiB.
+message StepSummary {
+  int32 step = 1;
+  string markdown = 2;
 }
 
 enum StepConclusion {

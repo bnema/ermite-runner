@@ -79,6 +79,16 @@ type Config struct {
 	// Actions configures the actions of the job (resolution, downloads, Node.js,
 	// docker).
 	Actions ActionsConfig
+	// SendAnnotations and SendSummaries say that the server keeps annotations
+	// and step summaries (features ci.annotations and ci.summaries): the
+	// Reporter then gets them with StepResults.
+	SendAnnotations, SendSummaries bool
+	// Getenv reads the environment of the executor (the matcher timeout); nil
+	// means os.Getenv.
+	Getenv func(string) string
+	// StepTimeoutSkew is added to every step timeout (tests use a negative
+	// value to run a timeout of one minute in milliseconds).
+	StepTimeoutSkew time.Duration
 
 	Reporter Reporter
 	// Log receives the runner's own diagnostics (not the job log); the zero value
@@ -152,8 +162,6 @@ type job struct {
 	// masker hides the secrets in everything reported; it is set once the
 	// contexts are built, before any step runs.
 	masker atomic.Pointer[masker]
-	// extraSecrets are registered after the start (see addSecrets).
-	extraSecrets []string
 	// actions holds what the pre-job phase loaded (see prepareActions).
 	actions *actionState
 	// postStack is the post steps registered so far, last registered last.
@@ -161,6 +169,14 @@ type job struct {
 	// upgradedToNode24 are the actions that asked for node20 and got node24.
 	upgradedToNode24 []string
 	jobCtx           context.Context
+
+	// Results of the commands (see issues.go, matchers.go, results.go).
+	matchers   *matcherRoot
+	issuesMu   sync.Mutex
+	collectors map[int]*issueCollector // by step number
+	outcomes   map[int]Conclusion
+	summaries  map[int]string
+	states     map[string]*intraState // intra-action state, see saveState
 }
 
 func (j *job) mask(s string) string { return j.masker.Load().mask(s) }
@@ -178,7 +194,7 @@ func Run(cancel *Canceller, cfg Config) Result {
 	if cancel == nil {
 		cancel = NewCanceller()
 	}
-	j := &job{cfg: cfg, cancel: cancel, trackID: "github_" + uuid.NewString()}
+	j := &job{cfg: cfg, cancel: cancel, trackID: "github_" + uuid.NewString(), matchers: &matcherRoot{}}
 	j.cfg.Reporter = &maskReporter{j: j, next: cfg.Reporter}
 	defer func() {
 		if j.fc != nil {
@@ -298,17 +314,16 @@ func (j *job) out(num int, text string) {
 	}
 }
 
-// tagged writes tag+message; only the first line carries the tag.
+// tagged writes tag+message; only the first line carries the tag. The tags of
+// issues (##[error], ##[warning], ##[notice]) go through AddIssue: they are
+// logged and become annotations, like the runner's IExecutionContext.Error
+// and Warning.
 func (j *job) tagged(num int, tag, msg string) {
-	msg = j.mask(msg) // before the cut: a secret split by it would leak its start
-	if len(msg) > maxIssueMessageLength && tag != "" {
-		msg = msg[:maxIssueMessageLength]
+	if level, ok := levelOfTag(tag); ok {
+		j.addIssue(num, nil, false, issue{Level: level, Message: msg})
+		return
 	}
-	lines := strings.Split(strings.ReplaceAll(msg, "\r\n", "\n"), "\n")
-	j.write(num, tag+lines[0])
-	for _, l := range lines[1:] {
-		j.write(num, l)
-	}
+	j.logTagged(num, tag, j.mask(msg))
 }
 
 func (j *job) errorf(num int, format string, a ...any) {

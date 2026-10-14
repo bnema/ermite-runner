@@ -163,6 +163,10 @@ type JobHandler struct {
 	// it before it returns. At most resolveQueue requests wait; the next ones are
 	// answered with an error at once, without a call.
 	Resolve func(ctx context.Context, r *execpb.ResolveRequest) *execpb.ResolveResponse
+	// StepAnnotations and StepSummary come before the StepCompleted of their
+	// step.
+	StepAnnotations func(*execpb.StepAnnotations)
+	StepSummary     func(*execpb.StepSummary)
 }
 
 // DriveJob is Drive for a session that carries a job: besides Output frames it
@@ -261,6 +265,14 @@ func DriveJob(rw io.ReadWriter, run *execpb.Run, cancel <-chan *execpb.Cancel, h
 			case resolveCh <- req:
 			default:
 				_ = c.Send(resolveFrame(&execpb.ResolveResponse{Id: req.Id, Error: "too many action resolutions in flight"}))
+			}
+		case *execpb.Frame_StepAnnotations:
+			if h.StepAnnotations != nil {
+				h.StepAnnotations(b.StepAnnotations)
+			}
+		case *execpb.Frame_StepSummary:
+			if h.StepSummary != nil {
+				h.StepSummary(b.StepSummary)
 			}
 		case *execpb.Frame_Exit:
 			return hello, b.Exit, nil

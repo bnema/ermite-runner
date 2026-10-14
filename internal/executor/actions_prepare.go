@@ -170,7 +170,7 @@ func (j *job) downloadInfo(ctx context.Context, num int, nodes []*node) (map[str
 			return nil, ghErrorf("%s", ra.Error)
 		}
 		// The token is a secret from here on (ActionManager.cs:1130).
-		j.addTokenSecret(ra.Token)
+		j.addTokenMask(ra.Token)
 		if ra.NameWithOwner == "" {
 			ra.NameWithOwner = strings.SplitN(keys[i], "@", 2)[0]
 		}

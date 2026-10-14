@@ -11,10 +11,6 @@ import (
 // execute is ActionRunner.RunAsync plus ScriptHandler for one run step.
 func (j *job) execute(s *stepRun, stepCancel <-chan struct{}) stepResult {
 	num, st := s.num, s.st
-	if st.TimeoutMinutes != nil { // step timeouts are phase G's
-		j.errorf(num, "not supported yet: timeout-minutes")
-		return resFailed
-	}
 	if st.Uses != nil {
 		return j.runAction(s, stepCancel)
 	}
@@ -208,17 +204,11 @@ func (j *job) startProcess(s *stepRun, plan ShellPlan, dir string, argv []string
 // Handler.cs:178-184), a failing action says why itself.
 func (j *job) runProc(s *stepRun, shown, dir string, argv []string, exitDebug string, stepCancel <-chan struct{}) stepResult {
 	num := s.num
+	om := newOutputManager(s, stepCancel)
+	defer om.dispose()
 	res, err := runProcess(procSpec{
 		Argv: argv, Dir: dir, Env: s.procEnv(), Credential: j.cfg.Credential,
-		OnLine: func(line string) {
-			if strings.Contains(line, "##[start-action") || strings.Contains(line, "##[end-action") {
-				line = strings.ReplaceAll(strings.ReplaceAll(line, "##[start-action", `##[\start-action`), "##[end-action", `##[\end-action`)
-			}
-			if (strings.Contains(line, "##[") || strings.Contains(line, "::")) && s.cmds.TryProcess(line) {
-				return
-			}
-			j.write(num, line)
-		},
+		OnLine: om.onData,
 		Cancel: stepCancel, TermAfter: j.cfg.TermAfter, KillAfter: j.cfg.KillAfter,
 		WaitDelay: j.cfg.WaitDelay, Signal: j.cfg.Signal,
 	})
@@ -230,7 +220,7 @@ func (j *job) runProc(s *stepRun, shown, dir string, argv []string, exitDebug st
 		// The process was stopped on cancellation: ExecuteAsync throws
 		// (ProcessInvoker.cs:369) and StepsRunner logs the exception
 		// (StepsRunner.cs:333-337).
-		j.errorf(num, "The operation was canceled.")
+		s.logCanceled()
 		return resCanceled
 	}
 	if exitDebug != "" {

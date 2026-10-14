@@ -5,7 +5,9 @@ package executor
 import (
 	"context"
 	"net/http"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"bnema.dev/ermite-actions/action"
@@ -123,7 +125,10 @@ type node struct {
 	// scope is the name of the steps context of the step's children: the
 	// fully qualified context name (ExecutionContext.GetFullyQualifiedContextName).
 	scope string
-	state *ordered
+	// stateKey names the intra-action state of the action (job.saveState): the
+	// pre, main and post stages of an action, and its inner steps, share it
+	// (the runner keys it by the id of the step, FileCommandManager.cs:305-318).
+	stateKey string
 	// children are the nodes of a composite action's steps.
 	children []*node
 	// preSteps and postSteps are the embedded steps with a pre or a post, in
@@ -138,27 +143,15 @@ type node struct {
 	postCond       string
 }
 
-// setState keeps a value of the intra-action state: keys compare without case
-// (the runner's dictionary is OrdinalIgnoreCase) and keep the first spelling.
-func (n *node) setState(k, v string) {
-	if n.state == nil {
-		n.state = newOrdered()
-	}
-	for _, have := range n.state.Keys() {
-		if strings.EqualFold(have, k) {
-			k = have
-			break
-		}
-	}
-	n.state.Set(k, v)
-}
+// nodeSeq numbers the nodes, for their state keys.
+var nodeSeq atomic.Int64
 
 // newNodes makes the nodes of steps. The workflow reader has checked every
 // uses value.
 func newNodes(steps []*workflow.Step, parent *node, scope string) ([]*node, error) {
 	out := make([]*node, 0, len(steps))
 	for _, st := range steps {
-		n := &node{st: st, parent: parent}
+		n := &node{st: st, parent: parent, stateKey: "node-" + strconv.FormatInt(nodeSeq.Add(1), 10)}
 		n.scope = st.ID
 		if scope != "" {
 			n.scope = scope + "." + st.ID

@@ -41,10 +41,15 @@ type stepRun struct {
 	// environment of the process (docker, whose -e options read it).
 	actEnv     *ordered
 	rawEnvList []string
-	// displayName is the name of the step in the log; def the action it runs.
-	displayName string
+	// def is the action the step runs.
 	def         *actionDef
 	nodeVersion string
+	// scope is what the step shares with the step that contains it, see
+	// stepScope. name is the display name of the step in the log; timedOut is set when the step
+	// reached its timeout-minutes.
+	scope    stepScope
+	name     string
+	timedOut timedOutFlag
 }
 
 // depth is the number of composite actions around the step.

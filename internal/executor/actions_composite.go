@@ -196,6 +196,10 @@ func (j *job) compositeOutputs(s *stepRun, def *actionDef) []Pair {
 // to the outer step.
 func (j *job) runEmbedded(parent *stepRun, c *node) {
 	s := &stepRun{j: j, num: parent.num, st: c.st, n: c, stage: parent.stage, parent: parent, fc: j.fc.Fork()}
+	// The issues, summaries and state of an inner step belong to the step that
+	// uses the action, whose collector counts them (10 per level, the outer
+	// step's own first).
+	s.scope = j.embeddedScope(parent, c.stateKey)
 	defer s.fc.Cleanup()
 	s.cmds = newCommandManager(s, j.cfg.Debug)
 	j.mu.Lock()
@@ -204,7 +208,7 @@ func (j *job) runEmbedded(parent *stepRun, c *node) {
 	j.mu.Unlock()
 	env, envErr := j.stepEnvironment(s)
 	s.env = env
-	s.displayName = j.displayName(c.st, env)
+	s.name = j.displayName(c.st, env)
 	if envErr != nil {
 		j.errorf(s.num, "%s", templateNotValid(envErr, true))
 		j.finishStep(s, resFailed)

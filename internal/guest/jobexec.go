@@ -9,6 +9,7 @@ import (
 	"os/user"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -22,6 +23,9 @@ import (
 // frameReporter is the executor.Reporter that writes frames on the stream.
 type frameReporter struct {
 	conn *execstream.Conn
+	// outcomes keeps steps.<id>.outcome from StepResults until StepCompleted.
+	omu      sync.Mutex
+	outcomes map[int]executor.Conclusion
 	// err keeps the first send error; the job goes on without a host.
 	failed chan struct{}
 }
@@ -65,7 +69,49 @@ func (r *frameReporter) Log(n int, at time.Time, line string) {
 }
 
 func (r *frameReporter) StepCompleted(n int, name string, c executor.Conclusion, at time.Time) {
-	r.send(&execpb.Frame{Body: &execpb.Frame_StepCompleted{StepCompleted: &execpb.StepCompleted{Number: int32(n), Name: name, Conclusion: conclusionProto(c), UnixNano: ts(at)}}})
+	r.omu.Lock()
+	outcome := r.outcomes[n]
+	delete(r.outcomes, n)
+	r.omu.Unlock()
+	r.send(&execpb.Frame{Body: &execpb.Frame_StepCompleted{StepCompleted: &execpb.StepCompleted{
+		Number: int32(n), Name: name, Conclusion: conclusionProto(c), Outcome: conclusionProto(outcome), UnixNano: ts(at),
+	}}})
+}
+
+func levelProto(l executor.AnnotationLevel) execpb.AnnotationLevel {
+	switch l {
+	case executor.LevelNotice:
+		return execpb.AnnotationLevel_ANNOTATION_LEVEL_NOTICE
+	case executor.LevelWarning:
+		return execpb.AnnotationLevel_ANNOTATION_LEVEL_WARNING
+	case executor.LevelFailure:
+		return execpb.AnnotationLevel_ANNOTATION_LEVEL_FAILURE
+	}
+	return execpb.AnnotationLevel_ANNOTATION_LEVEL_UNSPECIFIED
+}
+
+// StepResults sends the annotations and the summary of a step, and keeps its
+// outcome for the StepCompleted frame that follows.
+func (r *frameReporter) StepResults(n int, res executor.StepResults) {
+	r.omu.Lock()
+	if r.outcomes == nil {
+		r.outcomes = map[int]executor.Conclusion{}
+	}
+	r.outcomes[n] = res.Outcome
+	r.omu.Unlock()
+	if len(res.Annotations) > 0 {
+		sa := &execpb.StepAnnotations{Step: int32(n)}
+		for _, a := range res.Annotations {
+			sa.Annotations = append(sa.Annotations, &execpb.Annotation{
+				Level: levelProto(a.Level), Title: a.Title, Message: a.Message, File: a.File,
+				StartLine: a.StartLine, EndLine: a.EndLine, StartColumn: a.StartColumn, EndColumn: a.EndColumn,
+			})
+		}
+		r.send(&execpb.Frame{Body: &execpb.Frame_StepAnnotations{StepAnnotations: sa}})
+	}
+	if res.HasSummary {
+		r.send(&execpb.Frame{Body: &execpb.Frame_StepSummary{StepSummary: &execpb.StepSummary{Step: int32(n), Markdown: res.Summary}}})
+	}
 }
 
 func (r *frameReporter) JobCompleted(res executor.Result) {
@@ -211,6 +257,7 @@ func runJob(ctx context.Context, conn *execstream.Conn, cfg ExecConfig, spec *ex
 		RunnerVersion: spec.GetRunnerVersion(),
 		Home:          su.Home, ToolCache: os.Getenv("RUNNER_TOOL_CACHE"), BaseEnv: stepEnv(os.Environ(), su), Credential: su.Credential,
 		Debug: spec.GetDebug(), Reporter: rep, Actions: executor.ActionsConfig{Resolver: res.resolve}, Log: zerowrap.FromCtx(ctx),
+		SendAnnotations: spec.GetSendAnnotations(), SendSummaries: spec.GetSendSummaries(),
 		TermAfter: cfg.TermAfter, KillAfter: cfg.KillAfter, WaitDelay: cfg.WaitDelay,
 	})
 	if result.Conclusion == executor.ConclusionSuccess {

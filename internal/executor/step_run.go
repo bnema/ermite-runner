@@ -151,10 +151,13 @@ func (j *job) runStep(num int, q qstep) {
 	s := &stepRun{j: j, num: num, stage: q.stage}
 	if q.n != nil {
 		s.st, s.n = q.n.st, q.n
+		// The state saved by the action is the one of its node, whatever the stage.
+		s.scope.stateKey = q.n.stateKey
 	}
 	s.cmds = newCommandManager(s, j.cfg.Debug)
 	name := q.name
 	if q.setup != nil {
+		s.name = name
 		rep.StepStarted(num, name, j.now())
 		r := j.runGuarded(s, q, true)
 		rep.StepCompleted(num, name, r.conclusion(), j.now())
@@ -177,7 +180,7 @@ func (j *job) runStep(num int, q qstep) {
 			name = "Pre " + name
 		}
 	}
-	s.displayName = name
+	s.name = name
 	rep.StepStarted(num, name, j.now())
 	r := j.runGuarded(s, q, envErr == nil)
 	if envErr != nil {
@@ -203,6 +206,9 @@ func (j *job) finishStep(s *stepRun, res stepResult) {
 	// generated ids are hidden: only the main stage and embedded steps count.
 	if s.n != nil && (s.parent != nil || s.stage == stageMain) && st != nil {
 		j.state.SetStepResult(st.ID, string(outcome.conclusion()), string(res.conclusion()))
+	}
+	if s.parent == nil {
+		j.recordOutcome(s.num, outcome.conclusion())
 	}
 	if s.parent != nil {
 		if res == resFailed || res == resCanceled {
@@ -265,6 +271,8 @@ func (j *job) runGuarded(s *stepRun, q qstep, ok bool) stepResult {
 	// cancelled and the step is stopped unless its condition still holds
 	// (always()).
 	stepCancel := make(chan struct{})
+	var cancelOnce sync.Once
+	closeCancel := func() { cancelOnce.Do(func() { close(stepCancel) }) }
 	stopWatch := make(chan struct{})
 	var watch sync.WaitGroup
 	if !cancelledAtStart {
@@ -284,18 +292,27 @@ func (j *job) runGuarded(s *stepRun, q qstep, ok bool) stepResult {
 				keep, _ = cond()
 			}
 			if !keep {
-				close(stepCancel)
+				closeCancel()
 			}
 		}()
 	}
+	// timeout-minutes (StepsRunner.RunStepAsync): the timer cancels the body like
+	// a job cancellation does, and does not cancel the job. An embedded step
+	// has its own timer, the step around it has its own.
 	var r stepResult
+	stopTimeout, minutes := func() (func(), int) { return func() {}, 0 }()
+	if q.setup == nil {
+		stopTimeout, minutes = j.armStepTimeout(s, closeCancel)
+	}
 	if q.setup != nil {
 		r = q.setup(s, stepCancel)
 	} else {
 		r = j.execute(s, stepCancel)
 	}
+	stopTimeout()
 	close(stopWatch)
 	watch.Wait()
+	r = j.stepTimedOut(s, r, minutes)
 
 	// Merge the result of the commands (StepsRunner.cs:347-351).
 	if s.cmdResult != nil {
