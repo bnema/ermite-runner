@@ -4,8 +4,10 @@ package guest
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -16,6 +18,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/bnema/zerowrap"
 
 	"bnema.dev/ermite-runner/internal/execstream"
 	"bnema.dev/ermite-runner/internal/execstream/execpb"
@@ -407,5 +411,267 @@ func TestInitForwardsSIGTERMToTheExecutor(t *testing.T) {
 	}
 	if _, err := os.Stat(marker); err != nil {
 		t.Fatal("the executor never received SIGTERM")
+	}
+}
+
+// fakeDocker serves the Docker API on a temp unix socket from the moment it is
+// called; ping decides the /_ping answer.
+func fakeDocker(t *testing.T, ping http.HandlerFunc) string {
+	t.Helper()
+	sock := filepath.Join(t.TempDir(), "docker.sock")
+	l, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/_ping", ping)
+	srv := &http.Server{Handler: mux}
+	go func() { _ = srv.Serve(l) }()
+	t.Cleanup(func() { _ = srv.Close() })
+	return sock
+}
+
+func sleeper(t *testing.T) int {
+	t.Helper()
+	pid, err := spawn([]string{"/bin/sh", "-c", "sleep 60"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL); _, _ = wait4NoHang(pid) })
+	return pid
+}
+
+var testLog = zerowrap.FromCtx(context.Background())
+
+func TestWaitDockerReadyWaitsForPing(t *testing.T) {
+	var calls atomic.Int32
+	sock := fakeDocker(t, func(w http.ResponseWriter, _ *http.Request) {
+		if calls.Add(1) < 4 { // dockerd is up but still starting
+			http.Error(w, "starting", http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = w.Write([]byte("OK"))
+	})
+	start := time.Now()
+	if err := waitDockerReady(context.Background(), testLog, sock, sleeper(t), 10*time.Second, nil); err != nil {
+		t.Fatal(err)
+	}
+	if calls.Load() < 4 || time.Since(start) < 200*time.Millisecond {
+		t.Fatalf("returned before the API answered OK (calls=%d)", calls.Load())
+	}
+}
+
+func TestWaitDockerReadyLateSocket(t *testing.T) {
+	sock := filepath.Join(t.TempDir(), "docker.sock")
+	go func() {
+		time.Sleep(400 * time.Millisecond)
+		l, err := net.Listen("unix", sock)
+		if err != nil {
+			return
+		}
+		srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("OK")) })}
+		go func() { _ = srv.Serve(l) }()
+		time.AfterFunc(5*time.Second, func() { _ = srv.Close() })
+	}()
+	start := time.Now()
+	if err := waitDockerReady(context.Background(), testLog, sock, sleeper(t), 10*time.Second, nil); err != nil {
+		t.Fatal(err)
+	}
+	if time.Since(start) < 400*time.Millisecond {
+		t.Fatal("returned before the socket existed")
+	}
+}
+
+func TestWaitDockerReadyTimesOut(t *testing.T) {
+	sock := fakeDocker(t, func(w http.ResponseWriter, _ *http.Request) { http.Error(w, "no", http.StatusServiceUnavailable) })
+	start := time.Now()
+	err := waitDockerReady(context.Background(), testLog, sock, sleeper(t), 500*time.Millisecond, nil)
+	if err == nil || time.Since(start) > 5*time.Second {
+		t.Fatalf("want a timeout error, got %v after %s", err, time.Since(start))
+	}
+	var exited *dockerdExitError
+	var abort *abortBootError
+	if errors.As(err, &exited) || errors.As(err, &abort) {
+		t.Fatalf("a timeout is neither a dockerd exit nor an abort: %v", err)
+	}
+}
+
+// A daemon that accepts the connection and never answers must not delay the
+// deadline, nor a signal.
+func TestWaitDockerReadyStalledServer(t *testing.T) {
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	sock := fakeDocker(t, func(http.ResponseWriter, *http.Request) { <-release })
+
+	start := time.Now()
+	err := waitDockerReady(context.Background(), testLog, sock, sleeper(t), 500*time.Millisecond, nil)
+	var abort *abortBootError
+	if err == nil || errors.As(err, &abort) || time.Since(start) > 1500*time.Millisecond {
+		t.Fatalf("want the deadline error within ~0.5 s, got %v after %s", err, time.Since(start))
+	}
+
+	sigs := make(chan os.Signal, 1)
+	time.AfterFunc(200*time.Millisecond, func() { sigs <- syscall.SIGTERM })
+	start = time.Now()
+	err = waitDockerReady(context.Background(), testLog, sock, sleeper(t), 30*time.Second, sigs)
+	if !errors.As(err, &abort) || time.Since(start) > 1500*time.Millisecond {
+		t.Fatalf("want an abort right after the signal, got %v after %s", err, time.Since(start))
+	}
+}
+
+func TestWaitDockerReadyDockerdExits(t *testing.T) {
+	pid, err := spawn([]string{"/bin/sh", "-c", "exit 3"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	err = waitDockerReady(context.Background(), testLog, filepath.Join(t.TempDir(), "none.sock"), pid, 30*time.Second, nil)
+	var exited *dockerdExitError
+	if !errors.As(err, &exited) || exited.status.ExitStatus() != 3 {
+		t.Fatalf("want dockerd exit 3, got %v", err)
+	}
+	if time.Since(start) > 5*time.Second {
+		t.Fatal("did not notice the exit promptly")
+	}
+}
+
+// Orphans that init adopts while it waits must be reaped at once, not left as
+// zombies until the wait ends.
+func TestWaitDockerReadyReapsAdoptedOrphans(t *testing.T) {
+	// A child that exits immediately stands for an adopted orphan.
+	orphan, err := spawn([]string{"/bin/sh", "-c", "exit 0"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zombie := func() bool {
+		b, err := os.ReadFile("/proc/" + strconv.Itoa(orphan) + "/stat")
+		return err == nil && strings.Contains(string(b), ") Z ")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for !zombie() && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !zombie() {
+		t.Fatal("setup: the orphan did not become a zombie")
+	}
+	sigs := make(chan os.Signal, 1)
+	time.AfterFunc(600*time.Millisecond, func() { sigs <- syscall.SIGTERM })
+	done := make(chan error, 1)
+	go func() {
+		done <- waitDockerReady(context.Background(), testLog, filepath.Join(t.TempDir(), "none.sock"), sleeper(t), 30*time.Second, sigs)
+	}()
+	// The zombie must vanish while the wait is still running.
+	deadline = time.Now().Add(400 * time.Millisecond)
+	for zombie() && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if zombie() {
+		t.Fatal("the adopted orphan stayed a zombie during the wait")
+	}
+	<-done
+}
+
+// A shutdown signal during the wait aborts the boot (exit 128+signal) instead
+// of starting the executor; so does a cancelled context.
+func TestWaitDockerReadyAbortsOnSignalAndContext(t *testing.T) {
+	sock := filepath.Join(t.TempDir(), "none.sock")
+	sigs := make(chan os.Signal, 1)
+	sigs <- syscall.SIGINT
+	var abort *abortBootError
+	err := waitDockerReady(context.Background(), testLog, sock, sleeper(t), 30*time.Second, sigs)
+	if !errors.As(err, &abort) || abort.code != 128+int(syscall.SIGINT) {
+		t.Fatalf("err=%v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err = waitDockerReady(ctx, testLog, sock, sleeper(t), 30*time.Second, nil)
+	if !errors.As(err, &abort) || abort.code != 128+int(syscall.SIGTERM) {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestStopDockerdReapsAndZeroIsNoop(t *testing.T) {
+	stopDockerd(0)
+	pid := sleeper(t)
+	stopDockerd(pid)
+	if _, err := os.Stat("/proc/" + strconv.Itoa(pid)); err == nil {
+		t.Fatal("dockerd is still there")
+	}
+}
+
+func TestDockerPingRejectsNonOK(t *testing.T) {
+	sock := fakeDocker(t, func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("nope")) })
+	client := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, "unix", sock)
+	}}}
+	if dockerPing(context.Background(), client) {
+		t.Fatal("a 200 without OK must not count as ready")
+	}
+}
+
+func initWithFakeDockerd(t *testing.T, sigs <-chan os.Signal, timeout time.Duration, dockerd string) (code int, marker string) {
+	t.Helper()
+	marker = filepath.Join(t.TempDir(), "executor-ran")
+	code = Init(context.Background(), InitConfig{
+		Cmdline:            "ermite.sandbox=container ermite.connect=unix:/nonexistent",
+		Getpid:             func() int { return 4242 },
+		Signals:            sigs,
+		DockerdArgs:        []string{"/bin/sh", "-c", dockerd},
+		DockerSocket:       filepath.Join(t.TempDir(), "none.sock"),
+		DockerReadyTimeout: timeout,
+		ExecArgs:           []string{"/bin/sh", "-c", "touch " + marker + "; exit 7"},
+	})
+	return code, marker
+}
+
+// A shutdown signal while waiting for dockerd: no executor, dockerd stopped,
+// exit 128+signal.
+func TestInitSignalDuringDockerWaitDoesNotStartTheExecutor(t *testing.T) {
+	sigs := make(chan os.Signal, 1)
+	sigs <- syscall.SIGTERM
+	code, marker := initWithFakeDockerd(t, sigs, 30*time.Second, "sleep 60")
+	if code != 128+int(syscall.SIGTERM) {
+		t.Fatalf("code=%d", code)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("the executor was started")
+	}
+}
+
+// The deadline and a dying dockerd still start the executor.
+func TestInitStartsTheExecutorWhenDockerNeverGetsReady(t *testing.T) {
+	for name, tc := range map[string]struct {
+		dockerd string
+		timeout time.Duration
+	}{"timeout": {"sleep 60", 400 * time.Millisecond}, "dockerd exits": {"exit 1", 30 * time.Second}} {
+		t.Run(name, func(t *testing.T) {
+			code, marker := initWithFakeDockerd(t, nil, tc.timeout, tc.dockerd)
+			if code != 7 {
+				t.Fatalf("want the executor's code 7, got %d", code)
+			}
+			if _, err := os.Stat(marker); err != nil {
+				t.Fatal("the executor did not run")
+			}
+		})
+	}
+}
+
+// A dockerd that ignores SIGTERM goes through the SIGKILL path and is reaped
+// (no zombie left).
+func TestStopDockerdKillsAndReapsATermIgnoringDaemon(t *testing.T) {
+	pid, err := spawn([]string{"/bin/sh", "-c", "trap '' TERM; while :; do sleep 0.1; done"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
+	time.Sleep(200 * time.Millisecond) // let the shell install its trap
+	start := time.Now()
+	stopDockerd(pid)
+	if d := time.Since(start); d < 5*time.Second || d > 8*time.Second {
+		t.Fatalf("expected the SIGKILL path after the 5 s grace, took %s", d)
+	}
+	if _, err := os.Stat("/proc/" + strconv.Itoa(pid)); err == nil {
+		t.Fatal("dockerd was not reaped (zombie or alive)")
 	}
 }

@@ -4,7 +4,11 @@ package guest
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -33,6 +37,15 @@ type InitConfig struct {
 	// ExecArgs is the executor command line; default
 	// [GuestExecDir/GuestExecName exec].
 	ExecArgs []string
+	// DockerdArgs replaces the dockerd command line, and the check that
+	// /usr/bin/dockerd exists (tests); SkipDocker still wins.
+	DockerdArgs []string
+	// DockerSocket is the Docker API socket dockerd listens on and init waits
+	// for; default dockerSocket.
+	DockerSocket string
+	// DockerReadyTimeout bounds the wait for the Docker API before the executor
+	// is started anyway; default dockerReadyTimeout.
+	DockerReadyTimeout time.Duration
 }
 
 // Init is `ermite-runner init`: the entrypoint of every sandbox.
@@ -45,7 +58,7 @@ type InitConfig struct {
 //
 // In a container the root and the pseudo filesystems are ready: it skips all of
 // that and only prepares cgroups. Then, in both: start dockerd with its data
-// root on the scratch space, wait for its socket, run the executor
+// root on the scratch space, wait (bounded) for its API to answer, run the executor
 // (`ermite-runner exec`) as a child, reap orphans, stop dockerd, and finish by
 // powering the VM off, or exiting with the executor's code in a container.
 func Init(ctx context.Context, cfg InitConfig) int {
@@ -116,10 +129,15 @@ func runPayload(ctx context.Context, cfg InitConfig, mode string, args map[strin
 	}
 
 	var dockerPid int
-	if _, err := os.Stat("/usr/bin/dockerd"); err == nil && !cfg.SkipDocker {
+	_, statErr := os.Stat("/usr/bin/dockerd")
+	if !cfg.SkipDocker && (statErr == nil || cfg.DockerdArgs != nil) {
 		_ = os.MkdirAll(sandbox.GuestScratch+"/docker", 0o711)
-		pid, err := spawn([]string{"/usr/bin/dockerd", "--data-root", sandbox.GuestScratch + "/docker",
-			"--storage-driver", "overlay2", "--host", "unix:///var/run/docker.sock"}, nil)
+		argv := cfg.DockerdArgs
+		if argv == nil {
+			argv = []string{"/usr/bin/dockerd", "--data-root", sandbox.GuestScratch + "/docker",
+				"--storage-driver", "overlay2", "--host", "unix:///var/run/docker.sock"}
+		}
+		pid, err := spawn(argv, nil)
 		if err != nil {
 			log.Error().Err(err).Msg("init: start dockerd")
 		} else {
@@ -127,12 +145,6 @@ func runPayload(ctx context.Context, cfg InitConfig, mode string, args map[strin
 		}
 	}
 
-	execPid, err := spawn(cfg.ExecArgs, append(os.Environ(),
-		"ERMITE_CONNECT="+target, "ERMITE_SANDBOX="+mode, "ERMITE_VERSION="+cfg.Version))
-	if err != nil {
-		log.Error().Err(err).Msg("init: start executor")
-		return 1
-	}
 	// SIGTERM/SIGINT (docker stop, or the host stopping the VM) go to the
 	// executor, which cancels its script with the usual escalation and reports
 	// its Exit; init then finishes normally instead of dying with children.
@@ -143,35 +155,241 @@ func runPayload(ctx context.Context, cfg InitConfig, mode string, args map[strin
 		defer signal.Stop(ch)
 		sigs = ch
 	}
+
+	// The first job-container step needs the Docker API, so the executor must
+	// not start before dockerd answers. If it never does (or dies), start the
+	// executor anyway: jobs that do not use Docker still run. A shutdown signal
+	// during the wait aborts the boot instead: see abortBootError.
+	if dockerPid != 0 {
+		sock := cfg.DockerSocket
+		if sock == "" {
+			sock = dockerSocket
+		}
+		timeout := cfg.DockerReadyTimeout
+		if timeout <= 0 {
+			timeout = dockerReadyTimeout
+		}
+		err := waitDockerReady(ctx, log, sock, dockerPid, timeout, sigs)
+		var exited *dockerdExitError
+		var abort *abortBootError
+		switch {
+		case errors.As(err, &abort):
+			stopDockerd(dockerPid)
+			return abort.code
+		case errors.As(err, &exited):
+			dockerPid = 0 // already reaped
+		}
+	}
+
+	execPid, err := spawn(cfg.ExecArgs, append(os.Environ(),
+		"ERMITE_CONNECT="+target, "ERMITE_SANDBOX="+mode, "ERMITE_VERSION="+cfg.Version))
+	if err != nil {
+		log.Error().Err(err).Msg("init: start executor")
+		stopDockerd(dockerPid)
+		return 1
+	}
+	forward := func(sig os.Signal) {
+		if s, ok := sig.(syscall.Signal); ok {
+			log.Info().Str("signal", s.String()).Msg("init: forwarding the signal to the executor")
+			_ = syscall.Kill(-execPid, s) // the executor leads its own process group
+			_ = syscall.Kill(execPid, s)
+		}
+	}
 	stopFwd := make(chan struct{})
 	defer close(stopFwd)
 	go func() {
 		for {
 			select {
 			case sig := <-sigs:
-				if s, ok := sig.(syscall.Signal); ok {
-					log.Info().Str("signal", s.String()).Msg("init: forwarding the signal to the executor")
-					_ = syscall.Kill(-execPid, s) // the executor leads its own process group
-					_ = syscall.Kill(execPid, s)
-				}
+				forward(sig)
 			case <-stopFwd:
 				return
 			}
 		}
 	}()
 	code := reapUntil(execPid)
-	if dockerPid != 0 {
-		_ = syscall.Kill(dockerPid, syscall.SIGTERM)
-		deadline := time.Now().Add(5 * time.Second)
-		for time.Now().Before(deadline) {
-			if pid, _ := wait4NoHang(dockerPid); pid == dockerPid {
-				break
-			}
-			time.Sleep(100 * time.Millisecond)
-		}
-		_ = syscall.Kill(dockerPid, syscall.SIGKILL)
-	}
+	stopDockerd(dockerPid)
 	return code
+}
+
+// stopDockerd stops dockerd (SIGTERM, then SIGKILL after 5 s) and reaps it (at
+// most 5 s more after the SIGKILL); a zero pid is a no-op.
+func stopDockerd(pid int) {
+	if pid == 0 {
+		return
+	}
+	_ = syscall.Kill(pid, syscall.SIGTERM)
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if got, _ := wait4NoHang(pid); got == pid {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	_ = syscall.Kill(pid, syscall.SIGKILL)
+	// SIGKILL cannot be ignored, so the exit is prompt; poll rather than block
+	// for ever on a process stuck in the kernel (uninterruptible sleep).
+	for end := time.Now().Add(5 * time.Second); time.Now().Before(end); time.Sleep(10 * time.Millisecond) {
+		got, err := wait4NoHang(pid)
+		if got == pid || (err != nil && err != syscall.EINTR) { // ECHILD: already reaped
+			return
+		}
+	}
+}
+
+const (
+	// dockerSocket is the Docker API socket of the nested dockerd.
+	dockerSocket = "/var/run/docker.sock"
+	// dockerReadyTimeout bounds the wait for the Docker API at boot.
+	dockerReadyTimeout = 60 * time.Second
+	dockerPollInterval = 100 * time.Millisecond
+	dockerPingTimeout  = 2 * time.Second
+)
+
+// dockerdExitError reports that dockerd exited (and was reaped) before its API
+// answered.
+type dockerdExitError struct{ status syscall.WaitStatus }
+
+func (e *dockerdExitError) Error() string {
+	if e.status.Signaled() {
+		return "dockerd killed by signal " + e.status.Signal().String()
+	}
+	return fmt.Sprintf("dockerd exited with code %d", e.status.ExitStatus())
+}
+
+// abortBootError means a shutdown signal (or the cancelled context) arrived
+// while waiting for the Docker API: init must not start the executor, stop
+// dockerd and exit with code (128+signal, as for a killed executor).
+//
+// Not starting the executor is safe for the host: the sandbox ends before the
+// executor connected ("container exited ... before the executor connected" /
+// "firecracker exited before the executor connected"), and the host reports the
+// job cancelled (not failed) when a cancel or shutdown was requested
+// (jobRun.execute: startSandbox error with cancelRequested). A stop that the
+// host did not ask for is reported as "the sandbox did not start".
+type abortBootError struct{ code int }
+
+func (e *abortBootError) Error() string {
+	return fmt.Sprintf("boot aborted by a shutdown signal (exit %d)", e.code)
+}
+
+// reapChildren reaps every child that has exited (orphans adopted by init
+// included) without blocking, and reports whether pid was among them, with its
+// wait status.
+func reapChildren(pid int) (bool, syscall.WaitStatus) {
+	var found bool
+	var status syscall.WaitStatus
+	for {
+		var ws syscall.WaitStatus
+		got, err := syscall.Wait4(-1, &ws, syscall.WNOHANG, nil)
+		if err == syscall.EINTR {
+			continue
+		}
+		if err != nil || got <= 0 {
+			return found, status
+		}
+		if got == pid {
+			found, status = true, ws
+		}
+	}
+}
+
+// waitDockerReady blocks until the Docker API on sock answers GET /_ping with
+// "OK", for at most timeout. It returns nil when ready, and otherwise:
+//   - *dockerdExitError: dockerd (pid, a child of init) exited and was reaped;
+//   - a plain error: the deadline passed;
+//   - *abortBootError: a signal arrived on sigs or ctx was cancelled.
+//
+// The orphans that init adopts are reaped on every tick, and a ping in flight
+// never delays the deadline, the signals or the exit check. Every outcome is
+// logged; for the first two the caller starts the executor anyway.
+func waitDockerReady(ctx context.Context, log zerowrap.Logger, sock string, pid int, timeout time.Duration, sigs <-chan os.Signal) error {
+	start := time.Now()
+	log.Info().Str("socket", sock).Dur("timeout", timeout).Msg("init: waiting for the Docker API")
+	wctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel() // also aborts a ping in flight
+	client := &http.Client{Transport: &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, "unix", sock)
+		},
+		DisableKeepAlives: true,
+	}}
+	defer client.CloseIdleConnections()
+	ticker := time.NewTicker(dockerPollInterval)
+	defer ticker.Stop()
+
+	var pinging <-chan bool // result of the ping in flight, nil if none
+	startPing := func() {
+		ch := make(chan bool, 1)
+		pinging = ch
+		go func() { ch <- dockerPing(wctx, client) }()
+	}
+	checkExit := func() error {
+		if ok, ws := reapChildren(pid); ok {
+			err := &dockerdExitError{status: ws}
+			log.Warn().Err(err).Msg("init: dockerd died before its API was ready; starting the executor anyway (jobs using Docker will fail)")
+			return err
+		}
+		return nil
+	}
+	if err := checkExit(); err != nil {
+		return err
+	}
+	startPing()
+	for {
+		select {
+		case ok := <-pinging:
+			pinging = nil
+			if ok {
+				log.Info().Dur("after", time.Since(start).Round(time.Millisecond)).Msg("init: the Docker API is ready")
+				return nil
+			}
+		case <-ticker.C:
+			if err := checkExit(); err != nil {
+				return err
+			}
+			if pinging == nil {
+				startPing()
+			}
+		case sig := <-sigs:
+			return abortBoot(log, sig)
+		case <-wctx.Done():
+			if ctx.Err() != nil {
+				return abortBoot(log, syscall.SIGTERM)
+			}
+			log.Warn().Dur("timeout", timeout).Msg("init: the Docker API did not answer in time; starting the executor anyway (jobs using Docker will fail)")
+			return fmt.Errorf("docker API not ready after %s", timeout)
+		}
+	}
+}
+
+func abortBoot(log zerowrap.Logger, sig os.Signal) error {
+	code := 128 + int(syscall.SIGTERM)
+	if s, ok := sig.(syscall.Signal); ok {
+		code = 128 + int(s)
+	}
+	log.Warn().Str("signal", fmt.Sprint(sig)).Msg("init: shutdown signal while waiting for the Docker API; not starting the executor, stopping dockerd")
+	return &abortBootError{code: code}
+}
+
+// dockerPing reports whether GET /_ping answers 200 "OK".
+func dockerPing(ctx context.Context, client *http.Client) bool {
+	// One ping is bounded on its own so that a daemon that accepts and stalls
+	// does not hold the others back; ctx (the readiness deadline) bounds it too.
+	ctx, cancel := context.WithTimeout(ctx, dockerPingTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://docker/_ping", nil)
+	if err != nil {
+		return false
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return false
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 16))
+	return resp.StatusCode == http.StatusOK && strings.TrimSpace(string(body)) == "OK"
 }
 
 // spawn starts argv[0] as a child (own process group) without os/exec, so that
