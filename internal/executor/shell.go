@@ -291,9 +291,21 @@ type Script struct {
 // so the file is created through root, exclusively and without following links
 // (see createExcl).
 func WriteScript(root *os.Root, p ShellPlan, contents string) (Script, error) {
+	return WriteScriptFor(root, p, contents, nil)
+}
+
+// WriteScriptFor is WriteScript for a shell that sees the file under another
+// path: tr translates the host path for the arguments (a job container sees
+// RUNNER_TEMP as /__w/_temp, ScriptHandler.cs:252). Script.Path stays the
+// host's.
+func WriteScriptFor(root *os.Root, p ShellPlan, contents string, tr func(string) string) (Script, error) {
 	name := uuid.NewString() + p.Extension()
 	path := filepath.Join(root.Name(), name)
-	args, err := FormatArguments(p.ArgFormat, path)
+	shown := path
+	if tr != nil {
+		shown = tr(path)
+	}
+	args, err := FormatArguments(p.ArgFormat, shown)
 	if err != nil {
 		return Script{}, err
 	}
@@ -314,4 +326,20 @@ func ResolveWorkingDirectory(workspace, dir string) string {
 		return workspace
 	}
 	return strings.TrimRight(workspace, "/") + "/" + dir
+}
+
+// PlanShellInContainer is the shell of a step that runs in the job container
+// (ScriptHandler.cs:73-117, :182-232 with isContainerStepHost): nothing is
+// looked up, the shell is found by the container itself, so the default is
+// always "sh -e {0}" even when the image has bash.
+func PlanShellInContainer(shell string) (ShellPlan, error) {
+	if shell == "" {
+		return checkFormat(ShellPlan{Command: "sh", CommandPath: "sh", ArgFormat: ScriptArgumentsFormat("sh")})
+	}
+	cmd, args := ParseShellOption(shell)
+	format := strings.TrimLeft(args, " \t\n\v\f\r")
+	if format == "" {
+		format = ScriptArgumentsFormat(cmd)
+	}
+	return checkFormat(ShellPlan{Command: cmd, CommandPath: cmd, ArgFormat: format})
 }

@@ -47,7 +47,8 @@ inspect) case "$*" in
 port) [ -f $D/ports ] && cat $D/ports ;;
 logs) echo "service log of $3" ;;
 rm) echo "$3" ;;
-exec) [ -f $D/hang_exec ] && { trap 'exit 130' INT TERM; while :; do sleep 0.05; done; }
+exec) [ -f $D/exec_env ] && echo "ENV GITHUB_WORKSPACE=$GITHUB_WORKSPACE RUNNER_TEMP=$RUNNER_TEMP HOME=${HOME:-<unset>} GITHUB_OUTPUT=$GITHUB_OUTPUT GITHUB_EVENT_PATH=$GITHUB_EVENT_PATH"
+  [ -f $D/hang_exec ] && { trap 'exit 130' INT TERM; while :; do sleep 0.05; done; }
   [ -f $D/exec_out ] && cat $D/exec_out ;;
 esac
 exit 0
