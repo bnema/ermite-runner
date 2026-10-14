@@ -157,14 +157,19 @@ func (o *outbox) Step(s *ermite.StepUpdate, anns map[int32][]*ermite.Annotation)
 	o.cond.Broadcast()
 }
 
-// Summary queues the summary of a step.
+// Summary queues the summary of a step. Its bytes count with the log text in
+// the bounded memory of the outbox: it blocks while too much is queued.
 func (o *outbox) Summary(step int32, markdown string) {
 	o.mu.Lock()
+	for o.queued > maxQueuedBytes && !o.dead && !o.closing {
+		o.cond.Wait()
+	}
 	if o.dead {
 		o.mu.Unlock()
 		return
 	}
 	o.events = append(o.events, event{summary: &summary{step, markdown}})
+	o.queued += len(markdown) + 32
 	o.mu.Unlock()
 	o.cond.Broadcast()
 }
@@ -238,6 +243,10 @@ func (o *outbox) next(ctx context.Context) []event {
 	first := o.events[0]
 	if first.step != nil || first.summary != nil {
 		o.events = o.events[1:]
+		if first.summary != nil {
+			o.queued -= len(first.summary.markdown) + 32
+			o.cond.Broadcast() // producers waiting for room
+		}
 		return []event{first}
 	}
 	// A run of lines of the same step, within the limits.

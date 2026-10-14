@@ -5,12 +5,15 @@ package host
 import (
 	"context"
 	"errors"
+	"io"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+	"unsafe"
 
 	"connectrpc.com/connect"
+	"github.com/bnema/zerowrap"
 
 	ermite "bnema.dev/ermite-api/gen/ermite"
 
@@ -280,15 +283,128 @@ func TestSummaryOverOneMiBIsDropped(t *testing.T) {
 	sc := func(_ *testing.T, c *execstream.Conn, _ *execpb.Run, _ <-chan *execpb.Cancel) {
 		stepStart(c, 1, "Set up job")
 		sumFrame(c, 1, strings.Repeat("x", 1<<20+1))
-		sumFrame(c, 1, strings.Repeat("y", 1<<20))
 		stepDone(c, 1, "Set up job", cOK)
+		stepStart(c, 2, "Run it")
+		sumFrame(c, 2, strings.Repeat("y", 1<<20))
+		stepDone(c, 2, "Run it", cOK)
 		jobDone(c, cOK, nil, false)
 	}
 	h := runResultsJob(t, sc, nil)
 	h.srv.mu.Lock()
 	defer h.srv.mu.Unlock()
-	if len(h.srv.summaries[1]) != 1<<20 || h.srv.summaries[1][0] != 'y' {
-		t.Errorf("summary of %d bytes", len(h.srv.summaries[1]))
+	if _, has := h.srv.summaries[1]; has {
+		t.Error("a summary over 1 MiB was sent")
+	}
+	if len(h.srv.summaries[2]) != 1<<20 || h.srv.summaries[2][0] != 'y' {
+		t.Errorf("summary of %d bytes", len(h.srv.summaries[2]))
+	}
+}
+
+// One summary and one list of annotations per step, sent while the step runs
+// (GO-002): a second one, or one for a completed step, is the guest
+// misbehaving, and it would let it queue unbounded data.
+func TestGuestSecondSummaryFailsTheJob(t *testing.T) {
+	hostile(t, "a summary for step 1, which already sent them", func(_ *testing.T, c *execstream.Conn, _ *execpb.Run, _ <-chan *execpb.Cancel) {
+		stepStart(c, 1, "Set up job")
+		sumFrame(c, 1, "one")
+		sumFrame(c, 1, "two")
+		time.Sleep(50 * time.Millisecond)
+	})
+}
+
+func TestGuestSummaryForACompletedStepFailsTheJob(t *testing.T) {
+	hostile(t, "a summary for step 1, which is completed", func(_ *testing.T, c *execstream.Conn, _ *execpb.Run, _ <-chan *execpb.Cancel) {
+		stepStart(c, 1, "Set up job")
+		stepDone(c, 1, "Set up job", cOK)
+		sumFrame(c, 1, "late")
+		time.Sleep(50 * time.Millisecond)
+	})
+}
+
+func TestGuestSecondAnnotationListFailsTheJob(t *testing.T) {
+	hostile(t, "annotations for step 1, which already sent them", func(_ *testing.T, c *execstream.Conn, _ *execpb.Run, _ <-chan *execpb.Cancel) {
+		stepStart(c, 1, "Set up job")
+		annFrame(c, 1, &execpb.Annotation{Level: lWarn, Message: "a"})
+		annFrame(c, 1, &execpb.Annotation{Level: lWarn, Message: "b"})
+		time.Sleep(50 * time.Millisecond)
+	})
+}
+
+func TestGuestAnnotationsForACompletedStepFailTheJob(t *testing.T) {
+	hostile(t, "annotations for step 1, which is completed", func(_ *testing.T, c *execstream.Conn, _ *execpb.Run, _ <-chan *execpb.Cancel) {
+		stepStart(c, 1, "Set up job")
+		stepDone(c, 1, "Set up job", cOK)
+		annFrame(c, 1, &execpb.Annotation{Level: lWarn, Message: "late"})
+		time.Sleep(50 * time.Millisecond)
+	})
+}
+
+// The summaries count in the memory the outbox bounds, and backpressure holds
+// the producer while the server does not answer (GO-002).
+func TestSummaryBytesAreBoundedByTheOutbox(t *testing.T) {
+	release := make(chan struct{})
+	cl := &blockingSummaryClient{release: release}
+	o := newOutbox(cl, "j1", fastTiming(), func(error) {}, zerowrapNop())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	o.start(ctx)
+	defer close(release)
+	big := strings.Repeat("x", 1<<20)
+	go func() {
+		for i := 1; i <= 40; i++ { // 40 MiB offered, 16 MiB allowed in memory
+			o.Summary(int32(i), big)
+		}
+	}()
+	time.Sleep(500 * time.Millisecond)
+	o.mu.Lock()
+	queued := o.queued
+	o.mu.Unlock()
+	if queued > maxQueuedBytes+len(big)+64 {
+		t.Errorf("%d bytes queued, the bound is %d", queued, maxQueuedBytes)
+	}
+	if queued < maxQueuedBytes/2 {
+		t.Errorf("only %d bytes queued: the summaries are not counted?", queued)
+	}
+}
+
+type blockingSummaryClient struct {
+	stubClient
+	release chan struct{}
+}
+
+func (c *blockingSummaryClient) UploadSummary(ctx context.Context, _ *connect.Request[ermite.UploadSummaryRequest]) (*connect.Response[ermite.UploadSummaryResponse], error) {
+	select {
+	case <-c.release:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	return connect.NewResponse(&ermite.UploadSummaryResponse{}), nil
+}
+
+// A string cut by the host must not keep the allocation of the frame the guest
+// sent it in (GO-003): the cut copy has its own memory.
+func TestCutStringsDoNotRetainTheGuestAllocation(t *testing.T) {
+	big := strings.Repeat("a", 1<<20)
+	t0 := cutRunes(big, 255)
+	if len(t0) != 255 {
+		t.Fatal(len(t0))
+	}
+	if unsafe.StringData(t0) == unsafe.StringData(big) {
+		t.Error("cutRunes returns a substring of its argument")
+	}
+	name := cutName(big)
+	if len(name) != maxNameLen || unsafe.StringData(name) == unsafe.StringData(big) {
+		t.Error("cutName returns a substring of its argument")
+	}
+	// an annotation that is kept whole (not cut) is not copied: its message is
+	// within 4096 characters, a frame cannot make it retain more than that
+	// through a substring because the host does not slice it.
+	a := annotationsFrom(1, []*execpb.Annotation{{Level: lWarn, Message: "m", Title: big, File: strings.Repeat("f", 2000)}})
+	if len(a) != 1 || len(a[0].Title) != 255 || unsafe.StringData(a[0].Title) == unsafe.StringData(big) {
+		t.Errorf("title %d", len(a[0].Title))
+	}
+	if a[0].File != "" {
+		t.Error("a file over 1,024 characters is dropped")
 	}
 }
 
@@ -306,3 +422,7 @@ type discard struct{}
 
 func (discard) Write(p []byte) (int, error) { return len(p), nil }
 func (discard) Read([]byte) (int, error)    { select {} }
+
+func zerowrapNop() zerowrap.Logger {
+	return zerowrap.New(zerowrap.Config{Level: "error", Format: "json", Output: io.Discard})
+}

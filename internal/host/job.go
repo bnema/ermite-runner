@@ -74,6 +74,10 @@ type jobRun struct {
 	// executor sent for steps that have not completed yet (see results.go).
 	features jobFeatures
 	annLists map[int32][]*ermite.Annotation
+	// annSeen and sumSeen are the steps that sent their annotations and their
+	// summary: each is sent once.
+	annSeen, sumSeen map[int32]bool
+	annBytes         int // bytes of annLists
 	// hard stops the sandbox at once; set before the session starts.
 	hard    func()
 	result  *execpb.JobResult
@@ -371,6 +375,8 @@ func (j *jobRun) logLine(l *execpb.Log) {
 }
 
 // cutName bounds a step name to what the server keeps, on a character boundary.
+// The result is a copy: a substring would keep the whole name the guest sent
+// alive (see cutRunes).
 func cutName(s string) string {
 	if len(s) <= maxNameLen {
 		return strings.ToValidUTF8(s, "\ufffd")
@@ -379,7 +385,7 @@ func cutName(s string) string {
 	for !utf8.ValidString(s) && len(s) > 0 {
 		s = s[:len(s)-1]
 	}
-	return s
+	return strings.Clone(s)
 }
 
 func cloneStep(u *ermite.StepUpdate) *ermite.StepUpdate {

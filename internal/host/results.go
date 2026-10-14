@@ -4,6 +4,7 @@ package host
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"unicode/utf8"
 
@@ -80,6 +81,9 @@ func levelOf(l execpb.AnnotationLevel) ermite.AnnotationLevel {
 }
 
 // cutRunes bounds s to n characters (code points), after making it valid UTF-8.
+// A string that is cut is copied: a substring would keep the whole allocation
+// of what the guest sent (up to a frame of 2 MiB) alive for as long as the
+// short string is, and a guest can open 1,000 steps.
 func cutRunes(s string, n int) string {
 	s = strings.ToValidUTF8(s, "\ufffd")
 	if utf8.RuneCountInString(s) <= n {
@@ -88,7 +92,7 @@ func cutRunes(s string, n int) string {
 	i := 0
 	for k := range s {
 		if i == n {
-			return s[:k]
+			return strings.Clone(s[:k])
 		}
 		i++
 	}
@@ -137,16 +141,52 @@ func (j *jobRun) stepAnnotations(a *execpb.StepAnnotations) {
 	if j.violation != "" || !j.features.annotations {
 		return
 	}
-	if _, ok := j.steps[a.Step]; !ok {
+	if why := j.resultFrameProblemLocked("annotations", a.Step, j.annSeen); why != "" {
 		j.mu.Unlock()
-		j.violate("annotations for step %d, which has not started", a.Step)
+		j.violate("%s", why)
 		j.mu.Lock()
 		return
 	}
 	if j.annLists == nil {
 		j.annLists = map[int32][]*ermite.Annotation{}
 	}
-	j.annLists[a.Step] = annotationsFrom(a.Step, a.Annotations)
+	j.annSeen[a.Step] = true
+	list := annotationsFrom(a.Step, a.Annotations)
+	// The lists wait in memory until their step completes and the call that
+	// carries them is answered: bounded like the queue of the log.
+	n := annotationBytes(list)
+	if j.annBytes+n > maxQueuedBytes {
+		j.log.Warn().Int32("step", a.Step).Int("bytes", n).Msg("too many annotations are waiting to be sent: this step's are dropped")
+		return
+	}
+	j.annBytes += n
+	j.annLists[a.Step] = list
+}
+
+func annotationBytes(l []*ermite.Annotation) int {
+	n := 0
+	for _, a := range l {
+		n += len(a.Title) + len(a.Message) + len(a.File) + 64
+	}
+	return n
+}
+
+// resultFrameProblemLocked checks a frame that carries a result of a step
+// (annotations, summary). The executor sends each at most once per step, while
+// the step runs, just before it completes (the runner reads GITHUB_STEP_SUMMARY
+// once, after the step, and keeps the issues of a step in one list): anything
+// else is the guest misbehaving, and would let it queue unbounded data.
+func (j *jobRun) resultFrameProblemLocked(what string, step int32, seen map[int32]bool) string {
+	u, ok := j.steps[step]
+	switch {
+	case !ok:
+		return fmt.Sprintf("%s for step %d, which has not started", what, step)
+	case u.State == ermite.StepState_STEP_STATE_COMPLETED:
+		return fmt.Sprintf("%s for step %d, which is completed", what, step)
+	case seen[step]:
+		return fmt.Sprintf("%s for step %d, which already sent them", what, step)
+	}
+	return ""
 }
 
 // takeAnnotations returns the list recorded for step n, once.
@@ -156,22 +196,26 @@ func (j *jobRun) takeAnnotations(n int32) map[int32][]*ermite.Annotation {
 		return nil
 	}
 	delete(j.annLists, n)
+	j.annBytes -= annotationBytes(l)
 	return map[int32][]*ermite.Annotation{n: l}
 }
 
 // stepSummary queues UploadSummary for a step that wrote GITHUB_STEP_SUMMARY.
+// The bytes count in the bounded memory of the outbox, like log lines: the call
+// blocks while too much is queued.
 func (j *jobRun) stepSummary(s *execpb.StepSummary) {
 	j.mu.Lock()
 	if j.violation != "" || !j.features.summaries {
 		j.mu.Unlock()
 		return
 	}
-	_, started := j.steps[s.Step]
-	j.mu.Unlock()
-	if !started {
-		j.violate("a summary for step %d, which has not started", s.Step)
+	if why := j.resultFrameProblemLocked("a summary", s.Step, j.sumSeen); why != "" {
+		j.mu.Unlock()
+		j.violate("%s", why)
 		return
 	}
+	j.sumSeen[s.Step] = true
+	j.mu.Unlock()
 	md := strings.ToValidUTF8(s.Markdown, "\ufffd")
 	if len(md) > maxSummaryBytes {
 		j.log.Warn().Int32("step", s.Step).Int("bytes", len(md)).Msg("a step summary over 1 MiB is dropped")
