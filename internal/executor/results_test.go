@@ -394,3 +394,39 @@ func TestEmbeddedScopeSharesTheOuterStep(t *testing.T) {
 		t.Errorf("%v", g)
 	}
 }
+
+// Several catastrophic matchers and a step timeout: the step ends at its
+// timeout, not after every matcher has used its 3 attempts on every line
+// (GO-004). Without the cancellation of the matchers the 8 matchers x 3
+// attempts x 1 s of the first line alone hold the step for 24 s.
+func TestCatastrophicMatchersDoNotHoldAStepPastItsTimeout(t *testing.T) {
+	needTools(t, "bash")
+	var matchers []string
+	var adds []string
+	for i := range 8 {
+		matchers = append(matchers, fmt.Sprintf(`{"owner":"bad%d","pattern":[{"regexp":"^((a+)+)$","message":1}]}`, i))
+	}
+	adds = append(adds, `echo '{"problemMatcher":[`+strings.Join(matchers, ",")+`]}' > bad.json`)
+	start := time.Now()
+	rr, _ := runResults(t, wfHead+`    steps:
+      - name: slow lines
+        timeout-minutes: 1
+        run: |
+          `+adds[0]+`
+          echo "::add-matcher::bad.json"
+          for i in 1 2 3 4 5 6; do echo "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!"; done
+          sleep 30
+`, func(c *Config) { c.StepTimeoutSkew = -(60*time.Second - 1500*time.Millisecond) })
+	took := time.Since(start)
+	if took > 8*time.Second {
+		t.Errorf("the step overran its timeout: %v", took)
+	}
+	log := logOf(rr.step(t, "slow lines"))
+	if !strings.Contains(log, "The action 'slow lines' has timed out after 1 minutes.") {
+		t.Errorf("no timeout message:\n%s", log)
+	}
+	// the lines that were not matched are still logged
+	if strings.Count(log, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!") < 6 {
+		t.Errorf("lines lost after the cancellation:\n%s", log)
+	}
+}
