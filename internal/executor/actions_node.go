@@ -51,11 +51,17 @@ func (j *job) nodeEnvFlag(name string, wf *ordered) envFlag {
 
 // nodeVersionDefault is NodeUtil.DetermineActionsNodeVersion
 // (NodeUtil.cs:50-110) for an action that says node20: the version the action
-// runs on and the warning of a conflicting configuration. useNode24ByDefault is
-// the server's flag, ActionsConfig.Node24ByDefault here.
+// runs on and the warning of a conflicting configuration. useNode24ByDefault and
+// requireNode24 are the server's flags, ActionsConfig.Node24ByDefault and
+// RequireNode24 here.
 func (j *job) nodeVersionDefault(wf *ordered) (version, warning string) {
 	force := j.nodeEnvFlag(forceNode24Var, wf)
 	allow := j.nodeEnvFlag(allowUnsecureVar, wf)
+	if j.cfg.Actions.RequireNode24 {
+		// Phase 3 (NodeUtil.cs:60-63): node24 whatever the variables say, and
+		// no warning about them.
+		return node24Name, ""
+	}
 	byDefault := j.cfg.Actions.Node24ByDefault
 	bothWorkflow := force.on && allow.on && force.fromWorkflow && allow.fromWorkflow
 	bothSystem := force.on && allow.on && force.fromSystem && allow.fromSystem
@@ -106,7 +112,7 @@ func (j *job) nodeVersionFor(s *stepRun, def *actionDef) error {
 			j.mu.Lock()
 			j.upgradedToNode24 = appendUnique(j.upgradedToNode24, actionName(s.n))
 			j.mu.Unlock()
-			if j.cfg.Actions.Node24ByDefault {
+			if j.cfg.Actions.Node24ByDefault && !j.cfg.Actions.RequireNode24 {
 				j.out(s.num, "Node 20 is being deprecated. This workflow is running with Node 24 by default. "+
 					"If you need to temporarily use Node 20, you can set the ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION=true environment variable. "+
 					"For more information see: "+node20DeprecationURL)

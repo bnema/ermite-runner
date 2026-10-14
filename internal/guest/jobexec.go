@@ -256,7 +256,7 @@ func runJob(ctx context.Context, conn *execstream.Conn, cfg ExecConfig, spec *ex
 		Runner:        executor.RunnerInfo{Name: spec.GetRunnerName(), Environment: env},
 		RunnerVersion: spec.GetRunnerVersion(),
 		Home:          su.Home, ToolCache: os.Getenv("RUNNER_TOOL_CACHE"), BaseEnv: stepEnv(os.Environ(), su), Credential: su.Credential,
-		Debug: spec.GetDebug(), Reporter: rep, Actions: executor.ActionsConfig{Resolver: res.resolve}, Log: zerowrap.FromCtx(ctx),
+		Debug: spec.GetDebug(), Reporter: rep, Actions: executor.DefaultActionsConfig(res.resolve), Log: zerowrap.FromCtx(ctx),
 		SendAnnotations: spec.GetSendAnnotations(), SendSummaries: spec.GetSendSummaries(),
 		TermAfter: cfg.TermAfter, KillAfter: cfg.KillAfter, WaitDelay: cfg.WaitDelay,
 	})

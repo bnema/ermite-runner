@@ -202,6 +202,57 @@ func TestManifestErrors(t *testing.T) {
 	}
 }
 
+// The phase of github.com today (recordings act-node-version, act-node-legacy,
+// act-node-force24): node12, node16 and node20 actions run on node24 whatever
+// the variables say, and the job ends with one warning that lists them.
+func TestNodeVersionGitHubPhase(t *testing.T) {
+	const tail = ". For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/"
+	act := func(using string) string {
+		return "name: a\nruns:\n  using: " + using + "\n  main: m.sh\n"
+	}
+	tree := files{"a/action.yml": act("node20"), "a/m.sh": "echo ran\n", "n12/action.yml": act("node12"), "n12/m.sh": "echo ran\n",
+		"n16/action.yml": act("node16"), "n16/m.sh": "echo ran\n", "n24/action.yml": act("node24"), "n24/m.sh": "echo ran\n"}
+	run := func(yaml string) *recorder {
+		t.Helper()
+		rec, res := actionRun(t, tree, yaml, func(c *Config) { c.Actions = DefaultActionsConfig(nil); c.Actions.ExternalsDir = fakeNode(t) })
+		if res.Conclusion != ConclusionSuccess {
+			t.Fatalf("%+v\n%s", res, logOf(rec.steps[1]))
+		}
+		return rec
+	}
+	// Order: case-insensitive, one entry per action; node24 actions are not listed.
+	rec := run("      - uses: ./n16\n      - uses: ./n24\n      - uses: ./a\n      - uses: ./n12\n      - uses: ./a\n")
+	want := "##[warning]Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: ./a, ./n12, ./n16" + tail
+	if got := logOf(rec.steps[len(rec.steps)-1]); !strings.Contains(got, "Cleaning up orphan processes\n"+want) {
+		t.Errorf("complete job:\n%s", got)
+	}
+	for _, name := range []string{"Run ./n12", "Run ./n16", "Run ./a", "Run ./n24"} {
+		if got := logOf(rec.step(t, name)); !strings.Contains(got, "[node24]") {
+			t.Errorf("%s: %s", name, got)
+		}
+	}
+	// The variables change nothing: not even ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION, nor both.
+	for _, env := range []string{
+		"          ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: 'true'\n",
+		"          FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'\n",
+		"          FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'\n          ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: 'true'\n",
+	} {
+		rec := run("      - uses: ./a\n        env:\n" + env)
+		got := logOf(rec.step(t, "Run ./a"))
+		if !strings.Contains(got, "[node24]") || strings.Contains(got, "Both ") || strings.Contains(got, "being deprecated") {
+			t.Errorf("%s: %s", env, got)
+		}
+		if last := logOf(rec.steps[len(rec.steps)-1]); !strings.Contains(last, "forced to run on Node.js 24: ./a"+tail) {
+			t.Errorf("%s: complete job:\n%s", env, last)
+		}
+	}
+	// Only node24 actions: no warning.
+	rec = run("      - uses: ./n24\n")
+	if got := logOf(rec.steps[len(rec.steps)-1]); strings.Contains(got, "Node.js 20 is deprecated") {
+		t.Errorf("node24 only:\n%s", got)
+	}
+}
+
 func TestNodeVersionRules(t *testing.T) {
 	act := func(using string) files {
 		return files{"a/action.yml": "name: a\nruns:\n  using: " + using + "\n  main: m.sh\n", "a/m.sh": "echo ran\n"}

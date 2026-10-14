@@ -46,12 +46,26 @@ type ActionsConfig struct {
 	// (HandlerFactory.cs, NodeUtil.DetermineActionsNodeVersion): ermite has no
 	// feature flags, so the default is pinned here.
 	Node24ByDefault bool
+	// RequireNode24 is the server flag actions.runner.requirenode24 (phase 3
+	// of the migration): every node20 action runs on node24 whatever
+	// FORCE_JAVASCRIPT_ACTIONS_TO_NODE24 and ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION
+	// say, without the "being deprecated" notice or the conflict warning.
+	// github.com does so today (recordings act-node-*). The zero value is the
+	// runner's phase 1; the guest sets both flags (see DefaultActionsConfig).
+	RequireNode24 bool
 	// Containers are the time limits of the docker commands of job containers
 	// and services; the zero value means the defaults.
 	Containers ContainerTimeouts
 	// Backoff, when set, replaces the random 10 to 30 s wait between download
 	// attempts (tests).
 	Backoff func() time.Duration
+}
+
+// DefaultActionsConfig is the configuration of a job in the sandbox: GitHub's
+// current node migration phase, in which node12, node16 and node20 actions run
+// on node24 and the job ends with the "forced to run on Node.js 24" warning.
+func DefaultActionsConfig(r Resolver) ActionsConfig {
+	return ActionsConfig{Resolver: r, Node24ByDefault: true, RequireNode24: true}
 }
 
 const defaultExternalsDir = "/home/runner/externals"

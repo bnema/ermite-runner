@@ -4,6 +4,7 @@ package executor
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -113,6 +114,69 @@ func TestCatastrophicMatcherIsRemovedAfterThreeTimeouts(t *testing.T) {
 	next := logOf(rr.step(t, "next step"))
 	if strings.Count(next, "Removing issue matcher 'catastrophic'") != 1 || !strings.Contains(next, "##[warning]good: next step") {
 		t.Errorf("next step:\n%s", next)
+	}
+}
+
+// Mirror of the recording match-catastrophic: the removal is per step
+// (OutputManager.Remove edits the list of the step), so the next step, which
+// does not add anything, starts from the matchers of the job and times out and
+// removes the matcher again after 3 more timeouts; "good" works in both.
+func TestCatastrophicMatcherRemovalIsPerStep(t *testing.T) {
+	needTools(t, "bash")
+	rr, res := runResults(t, wfHead+`    steps:
+      - name: prepare
+        run: |
+          cat > bad.json <<'JSON'
+          {"problemMatcher":[{"owner":"catastrophic","pattern":[{"regexp":"^((a+)+)$","message":1}]}]}
+          JSON
+          cat > good.json <<'JSON'
+          {"problemMatcher":[{"owner":"good","severity":"warning","pattern":[{"regexp":"^good: (.+)$","message":1}]}]}
+          JSON
+      - name: first
+        run: |
+          echo "::add-matcher::bad.json"
+          echo "::add-matcher::good.json"
+          echo "good: before the long line"
+          echo "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!"
+          echo "good: after the long line"
+      - name: second
+        run: |
+          echo "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!"
+          echo "aaa"
+          echo "good: still alive"
+`, nil)
+	if res.Conclusion != ConclusionSuccess {
+		t.Fatalf("%+v", res)
+	}
+	const removing = "##[warning]Removing issue matcher 'catastrophic'. Matcher failed 3 times. Error: The Regex engine has timed out while trying to match a pattern to an input string."
+	// The lines of the log, in order, with the long text of the removal cut.
+	lines := func(log string) []string {
+		var out []string
+		for _, l := range strings.Split(log, "\n") {
+			if strings.HasPrefix(l, removing) {
+				l = removing
+			}
+			out = append(out, l)
+		}
+		return out
+	}
+	has := func(log string, want ...string) bool {
+		got := lines(log)
+		for i := range got {
+			if slices.Equal(got[i:min(i+len(want), len(got))], want) {
+				return true
+			}
+		}
+		return false
+	}
+	const long = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!"
+	first := logOf(rr.step(t, "first"))
+	if !has(first, "##[warning]good: before the long line", removing, long, "##[warning]good: after the long line") {
+		t.Errorf("first:\n%s", first)
+	}
+	second := logOf(rr.step(t, "second"))
+	if !has(second, removing, long, "aaa", "##[warning]good: still alive") {
+		t.Errorf("second:\n%s", second)
 	}
 }
 
