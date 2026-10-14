@@ -114,7 +114,10 @@ func matcherTimeout(getenv func(string) string) time.Duration {
 }
 
 type outputManager struct {
-	s       *stepRun
+	s *stepRun
+	// cancel is closed when the step is cancelled or times out: the matchers
+	// then stop (see stopped). Nil means never.
+	cancel  <-chan struct{}
 	root    *matcherRoot
 	timeout time.Duration
 
@@ -125,8 +128,14 @@ type outputManager struct {
 }
 
 // newOutputManager subscribes to the matchers of the job.
-func newOutputManager(s *stepRun) *outputManager {
-	o := &outputManager{s: s, root: s.j.matchers, timeout: matcherTimeout(s.j.getenv), dirMap: map[string]string{}, hasDir: map[string]bool{}}
+//
+// cancel is the cancellation channel of the step (the one the process gets):
+// once it is closed no matcher runs any more. The runner has no such rule, but
+// its worker waits for the output of a step with the step's cancellation
+// token, and a pile of lines against catastrophic patterns (1 s each, 3
+// attempts, per matcher) would hold a step past its timeout for minutes.
+func newOutputManager(s *stepRun, cancel <-chan struct{}) *outputManager {
+	o := &outputManager{s: s, cancel: cancel, root: s.j.matchers, timeout: matcherTimeout(s.j.getenv), dirMap: map[string]string{}, hasDir: map[string]bool{}}
 	o.mu.Lock()
 	o.root.subscribe(o)
 	for _, c := range o.root.snapshot() {
@@ -136,6 +145,48 @@ func newOutputManager(s *stepRun) *outputManager {
 	}
 	o.mu.Unlock()
 	return o
+}
+
+// errStopped is the result of a match that was abandoned because the step was
+// cancelled.
+var errStopped = msgError("matching stopped: the step was cancelled")
+
+// runMatch is m.match, abandoned when the step is cancelled while it runs: the
+// engine cannot be interrupted, so it goes on in its goroutine until its own
+// timeout, but the step does not wait for it and the matcher is not used again
+// (stopped is true from then on).
+func (o *outputManager) runMatch(m *issueMatcher, line string) (*issueMatch, error) {
+	if o.cancel == nil {
+		return m.match(line)
+	}
+	type result struct {
+		m   *issueMatch
+		err error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		r, err := m.match(line)
+		ch <- result{r, err}
+	}()
+	select {
+	case r := <-ch:
+		return r.m, r.err
+	case <-o.cancel:
+		return nil, errStopped
+	}
+}
+
+// stopped reports whether the step was cancelled.
+func (o *outputManager) stopped() bool {
+	if o.cancel == nil {
+		return false
+	}
+	select {
+	case <-o.cancel:
+		return true
+	default:
+		return false
+	}
 }
 
 func (o *outputManager) dispose() { o.root.unsubscribe(o) }
@@ -188,7 +239,7 @@ func (o *outputManager) onData(line string) {
 	o.mu.Lock()
 	matchers := append([]*issueMatcher(nil), o.matchers...)
 	o.mu.Unlock()
-	if len(matchers) > 0 {
+	if len(matchers) > 0 && !o.stopped() {
 		stripped := line
 		if strings.Contains(line, colorCodePrefix) {
 			stripped, _ = colorCodeRegex.Replace(line, "", -1, -1)
@@ -196,10 +247,16 @@ func (o *outputManager) onData(line string) {
 		for _, m := range matchers {
 			var match *issueMatch
 			for attempt := 1; attempt <= maxMatcherAttempts; attempt++ {
-				mt, err := m.match(stripped)
+				if o.stopped() {
+					break // the lines that are left are only logged
+				}
+				mt, err := o.runMatch(m, stripped)
 				if err == nil {
 					match = mt
 					break
+				}
+				if o.stopped() {
+					break // a timeout that the cancellation caused counts for nothing
 				}
 				if attempt < maxMatcherAttempts {
 					s.Debug(fmt.Sprintf("Timeout processing issue matcher '%s' against line '%s'. Exception: System.Text.RegularExpressions.RegexMatchTimeoutException: %s", m.owner, stripped, err.Error()))

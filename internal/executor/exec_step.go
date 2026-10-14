@@ -192,7 +192,7 @@ func (j *job) processEnv(stepEnv *ordered) []string {
 // step.
 func (j *job) startProcess(s *stepRun, plan ShellPlan, dir string, argv []string, stepCancel <-chan struct{}) stepResult {
 	num := s.num
-	om := newOutputManager(s)
+	om := newOutputManager(s, stepCancel)
 	defer om.dispose()
 	res, err := runProcess(procSpec{
 		Argv: argv, Dir: dir, Env: j.processEnv(s.env), Credential: j.cfg.Credential,
