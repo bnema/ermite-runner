@@ -121,6 +121,11 @@ func (j *job) startContainer(s *stepRun, c *container, cancel <-chan struct{}) e
 	if len(out) == 0 || out[0] == "" {
 		return ghErrorf("Value cannot be null. (Parameter 'container.ContainerId')")
 	}
+	// docker create prints the id and nothing else; anything else (the help
+	// text of an option in options:, say) is not an id to use or to remove.
+	if !containerIDRe.MatchString(out[0]) {
+		return ghErrorf("Docker create did not return a container id: '%s'", out[0])
+	}
 	c.id = out[0]
 	code, err = j.dockerCode(s, j.newDockerCmd("start", raw(c.id)), cancel)
 	if err != nil {

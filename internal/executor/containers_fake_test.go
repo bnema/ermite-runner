@@ -37,6 +37,7 @@ network) ;;
 login) cat > $D/login_stdin ;;
 pull) if [ -f $D/pull_fail ]; then n=$(cat $D/pull_fail); if [ "$n" -gt 0 ]; then echo $((n-1)) > $D/pull_fail; echo "pull denied"; exit 1; fi; fi; echo "pulled $2" ;;
 create) [ -f $D/create_fail ] && { echo "unknown flag"; exit 125; }
+  [ -f $D/create_out ] && { cat $D/create_out; exit 0; }
   n=$(cat $D/seq 2>/dev/null || echo 0); n=$((n+1)); echo $n > $D/seq; printf "%064d\n" $n ;;
 start) echo "$2" ;;
 inspect) case "$*" in

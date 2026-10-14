@@ -5,6 +5,7 @@ package executor
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"bnema.dev/ermite-actions/expr"
@@ -243,6 +244,28 @@ func containerStrings(v expr.Value, what string) ([]string, error) {
 	return out, nil
 }
 
+// imageRefRe is the grammar of a docker image reference
+// (github.com/distribution/reference): [domain[:port]/]path[:tag][@digest].
+// Path components may be upper case here: docker words that error itself, as
+// it does for the image of the recorded ctr-errors scenario. What matters is
+// that the text is one argument that cannot be taken for an option (the first
+// character is a letter or a digit) and holds no space or control character.
+var imageRefRe = regexp.MustCompile(
+	`^(?:(?:[A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9-]*[A-Za-z0-9])(?:\.(?:[A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9-]*[A-Za-z0-9]))*(?::[0-9]+)?/)?` +
+		`[A-Za-z0-9]+(?:(?:[._]|__|-+)[A-Za-z0-9]+)*(?:/[A-Za-z0-9]+(?:(?:[._]|__|-+)[A-Za-z0-9]+)*)*` +
+		`(?::[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?` +
+		`(?:@[A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*:[0-9A-Fa-f]{32,})?$`)
+
+// validImageRef reports whether image can be passed to docker pull and create.
+func validImageRef(image string) bool { return len(image) <= 1024 && imageRefRe.MatchString(image) }
+
+// aliasRe is the name of a service: it becomes a network alias and is never
+// taken for an option.
+var aliasRe = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,62}$`)
+
+// containerIDRe is the id docker create prints.
+var containerIDRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
 // serviceCommandAllowed is the feature flag of entrypoint: and command: of a
 // service (ExecutionContext.cs:1545: actions_service_container_command or
 // ACTIONS_SERVICE_CONTAINER_COMMAND; ermite has no feature flags).
@@ -298,6 +321,9 @@ func (j *job) convertContainer(v expr.Value, service bool) (*containerSpec, erro
 	spec.image = strings.TrimPrefix(spec.image, "docker://")
 	if spec.image == "" {
 		return nil, nil
+	}
+	if !validImageRef(spec.image) {
+		return nil, ghErrorf("Invalid container image '%s'", spec.image)
 	}
 	return spec, nil
 }
@@ -376,6 +402,9 @@ func (j *job) evalContainers() (job *container, services []*container, err error
 			return nil, nil, ghErrorf("Unexpected type '%s' encountered while reading 'services'. The type 'MappingToken' was expected.", v.Kind())
 		}
 		for _, p := range d.Pairs() {
+			if !aliasRe.MatchString(p.Key) {
+				return nil, nil, ghErrorf("Invalid service name '%s': use letters, digits, '_', '.' and '-', starting with a letter, a digit or '_'", p.Key)
+			}
 			spec, e := j.convertContainer(p.Value, true)
 			if e != nil {
 				return nil, nil, e

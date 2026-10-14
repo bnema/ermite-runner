@@ -95,3 +95,49 @@ func TestConvertContainerForms(t *testing.T) {
 		t.Errorf("%+v %v", s, err)
 	}
 }
+
+func TestImageReferenceGrammar(t *testing.T) {
+	good := []string{"ubuntu", "ubuntu:24.04", "ghcr.io/o/img:1", "localhost:5000/a/b:tag", "a/b_c.d-e", "redis@sha256:" + strings.Repeat("a", 64),
+		"r.io:443/x/y:1@sha256:" + strings.Repeat("0", 64), "Ubuntu:24.04"}
+	bad := []string{"", "--help", "-x", "-", " a", "a b", "a\nb", "a;b", "a$(x)", "a:", "a:-x", "a@sha256:zz", "/a", "a//b", "a:b:c", strings.Repeat("a", 1100)}
+	for _, g := range good {
+		if !validImageRef(g) {
+			t.Errorf("rejected %q", g)
+		}
+	}
+	for _, b := range bad {
+		if validImageRef(b) {
+			t.Errorf("accepted %q", b)
+		}
+	}
+	j := &job{}
+	if _, err := j.convertContainer(mustValue(t, `"--help"`), false); err == nil || !strings.Contains(err.Error(), "Invalid container image '--help'") {
+		t.Errorf("container: --help: %v", err)
+	}
+}
+
+func TestServiceNamesAndContainerIDs(t *testing.T) {
+	f := newFakeCtr(t)
+	for _, name := range []string{"-x", ".y", "a b", "a/b"} {
+		rec, res := ctrRun(t, f, "    services:\n      \""+name+"\":\n        image: redis:7\n", "      - run: echo never\n", nil)
+		if res.Conclusion != ConclusionFailure || !strings.Contains(logOf(rec.step(t, "Set up job")), "Invalid service name") {
+			t.Errorf("%q: %+v", name, res)
+		}
+	}
+	for id, ok := range map[string]bool{strings.Repeat("a", 64): true, strings.Repeat("0", 64): true, "Usage: docker create": false, strings.Repeat("a", 63): false, strings.Repeat("A", 64): false, "--help": false} {
+		if containerIDRe.MatchString(id) != ok {
+			t.Errorf("id %q", id)
+		}
+	}
+	// A help text printed by create is not taken for an id: nothing is started.
+	f.set(t, "create_out", "Usage:  docker create [OPTIONS] IMAGE\n")
+	rec, res := ctrRun(t, f, "    container: ubuntu:24.04\n", "      - run: echo never\n", nil)
+	if res.Conclusion != ConclusionFailure || !strings.Contains(logOf(rec.step(t, "Initialize containers")), "##[error]Docker create did not return a container id: 'Usage:  docker create [OPTIONS] IMAGE'") {
+		t.Errorf("%+v\n%s", res, logOf(rec.step(t, "Initialize containers")))
+	}
+	for _, c := range f.calls(t) {
+		if c[0] == "start" {
+			t.Errorf("started %v", c)
+		}
+	}
+}
