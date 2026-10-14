@@ -77,7 +77,6 @@ type jobRun struct {
 	// annSeen and sumSeen are the steps that sent their annotations and their
 	// summary: each is sent once.
 	annSeen, sumSeen map[int32]bool
-	annBytes         int // bytes of annLists
 	// hard stops the sandbox at once; set before the session starts.
 	hard    func()
 	result  *execpb.JobResult
@@ -458,6 +457,15 @@ func (j *jobRun) run(rt *Runner, shutdown <-chan struct{}) {
 	j.outbox.start(ctx)
 
 	stopHard := j.startStopTimers(ctx, shutdown)
+	// The hard stop frees the reader of the stream if it waits for room in the
+	// outbox (the server keeps failing): nothing else would wake it.
+	go func() {
+		select {
+		case <-stopHard:
+			j.outbox.releaseProducers()
+		case <-ctx.Done():
+		}
+	}()
 	out := j.execute(ctx, rt, stopHard)
 	j.report(ctx, out, shutdown)
 }
@@ -565,7 +573,12 @@ func (j *jobRun) report(ctx context.Context, out outcome, shutdown <-chan struct
 		j.sandboxError(msg)
 		out = failure()
 	}
-	j.outbox.Close(rctx)
+	// The flush gets half of the budget: when the server keeps failing the
+	// uploads, the other half is still there for CompleteJob, which is what
+	// ends the job for the server.
+	fctx, fcancel := context.WithTimeout(rctx, budget/2)
+	j.outbox.Close(fctx)
+	fcancel()
 	if err := j.abandoned(); err != nil {
 		return
 	}

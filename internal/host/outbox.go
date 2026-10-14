@@ -65,13 +65,25 @@ type outbox struct {
 	onEnded func(error)
 	log     zerowrap.Logger
 
-	mu      sync.Mutex
-	cond    *sync.Cond
-	events  []event
-	queued  int // bytes of log text in events
+	mu     sync.Mutex
+	cond   *sync.Cond
+	events []event
+	// queued is the memory the outbox holds for the server, in bytes: log text
+	// and summaries in events, and annotations from the moment the host
+	// received them until the call that carries them is answered. One budget,
+	// maxQueuedBytes, for all of it.
+	queued  int
 	closing bool
 	dead    bool
-	done    chan struct{}
+	// released is set by the hard stop of the job (releaseProducers): the
+	// producers that wait for room stop waiting and drop what they hold, and
+	// what is offered over the budget is dropped instead of waited for.
+	released bool
+	// stopSender ends the context the sender works with (start): kill calls
+	// it, so that a call or a retry delay in progress ends with the outbox and
+	// Close can wait for the sender after giving up.
+	stopSender context.CancelFunc
+	done       chan struct{}
 
 	// pendingAnns are the annotations the server may not hold yet, by step: the
 	// last list queued for the step, until an UpdateJob that carried it
@@ -100,9 +112,14 @@ func newOutbox(c callClient, jobID string, t Timing, onEnded func(error), log ze
 
 // start runs the sender until Close or until ctx ends.
 func (o *outbox) start(ctx context.Context) {
+	sctx, stop := context.WithCancel(ctx)
+	o.mu.Lock()
+	o.stopSender = stop
+	o.mu.Unlock()
 	go func() {
 		defer close(o.done)
-		o.loop(ctx)
+		defer stop()
+		o.loop(sctx)
 	}()
 	// A cancelled context must wake the loop and the producers.
 	go func() {
@@ -119,22 +136,75 @@ func (o *outbox) kill() {
 	o.dead = true
 	o.events = nil
 	o.queued = 0
+	stop := o.stopSender
+	o.mu.Unlock()
+	if stop != nil {
+		stop()
+	}
+	o.cond.Broadcast()
+}
+
+// waitRoomLocked blocks while too much is queued. It returns false when the
+// item must be dropped: the outbox is dead, or the hard stop released the
+// producers and there is still no room. Closing lets the last items in.
+func (o *outbox) waitRoomLocked() bool {
+	for o.queued > maxQueuedBytes && !o.dead && !o.closing && !o.released {
+		o.cond.Wait()
+	}
+	if o.dead {
+		return false
+	}
+	return o.queued <= maxQueuedBytes || o.closing
+}
+
+// releaseProducers wakes the producers that wait for room and makes them (and
+// the ones that come) drop their items when there is none: called by the hard
+// stop of the job, because the sender may never make room (the server keeps
+// failing) and the producer is the reader of the stream of the sandbox. What
+// is queued is still sent by Close, within its budget.
+func (o *outbox) releaseProducers() {
+	o.mu.Lock()
+	o.released = true
 	o.mu.Unlock()
 	o.cond.Broadcast()
 }
 
-// Log queues a line of the job log. It blocks while too much is queued.
+// Log queues a line of the job log. It blocks while too much is queued, until
+// the hard stop of the job releases it.
 func (o *outbox) Log(l logLine) {
 	o.mu.Lock()
-	for o.queued > maxQueuedBytes && !o.dead && !o.closing {
-		o.cond.Wait()
-	}
-	if o.dead {
+	if !o.waitRoomLocked() {
 		o.mu.Unlock()
 		return
 	}
 	o.events = append(o.events, event{line: &l})
 	o.queued += len(l.text) + 32
+	o.mu.Unlock()
+	o.cond.Broadcast()
+}
+
+// ReserveAnnotations counts the bytes of a list of annotations in the budget,
+// from the moment the host holds it. It returns false, and counts nothing,
+// when there is no room: the caller drops the list (annotations are not worth
+// stopping the reader of the stream for: it also carries the frames that
+// complete the steps and free the room).
+func (o *outbox) ReserveAnnotations(n int) bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.dead || o.queued+n > maxQueuedBytes {
+		return false
+	}
+	o.queued += n
+	return true
+}
+
+// releaseAnnotations gives the bytes back once the call that carried the
+// lists was answered (or refused).
+func (o *outbox) releaseAnnotations(n int) {
+	o.mu.Lock()
+	if !o.dead {
+		o.queued -= n
+	}
 	o.mu.Unlock()
 	o.cond.Broadcast()
 }
@@ -158,13 +228,11 @@ func (o *outbox) Step(s *ermite.StepUpdate, anns map[int32][]*ermite.Annotation)
 }
 
 // Summary queues the summary of a step. Its bytes count with the log text in
-// the bounded memory of the outbox: it blocks while too much is queued.
+// the bounded memory of the outbox: it blocks while too much is queued, until
+// the hard stop of the job releases it.
 func (o *outbox) Summary(step int32, markdown string) {
 	o.mu.Lock()
-	for o.queued > maxQueuedBytes && !o.dead && !o.closing {
-		o.cond.Wait()
-	}
-	if o.dead {
+	if !o.waitRoomLocked() {
 		o.mu.Unlock()
 		return
 	}
@@ -327,14 +395,14 @@ func (o *outbox) sendStep(ctx context.Context, s *ermite.StepUpdate, anns map[in
 		return err
 	})
 	if err == nil {
-		// The server holds these lists now, unless a later one replaced them.
+		// The server holds these lists now: they leave the pending ones and
+		// the budget.
 		o.mu.Lock()
-		for n, l := range anns {
-			if cur := o.pendingAnns[n]; len(cur) == len(l) && (len(l) == 0 || &cur[0] == &l[0]) {
-				delete(o.pendingAnns, n)
-			}
+		for n := range anns {
+			delete(o.pendingAnns, n)
 		}
 		o.mu.Unlock()
+		o.releaseAnnotations(annotationsBytes(anns))
 		return
 	}
 	if ctx.Err() == nil && classify(err) == kindPermanent {
@@ -347,6 +415,7 @@ func (o *outbox) sendStep(ctx context.Context, s *ermite.StepUpdate, anns map[in
 				delete(o.pendingAnns, n)
 			}
 			o.mu.Unlock()
+			o.releaseAnnotations(annotationsBytes(anns))
 			if err := o.retry(ctx, "UpdateJob", func(c context.Context) error {
 				_, err := o.client.UpdateJob(c, connect.NewRequest(&ermite.UpdateJobRequest{JobId: o.jobID, Steps: []*ermite.StepUpdate{s}}))
 				return err

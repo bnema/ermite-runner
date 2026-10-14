@@ -44,18 +44,19 @@ type fakeServer struct {
 	beatHook  func(n int) error
 	registers []*ermite.RegisterRunnerRequest
 
-	store      *hosttest.LogStore
-	violations []string
-	lines      []string // log text, one per line (mirror of store)
-	cont       []bool
-	steps      map[int32]*ermite.StepUpdate
-	annots     map[int32][]*ermite.Annotation // by step, replaced by each call that names the step
-	summaries  map[int32]string
-	updates    []*ermite.UpdateJobRequest
-	updateHook func(n int, req *ermite.UpdateJobRequest) error
-	appendReq  []*ermite.AppendLogRequest
-	appendHook func(n int, req *ermite.AppendLogRequest) (applyThenFail bool, err error)
-	appendN    int
+	store       *hosttest.LogStore
+	violations  []string
+	lines       []string // log text, one per line (mirror of store)
+	cont        []bool
+	steps       map[int32]*ermite.StepUpdate
+	annots      map[int32][]*ermite.Annotation // by step, replaced by each call that names the step
+	summaries   map[int32]string
+	updates     []*ermite.UpdateJobRequest
+	updateHook  func(n int, req *ermite.UpdateJobRequest) error
+	summaryHook func(req *ermite.UploadSummaryRequest) error
+	appendReq   []*ermite.AppendLogRequest
+	appendHook  func(n int, req *ermite.AppendLogRequest) (applyThenFail bool, err error)
+	appendN     int
 
 	completes    []*ermite.CompleteJobRequest
 	completeHook func(n int) (applyThenFail bool, err error)
@@ -207,6 +208,11 @@ func (s *fakeServer) UploadSummary(_ context.Context, r *connect.Request[ermite.
 	defer s.mu.Unlock()
 	if _, err := s.checkJob(r.Header(), r.Msg.JobId); err != nil {
 		return nil, err
+	}
+	if s.summaryHook != nil {
+		if err := s.summaryHook(r.Msg); err != nil {
+			return nil, err
+		}
 	}
 	if s.summaries == nil {
 		s.summaries = map[int32]string{}

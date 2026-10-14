@@ -152,15 +152,26 @@ func (j *jobRun) stepAnnotations(a *execpb.StepAnnotations) {
 	}
 	j.annSeen[a.Step] = true
 	list := annotationsFrom(a.Step, a.Annotations)
-	// The lists wait in memory until their step completes and the call that
-	// carries them is answered: bounded like the queue of the log.
+	// The list stays in memory until the call that carries it is answered,
+	// first here while its step runs, then in the outbox: all of it counts in
+	// the one budget of the outbox, from now (ReserveAnnotations) to the answer
+	// (sendStep). When there is no room (the server has been failing for long)
+	// the list is dropped, and the log says so.
 	n := annotationBytes(list)
-	if j.annBytes+n > maxQueuedBytes {
-		j.log.Warn().Int32("step", a.Step).Int("bytes", n).Msg("too many annotations are waiting to be sent: this step's are dropped")
+	if !j.outbox.ReserveAnnotations(n) {
+		j.log.Warn().Int32("step", a.Step).Int("bytes", n).Msg("too much is waiting to be sent to the server: the annotations of this step are dropped")
 		return
 	}
-	j.annBytes += n
 	j.annLists[a.Step] = list
+}
+
+// annotationsBytes is the size of the lists of a call.
+func annotationsBytes(m map[int32][]*ermite.Annotation) int {
+	n := 0
+	for _, l := range m {
+		n += annotationBytes(l)
+	}
+	return n
 }
 
 func annotationBytes(l []*ermite.Annotation) int {
@@ -196,7 +207,6 @@ func (j *jobRun) takeAnnotations(n int32) map[int32][]*ermite.Annotation {
 		return nil
 	}
 	delete(j.annLists, n)
-	j.annBytes -= annotationBytes(l)
 	return map[int32][]*ermite.Annotation{n: l}
 }
 

@@ -426,3 +426,134 @@ func (discard) Read([]byte) (int, error)    { select {} }
 func zerowrapNop() zerowrap.Logger {
 	return zerowrap.New(zerowrap.Config{Level: "error", Format: "json", Output: io.Discard})
 }
+
+// GO-006: the reader of the stream of the sandbox waits in the outbox for room
+// when the summaries fill the budget and the server keeps failing; the hard
+// stop of the job must wake it, or the job outlives its deadline and the
+// shutdown waits for ever. Heartbeats work, every upload fails transiently,
+// summaries of distinct steps fill the queue, the runner is stopped.
+func TestHardStopReleasesAProducerWaitingForRoom(t *testing.T) {
+	sc := func(_ *testing.T, c *execstream.Conn, _ *execpb.Run, cancels <-chan *execpb.Cancel) {
+		big := strings.Repeat("s", 1<<20)
+		for i := 1; i <= 30; i++ { // 30 MiB of summaries, 16 MiB of room
+			stepStart(c, i, "step")
+			sumFrame(c, i, big)
+		}
+		// the executor ignores the cancellation, as a stuck one would
+		<-cancels
+		time.Sleep(time.Hour)
+	}
+	h := newHarness(t, sc)
+	h.runner.Timing.ShutdownGrace = 500 * time.Millisecond
+	h.runner.Timing.ShutdownReport = time.Second
+	h.runner.Timing.StopDeadline = 5 * time.Second
+	h.srv.summaryHook = func(*ermite.UploadSummaryRequest) error { return connect.NewError(connect.CodeUnavailable, nil) }
+	h.srv.jobs = []*ermite.Job{testJob("j1")}
+	stop := h.run(t)
+	eventually(t, "the queue to fill", func() bool {
+		h.srv.mu.Lock()
+		defer h.srv.mu.Unlock()
+		return len(h.srv.beats) > 2
+	})
+	time.Sleep(300 * time.Millisecond) // the reader is stuck in Summary by now
+	start := time.Now()
+	done := make(chan error, 1)
+	go func() { done <- stop() }()
+	select {
+	case <-done:
+	case <-time.After(15 * time.Second):
+		t.Fatal("the job did not end after the hard stop: the stream reader is stuck waiting for room")
+	}
+	if took := time.Since(start); took > 10*time.Second {
+		t.Errorf("shutdown took %v", took)
+	}
+	if h.srv.completeCount() != 1 {
+		t.Errorf("the job was not reported: %d CompleteJob", h.srv.completeCount())
+	}
+}
+
+// GO-007: annotations count in the budget of the outbox from the moment the
+// host holds them until the call that carries them is answered. With the
+// server not answering and 400 steps that each ended with the largest list the
+// contract allows, the memory held stays within the budget and the lists over
+// it are dropped, with a log line.
+func TestAnnotationsWaitingForTheServerAreBounded(t *testing.T) {
+	cl := &blockingUpdateClient{release: make(chan struct{})}
+	defer close(cl.release)
+	logs := &logBuf{}
+	tm := fastTiming()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	j := &jobRun{client: cl, t: tm, ctx: ctx, job: &ermite.Job{JobId: "j1"}, steps: map[int32]*ermite.StepUpdate{},
+		annSeen: map[int32]bool{}, sumSeen: map[int32]bool{}, features: jobFeatures{annotations: true},
+		cancelCh: make(chan *execpb.Cancel, 1), log: zerowrap.New(zerowrap.Config{Level: "debug", Format: "json", Output: logs})}
+	j.outbox = newOutbox(cl, "j1", tm, func(error) {}, j.log)
+	j.outbox.start(ctx)
+	var list []*execpb.Annotation
+	for _, l := range []execpb.AnnotationLevel{lWarn, lFail, execpb.AnnotationLevel_ANNOTATION_LEVEL_NOTICE} {
+		for range 10 {
+			list = append(list, &execpb.Annotation{Level: l, Message: strings.Repeat("m", 4096), Title: strings.Repeat("t", 255)})
+		}
+	}
+	for n := int32(1); n <= 400; n++ { // 400 x about 135 KiB offered, 16 MiB of room
+		j.stepStarted(&execpb.StepStarted{Number: n, Name: "s"})
+		j.stepAnnotations(&execpb.StepAnnotations{Step: n, Annotations: list})
+		j.stepCompleted(&execpb.StepCompleted{Number: n, Name: "s", Conclusion: cOK})
+	}
+	j.outbox.mu.Lock()
+	held := annotationsBytes(j.outbox.pendingAnns)
+	queued := j.outbox.queued
+	j.outbox.mu.Unlock()
+	if held > maxQueuedBytes {
+		t.Errorf("%d bytes of annotations wait for the server, the budget is %d", held, maxQueuedBytes)
+	}
+	if queued > maxQueuedBytes {
+		t.Errorf("%d bytes counted in the outbox, the budget is %d", queued, maxQueuedBytes)
+	}
+	if held < maxQueuedBytes/2 {
+		t.Errorf("only %d bytes held: the annotations are dropped too early", held)
+	}
+	if !strings.Contains(logs.String(), "the annotations of this step are dropped") {
+		t.Error("dropping annotations is not logged")
+	}
+}
+
+type blockingUpdateClient struct {
+	stubClient
+	release chan struct{}
+}
+
+func (c *blockingUpdateClient) UpdateJob(ctx context.Context, _ *connect.Request[ermite.UpdateJobRequest]) (*connect.Response[ermite.UpdateJobResponse], error) {
+	select {
+	case <-c.release:
+		return connect.NewResponse(&ermite.UpdateJobResponse{}), nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// Once the call that carried a list is answered, its bytes leave the budget.
+func TestAnnotationBudgetIsGivenBack(t *testing.T) {
+	var ob *outbox
+	h := runResultsJob(t, resultsScript(nil), nil)
+	_ = ob
+	if got := h.srv.annots[2]; len(got) != 2 {
+		t.Fatalf("annotations %v", got)
+	}
+	cl := &stubClient{}
+	o := newOutbox(cl, "j1", fastTiming(), func(error) {}, zerowrapNop())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	o.start(ctx)
+	list := []*ermite.Annotation{{Level: ermite.AnnotationLevel_ANNOTATION_LEVEL_WARNING, Message: "m", StepNumber: 2}}
+	n := annotationBytes(list)
+	if !o.ReserveAnnotations(n) {
+		t.Fatal("no room")
+	}
+	o.Step(&ermite.StepUpdate{Number: 2}, map[int32][]*ermite.Annotation{2: list})
+	eventually(t, "the call to be answered", func() bool {
+		o.mu.Lock()
+		defer o.mu.Unlock()
+		return o.queued == 0
+	})
+}
