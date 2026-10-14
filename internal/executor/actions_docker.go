@@ -224,6 +224,17 @@ func (j *job) runDocker(s *stepRun, def *actionDef, in *inputSet, env *ordered, 
 	if entry != "" {
 		parts = append(parts, entrypointOpt(entry))
 	}
+	// A docker action joins the network of the job's containers, so that it
+	// reaches the services by their aliases (ContainerActionHandler.cs:172-175
+	// reads job.container.network; the read creates job.container, which is why
+	// the context of any job that ran a docker action has "container": {}).
+	j.mu.Lock()
+	j.state.TouchJobContainer()
+	network := j.state.JobContainerNetwork()
+	j.mu.Unlock()
+	if network != "" {
+		parts = append(parts, raw("--network", network))
+	}
 	parts = append(parts,
 		volumeOpt("/var/run/docker.sock", "/var/run/docker.sock"),
 		volumeOpt(temp, "/github/runner_temp"),

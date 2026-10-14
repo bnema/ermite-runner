@@ -192,13 +192,12 @@ jobs:
 	_ = rec
 }
 
-func TestNotSupportedYet(t *testing.T) {
+// Reusable workflows stay refused; container: and services: are supported.
+func TestReusableWorkflowNotSupportedYet(t *testing.T) {
 	needTools(t, "bash")
-	for _, f := range []string{"container: alpine", "services:\n      s:\n        image: x"} {
-		rec2, res2 := runLocal(t, wfHead+"    "+f+"\n    steps:\n      - run: echo hi\n", "j", nil)
-		if res2.Conclusion != ConclusionFailure || res2.Error == "" || !strings.Contains(logOf(rec2.steps[0]), "not supported yet") {
-			t.Errorf("%q: %+v %v", f, res2, rec2.names())
-		}
+	rec, res := runLocal(t, "on: push\njobs:\n  j:\n    uses: ./.github/workflows/x.yml\n", "j", nil)
+	if res.Conclusion != ConclusionFailure || !strings.Contains(logOf(rec.steps[0]), "not supported yet") {
+		t.Errorf("%+v %v", res, rec.names())
 	}
 }
 
