@@ -165,7 +165,7 @@ type job struct {
 	collectors map[int]*issueCollector // by step number
 	outcomes   map[int]Conclusion
 	summaries  map[int]string
-	states     map[string]map[string]string // intra-action state, see saveState
+	states     map[string]*intraState // intra-action state, see saveState
 }
 
 func (j *job) mask(s string) string { return j.masker.Load().mask(s) }

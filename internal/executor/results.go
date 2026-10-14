@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"bnema.dev/ermite-actions/template"
 )
@@ -48,7 +49,19 @@ func (j *job) githubValue(k string) string {
 }
 
 // AddMask is SecretMasker.AddValue.
-func (s *stepRun) AddMask(v string) { s.j.masker.Load().add(v) }
+func (s *stepRun) AddMask(v string) { s.j.addMask(v) }
+
+// addMask registers values with the masker of the job, with their encodings
+// (SecretMasker.AddValue). It is the one way to add a secret after the job
+// started (add-mask, a stop-commands token, the token of an action archive): it
+// only adds, the masker is never replaced, so the text that other goroutines
+// mask meanwhile loses no value.
+func (j *job) addMask(values ...string) {
+	m := j.masker.Load()
+	for _, v := range values {
+		m.add(v)
+	}
+}
 
 // Matchers is the root of the problem matchers of the job.
 func (s *stepRun) Matchers() *matcherRoot { return s.j.matchers }
@@ -93,40 +106,83 @@ func (s *stepRun) stateKey() string {
 	return fmt.Sprint(s.num)
 }
 
-func (j *job) saveState(key, name, value string) {
-	j.issuesMu.Lock()
-	defer j.issuesMu.Unlock()
-	if j.states == nil {
-		j.states = map[string]map[string]string{}
-	}
-	m := j.states[key]
-	if m == nil {
-		m = map[string]string{}
-		j.states[key] = m
-	}
-	// IntraActionState is a Dictionary with an OrdinalIgnoreCase comparer.
-	m[strings.ToLower(name)] = value
+// intraState is IntraActionState: a Dictionary<string, string> with an
+// OrdinalIgnoreCase comparer. A name that is already there keeps the spelling
+// it was first saved with and takes the new value (the indexer of Dictionary
+// replaces the value, not the key), and the entries enumerate in the order
+// they were added: ActionRunner.cs:255-258 sets STATE_<key> from that
+// enumeration, so the spelling of the first save-state is the one the action
+// sees.
+type intraState struct {
+	keys []string // spelling and order of first insertion
+	vals map[string]string
 }
 
-// IntraActionState returns the state saved under key (the number of the step,
-// or the stateKey of its scope), with lower-case names.
-func (j *job) intraActionState(key string) map[string]string {
-	j.issuesMu.Lock()
-	defer j.issuesMu.Unlock()
-	out := map[string]string{}
-	for k, v := range j.states[key] {
-		out[k] = v
+func (st *intraState) set(name, value string) {
+	if st.vals == nil {
+		st.vals = map[string]string{}
+	}
+	lo := strings.ToLower(name)
+	if _, ok := st.vals[lo]; !ok {
+		st.keys = append(st.keys, name)
+	}
+	st.vals[lo] = value
+}
+
+// Pair is one saved name (as first spelled) and its value.
+func (st *intraState) pairs() []Pair {
+	out := make([]Pair, 0, len(st.keys))
+	for _, k := range st.keys {
+		out = append(out, Pair{k, st.vals[strings.ToLower(k)]})
 	}
 	return out
 }
 
+func (j *job) saveState(key, name, value string) {
+	j.issuesMu.Lock()
+	defer j.issuesMu.Unlock()
+	if j.states == nil {
+		j.states = map[string]*intraState{}
+	}
+	st := j.states[key]
+	if st == nil {
+		st = &intraState{}
+		j.states[key] = st
+	}
+	st.set(name, value)
+}
+
+// intraActionState returns the state saved under key (the number of the step,
+// or the stateKey of its scope) as the runner enumerates it: names as first
+// spelled, in the order they were first saved. Phase F sets STATE_<name> from
+// it for the pre, main and post stages of the action.
+func (j *job) intraActionState(key string) []Pair {
+	j.issuesMu.Lock()
+	defer j.issuesMu.Unlock()
+	if st := j.states[key]; st != nil {
+		return st.pairs()
+	}
+	return nil
+}
+
 // Summary receives GITHUB_STEP_SUMMARY after the step (see processStepSummary).
+//
+// The server keeps one summary per step of the workflow. The steps inside a
+// composite action each have a summary file in the runner (uploaded under the
+// id of the embedded step); here they are concatenated, in order, under the
+// step that uses the action.
 func (s *stepRun) Summary(markdown string) {
 	j := s.j
 	j.issuesMu.Lock()
 	defer j.issuesMu.Unlock()
 	if j.summaries == nil {
 		j.summaries = map[int]string{}
+	}
+	if s.scope.embedded {
+		markdown = j.summaries[s.num] + markdown
+		if len(markdown) > stepSummaryLimit {
+			return // over the limit of the contract: the first ones stay
+		}
 	}
 	j.summaries[s.num] = markdown
 }
@@ -243,4 +299,54 @@ func (j *job) stepTimeout(s *stepRun) int {
 		return maxStepTimeoutMinutes
 	}
 	return int(f)
+}
+
+// ---- hook points for steps that contain steps (phase F)
+//
+// A step of the workflow is run by runStep; a composite action runs its inner
+// steps itself. What an inner step shares with the step that contains it is
+// named by a stepScope, and what its lifecycle needs from the commands is:
+//
+//   - embeddedScope(outer, stateKey): the scope of an inner step. Its issues
+//     go to the collector of the outer step (counted against its limits when
+//     the outer step completes) and its summary is appended to the outer
+//     step's; its save-state goes to the state of stateKey.
+//   - newOutputManager(s, cancel): one per process of a step (inner or not),
+//     with the cancellation channel the process gets; call dispose when the
+//     process is over.
+//   - armStepTimeout / stepTimedOut: the timeout of a step, inner or not,
+//     around the run of its body (see runStep).
+//   - addMask: add a secret.
+
+// embeddedScope is the scope of a step inside the step outer.
+func (j *job) embeddedScope(outer *stepRun, stateKey string) stepScope {
+	return stepScope{issues: j.collector(outer.num), embedded: true, stateKey: stateKey}
+}
+
+// armStepTimeout starts the timeout-minutes timer of the step (StepsRunner.
+// RunStepAsync, :280-296). When it fires, the step is marked timed out and
+// cancel is called (the same cancellation as a job cancel: SIGINT, SIGTERM,
+// SIGKILL). It returns the function that stops the timer and the number of
+// minutes, 0 for none.
+func (j *job) armStepTimeout(s *stepRun, cancel func()) (stop func(), minutes int) {
+	minutes = j.stepTimeout(s)
+	if minutes <= 0 {
+		return func() {}, 0
+	}
+	t := time.AfterFunc(time.Duration(minutes)*time.Minute+j.cfg.StepTimeoutSkew, func() {
+		s.timedOut.Store(true)
+		cancel()
+	})
+	return func() { t.Stop() }, minutes
+}
+
+// stepTimedOut turns the result of a step whose own timer fired (and not the
+// job's cancellation) into a failure with the runner's message
+// (StepsRunner.cs:323-330). Other results pass through.
+func (j *job) stepTimedOut(s *stepRun, r stepResult, minutes int) stepResult {
+	if r == resCanceled && s.timedOut.Load() && !j.cancelRequested() {
+		j.errorf(s.num, "%s", stepTimeoutMessage(s.name, minutes))
+		return resFailed
+	}
+	return r
 }

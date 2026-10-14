@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"strings"
 	"sync"
-	"time"
 
 	"bnema.dev/ermite-actions/expr"
 	"bnema.dev/ermite-actions/template"
@@ -337,25 +336,13 @@ func (j *job) runStep(num int, st *workflow.Step) {
 		}()
 	}
 
-	// timeout-minutes (StepsRunner.RunStepAsync, :280-296).
-	minutes := j.stepTimeout(s)
-	if minutes > 0 {
-		t := time.AfterFunc(time.Duration(minutes)*time.Minute+j.cfg.StepTimeoutSkew, func() {
-			s.timedOut.Store(true)
-			closeCancel()
-		})
-		defer t.Stop()
-	}
+	stopTimeout, minutes := j.armStepTimeout(s, closeCancel)
+	defer stopTimeout()
 
 	r := j.execute(s, stepCancel)
 	close(stopWatch)
 	watch.Wait()
-	if r == resCanceled && s.timedOut.Load() && !j.cancelRequested() {
-		// The step's own token fired, not the job's: the step failed with a
-		// message (StepsRunner.cs:323-330).
-		j.errorf(num, "%s", stepTimeoutMessage(name, minutes))
-		r = resFailed
-	}
+	r = j.stepTimedOut(s, r, minutes)
 
 	// Merge the result of the commands (StepsRunner.cs:347-351).
 	if s.cmdResult != nil {

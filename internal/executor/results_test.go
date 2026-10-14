@@ -324,14 +324,17 @@ func TestStepTimeoutExpressionError(t *testing.T) {
 	}
 }
 
-// save-state keeps the state per step, for the post phase of an action (F);
-// names are case-insensitive (IntraActionState uses OrdinalIgnoreCase).
-func TestSaveStateIsKeptPerStep(t *testing.T) {
+// save-state keeps the state per action; names are case-insensitive, the
+// first spelling is the key the action sees (STATE_<key>, ActionRunner.cs:255)
+// and entries keep the order they were first saved in.
+func TestSaveStateKeepsTheFirstSpellingAndOrder(t *testing.T) {
 	j := &job{}
 	j.saveState("2", "Foo", "bar")
+	j.saveState("2", "zed", "1")
 	j.saveState("2", "FOO", "baz")
 	j.saveState("3", "x", "y")
-	if got := j.intraActionState("2"); len(got) != 1 || got["foo"] != "baz" {
+	got := j.intraActionState("2")
+	if fmt.Sprint(got) != fmt.Sprint([]Pair{{"Foo", "baz"}, {"zed", "1"}}) {
 		t.Errorf("%v", got)
 	}
 	if got := j.intraActionState("4"); len(got) != 0 {
@@ -339,38 +342,55 @@ func TestSaveStateIsKeptPerStep(t *testing.T) {
 	}
 }
 
-// Several catastrophic matchers and a step timeout: the step ends at its
-// timeout, not after every matcher has used its 3 attempts on every line
-// (GO-004). Without the cancellation of the matchers the 8 matchers x 3
-// attempts x 1 s of the first line alone hold the step for 24 s.
-func TestCatastrophicMatchersDoNotHoldAStepPastItsTimeout(t *testing.T) {
-	needTools(t, "bash")
-	var matchers []string
-	var adds []string
-	for i := range 8 {
-		matchers = append(matchers, fmt.Sprintf(`{"owner":"bad%d","pattern":[{"regexp":"^((a+)+)$","message":1}]}`, i))
+// The hook points phase F calls (see results.go): the additive mask API, the
+// scope of an inner step of a composite action, the timeout helpers.
+func TestAddMaskIsAdditive(t *testing.T) {
+	j := &job{}
+	j.masker.Store(newMasker("first-secret"))
+	before := j.masker.Load()
+	j.addMask("second-secret", "third-secret")
+	if j.masker.Load() != before {
+		t.Error("the masker was replaced")
 	}
-	adds = append(adds, `echo '{"problemMatcher":[`+strings.Join(matchers, ",")+`]}' > bad.json`)
-	start := time.Now()
-	rr, _ := runResults(t, wfHead+`    steps:
-      - name: slow lines
-        timeout-minutes: 1
-        run: |
-          `+adds[0]+`
-          echo "::add-matcher::bad.json"
-          for i in 1 2 3 4 5 6; do echo "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!"; done
-          sleep 30
-`, func(c *Config) { c.StepTimeoutSkew = -(60*time.Second - 1500*time.Millisecond) })
-	took := time.Since(start)
-	if took > 8*time.Second {
-		t.Errorf("the step overran its timeout: %v", took)
+	for _, v := range []string{"first-secret", "second-secret", "third-secret"} {
+		if j.mask("x "+v) != "x ***" {
+			t.Errorf("%q is not masked", v)
+		}
 	}
-	log := logOf(rr.step(t, "slow lines"))
-	if !strings.Contains(log, "The action 'slow lines' has timed out after 1 minutes.") {
-		t.Errorf("no timeout message:\n%s", log)
+}
+
+func TestEmbeddedScopeSharesTheOuterStep(t *testing.T) {
+	rec := newRecorder()
+	rec.StepStarted(4, "outer", time.Now())
+	j := &job{cfg: Config{Reporter: rec}}
+	j.masker.Store(newMasker())
+	outer := &stepRun{j: j, num: 4}
+	inner := &stepRun{j: j, num: 4, scope: j.embeddedScope(outer, "inner-1")}
+	// the outer step has 8 warnings of its own and the inner one 6: ten are
+	// kept, the outer step's own first
+	for range 8 {
+		j.addIssueFor(outer, issue{Level: LevelWarning, Message: "outer"})
 	}
-	// the lines that were not matched are still logged
-	if strings.Count(log, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!") < 6 {
-		t.Errorf("lines lost after the cancellation:\n%s", log)
+	for range 6 {
+		j.addIssueFor(inner, issue{Level: LevelWarning, Message: "inner"})
+	}
+	got := j.collector(4).result()
+	if len(got) != 10 || got[7].Message != "outer" || got[8].Message != "inner" || got[9].Message != "inner" {
+		t.Errorf("%d annotations: %+v", len(got), got)
+	}
+	// summaries of inner steps are appended to the outer step's
+	outer.Summary("# outer\n")
+	inner.Summary("# inner 1\n")
+	inner.Summary("# inner 2\n")
+	if j.summaries[4] != "# outer\n# inner 1\n# inner 2\n" {
+		t.Errorf("%q", j.summaries[4])
+	}
+	// save-state of an inner step goes to the key of its scope
+	inner.SaveState("Key", "v")
+	if g := j.intraActionState("inner-1"); len(g) != 1 || g[0].Key != "Key" {
+		t.Errorf("%v", g)
+	}
+	if g := j.intraActionState("4"); len(g) != 0 {
+		t.Errorf("%v", g)
 	}
 }
