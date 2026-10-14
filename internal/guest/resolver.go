@@ -58,7 +58,7 @@ func (r *resolver) resolve(ctx context.Context, uses []string) ([]executor.Resol
 		for i, a := range resp.Actions {
 			out[i] = executor.ResolvedAction{
 				Ref: a.Ref, NameWithOwner: a.NameWithOwner, Path: a.Path, ResolvedSHA: a.ResolvedSha,
-				TarballURL: a.TarballUrl, Token: a.Token, Error: a.Error,
+				TarballURL: a.TarballUrl, Token: a.Token, AuthOrigin: a.AuthOrigin, Error: a.Error,
 			}
 		}
 		return out, nil

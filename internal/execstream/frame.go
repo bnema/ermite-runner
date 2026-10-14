@@ -13,6 +13,7 @@ package execstream
 
 import (
 	"bufio"
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -105,6 +106,13 @@ func Drive(rw io.ReadWriter, run *execpb.Run, cancel <-chan *execpb.Cancel, onOu
 	return DriveJob(rw, run, cancel, JobHandler{Output: onOutput})
 }
 
+// resolveQueue is how many ResolveRequest frames may wait for the worker.
+const resolveQueue = 2
+
+func resolveFrame(r *execpb.ResolveResponse) *execpb.Frame {
+	return &execpb.Frame{Body: &execpb.Frame_ResolveResponse{ResolveResponse: r}}
+}
+
 // JobHandler receives the frames of a session. Nil functions ignore their
 // frames. The functions are called from the goroutine of DriveJob, in the
 // order of the stream.
@@ -115,10 +123,13 @@ type JobHandler struct {
 	StepCompleted func(*execpb.StepCompleted)
 	Log           func(*execpb.Log)
 	JobResult     func(*execpb.JobResult)
-	// Resolve answers the executor's ResolveRequest frames. It is called in its
-	// own goroutine (the call goes to the server), the answer is sent as a
-	// ResolveResponse frame carrying the id of the request.
-	Resolve func(*execpb.ResolveRequest) *execpb.ResolveResponse
+	// Resolve answers the executor's ResolveRequest frames, one at a time and in
+	// order, from a single worker (the call goes to the server); the answer is
+	// sent as a ResolveResponse frame carrying the id of the request. ctx ends
+	// with the session: a call still running is cancelled and DriveJob waits for
+	// it before it returns. At most resolveQueue requests wait; the next ones are
+	// answered with an error at once, without a call.
+	Resolve func(ctx context.Context, r *execpb.ResolveRequest) *execpb.ResolveResponse
 }
 
 // DriveJob is Drive for a session that carries a job: besides Output frames it
@@ -142,6 +153,27 @@ func DriveJob(rw io.ReadWriter, run *execpb.Run, cancel <-chan *execpb.Cancel, h
 
 	done := make(chan struct{})
 	defer close(done)
+
+	// One worker answers the resolutions; it ends, and is waited for, with the
+	// session.
+	resolveCh := make(chan *execpb.ResolveRequest, resolveQueue)
+	rctx, rcancel := context.WithCancel(context.Background())
+	var workers sync.WaitGroup
+	workers.Add(1)
+	go func() {
+		defer workers.Done()
+		for {
+			select {
+			case req := <-resolveCh:
+				resp := h.Resolve(rctx, req)
+				resp.Id = req.Id
+				_ = c.Send(resolveFrame(resp))
+			case <-rctx.Done():
+				return
+			}
+		}
+	}()
+	defer func() { rcancel(); workers.Wait() }()
 	if cancel != nil {
 		go func() {
 			select {
@@ -185,14 +217,15 @@ func DriveJob(rw io.ReadWriter, run *execpb.Run, cancel <-chan *execpb.Cancel, h
 			}
 		case *execpb.Frame_ResolveRequest:
 			req := b.ResolveRequest
-			go func() {
-				resp := &execpb.ResolveResponse{Id: req.Id, Error: "the host cannot resolve actions"}
-				if h.Resolve != nil {
-					resp = h.Resolve(req)
-					resp.Id = req.Id
-				}
-				_ = c.Send(&execpb.Frame{Body: &execpb.Frame_ResolveResponse{ResolveResponse: resp}})
-			}()
+			if h.Resolve == nil {
+				_ = c.Send(resolveFrame(&execpb.ResolveResponse{Id: req.Id, Error: "the host cannot resolve actions"}))
+				break
+			}
+			select {
+			case resolveCh <- req:
+			default:
+				_ = c.Send(resolveFrame(&execpb.ResolveResponse{Id: req.Id, Error: "too many action resolutions in flight"}))
+			}
 		case *execpb.Frame_Exit:
 			return hello, b.Exit, nil
 		}

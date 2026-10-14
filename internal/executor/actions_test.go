@@ -495,7 +495,7 @@ func (f *fakeForge) resolver(token string) Resolver {
 				continue
 			}
 			out = append(out, ResolvedAction{Ref: u, NameWithOwner: name, ResolvedSHA: strings.Repeat("a", 40),
-				TarballURL: f.srv.URL + "/tarball/" + name + "/" + ref, Token: token})
+				TarballURL: f.srv.URL + "/tarball/" + name + "/" + ref, Token: token, AuthOrigin: tokenOrigin(token, f.srv.URL)})
 		}
 		return out, nil
 	}
@@ -655,5 +655,106 @@ func TestRepositoryActionInputsAreMaskedAndTokenNotInEnv(t *testing.T) {
 	}
 	if got := logOf(rec.steps[1]); !strings.HasSuffix(got, "\n0") {
 		t.Errorf("the archive token is not in the environment of actions:\n%s", got)
+	}
+}
+
+func tokenOrigin(token, u string) string {
+	if token == "" {
+		return ""
+	}
+	return originOf(u)
+}
+
+// GO-002: the token goes to the origin the host named and nowhere else, and
+// a redirect never carries it to another origin.
+func TestArchiveTokenOnlyToTheNamedOrigin(t *testing.T) {
+	var gotAuth atomic.Value
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth.Store(r.Header.Get("Authorization"))
+		_, _ = w.Write(tarOf(t, "o-x-1", files{"action.yml": nodeAction, "main.sh": "echo ok\n"}))
+	}))
+	defer other.Close()
+	var firstAuth atomic.Value
+	redir := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		firstAuth.Store(r.Header.Get("Authorization"))
+		http.Redirect(w, r, other.URL+"/t", http.StatusFound)
+	}))
+	defer redir.Close()
+	mk := func(u, token, origin string) Resolver {
+		return func(context.Context, []string) ([]ResolvedAction, error) {
+			return []ResolvedAction{{Ref: "o/x@v1", NameWithOwner: "o/x", ResolvedSHA: strings.Repeat("d", 40), TarballURL: u, Token: token, AuthOrigin: origin}}, nil
+		}
+	}
+	run := func(r Resolver) Result {
+		_, res := actionRun(t, files{}, "      - uses: o/x@v1\n", func(c *Config) {
+			c.Actions.Resolver = r
+			c.Actions.Backoff = func() time.Duration { return time.Millisecond }
+		})
+		return res
+	}
+	// Redirect to another origin (another port on the same host): the header is
+	// sent to the first hop and dropped for the second.
+	if res := run(mk(redir.URL+"/t", "tok", originOf(redir.URL))); res.Conclusion != ConclusionSuccess {
+		t.Fatalf("%+v", res)
+	}
+	if firstAuth.Load() == "" || gotAuth.Load() != "" {
+		t.Errorf("first hop %q, second hop %q", firstAuth.Load(), gotAuth.Load())
+	}
+	// A token without an AuthOrigin, or for another origin, is never sent.
+	gotAuth.Store("unset")
+	if res := run(mk(other.URL+"/t", "tok", "")); res.Conclusion != ConclusionSuccess {
+		t.Fatalf("%+v", res)
+	}
+	if gotAuth.Load() != "" {
+		t.Errorf("no AuthOrigin: sent %q", gotAuth.Load())
+	}
+	gotAuth.Store("unset")
+	_ = run(mk(other.URL+"/t", "tok", "https://other.example"))
+	if gotAuth.Load() != "" {
+		t.Errorf("another origin: sent %q", gotAuth.Load())
+	}
+	// Without a token (github.com) nothing is sent either.
+	gotAuth.Store("unset")
+	_ = run(mk(other.URL+"/t", "", ""))
+	if gotAuth.Load() != "" {
+		t.Errorf("anonymous: sent %q", gotAuth.Load())
+	}
+	// The named origin, with the token.
+	gotAuth.Store("unset")
+	_ = run(mk(other.URL+"/t", "tok", originOf(other.URL)))
+	if got, _ := gotAuth.Load().(string); !strings.HasPrefix(got, "Basic ") {
+		t.Errorf("named origin: %q", got)
+	}
+}
+
+func TestArchiveRedirectPolicy(t *testing.T) {
+	j := &job{}
+	c := j.archiveClient()
+	mkreq := func(u string) *http.Request {
+		r, _ := http.NewRequest(http.MethodGet, u, nil)
+		r.Header.Set("Authorization", "Basic x")
+		return r
+	}
+	for _, tc := range []struct {
+		from, to string
+		keep     bool
+		refused  bool
+	}{
+		{"https://a.example/x", "https://a.example/y", true, false},
+		{"https://a.example/x", "https://cdn.a.example/y", false, false},  // subdomain
+		{"https://a.example/x", "https://a.example:8443/y", false, false}, // port
+		{"https://a.example/x", "http://a.example/y", false, true},        // downgrade
+		{"http://a.example/x", "https://a.example/y", false, false},       // scheme change
+		{"https://a.example:443/x", "https://a.example/y", true, false},   // same origin
+		{"https://A.example/x", "https://a.example/y", true, false},
+	} {
+		req := mkreq(tc.to)
+		err := c.CheckRedirect(req, []*http.Request{mkreq(tc.from)})
+		if (err != nil) != tc.refused || (req.Header.Get("Authorization") != "") != tc.keep && !tc.refused {
+			t.Errorf("%s -> %s: err=%v header=%q", tc.from, tc.to, err, req.Header.Get("Authorization"))
+		}
+	}
+	if err := c.CheckRedirect(mkreq("https://a.example/"), make([]*http.Request, 10)); err == nil {
+		t.Error("redirect loops must stop")
 	}
 }

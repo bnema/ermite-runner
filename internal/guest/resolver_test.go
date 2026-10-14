@@ -52,7 +52,7 @@ func TestResolverRoundTrip(t *testing.T) {
 	go func() {
 		defer close(done)
 		_, _, _ = execstream.DriveJob(hostSide, &execpb.Run{}, nil, execstream.JobHandler{
-			Resolve: func(r *execpb.ResolveRequest) *execpb.ResolveResponse {
+			Resolve: func(_ context.Context, r *execpb.ResolveRequest) *execpb.ResolveResponse {
 				if len(r.Uses) == 1 && r.Uses[0] == "bad@v1" {
 					return &execpb.ResolveResponse{Error: "no"}
 				}

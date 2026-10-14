@@ -71,6 +71,10 @@ type jobRun struct {
 	// contexts is Job.Contexts as handed to the executor: with the server URLs
 	// pointed at the runner's URL when guest forge access is on.
 	contexts string
+	// Origins that are ermite for the archive tokens (see resolveResponse), and
+	// the budget of resolution requests of the job (see resolveActions).
+	publicOrigin, serverOrigin, guestForge string
+	resolveRounds, resolveRefs             int
 	// hard stops the sandbox at once; set before the session starts.
 	hard    func()
 	result  *execpb.JobResult
@@ -567,6 +571,7 @@ func failure() outcome { return outcome{conclusion: ermite.CiConclusion_CI_CONCL
 // execute starts the sandbox, runs the job in it and returns how it ended.
 func (j *jobRun) execute(ctx context.Context, rt *Runner, stopHard <-chan struct{}) outcome {
 	var err error
+	j.setOrigins(j.job.Contexts, rt.Cfg.URL, rt.Cfg.GuestForgeOrigin)
 	if j.contexts, err = RewriteServerURLs(j.job.Contexts, rt.Cfg.GuestForgeOrigin); err != nil {
 		j.failEarly(fmt.Sprintf("The job's contexts cannot be prepared: %v", err))
 		return failure()

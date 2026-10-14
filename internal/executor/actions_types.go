@@ -16,6 +16,9 @@ import (
 // the host). The Token is a secret: the executor masks it.
 type ResolvedAction struct {
 	Ref, NameWithOwner, Path, ResolvedSHA, TarballURL, Token, Error string
+	// AuthOrigin is the only origin (scheme://host[:port]) the Token is sent to;
+	// the host sets it. Without it the token is not sent.
+	AuthOrigin string
 }
 
 // Resolver resolves "owner/repo[/path]@ref" values of uses with the server. It

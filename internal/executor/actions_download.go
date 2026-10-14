@@ -10,8 +10,10 @@ import (
 	"io"
 	"math/rand/v2"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -41,11 +43,47 @@ type errAccessDenied struct{ url string }
 
 func (e errAccessDenied) Error() string { return fmt.Sprintf("Access denied to '%s' ()", e.url) }
 
-func (j *job) httpClient() *http.Client {
-	if c := j.cfg.Actions.HTTPClient; c != nil {
-		return c
+// originOf is scheme://host[:port] of an absolute http(s) URL, lower case and
+// without the default port, "" for anything else.
+func originOf(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" || u.User != nil || (u.Scheme != "http" && u.Scheme != "https") {
+		return ""
 	}
-	return &http.Client{}
+	host, port := strings.ToLower(u.Hostname()), u.Port()
+	if port == "" || (u.Scheme == "http" && port == "80") || (u.Scheme == "https" && port == "443") {
+		return u.Scheme + "://" + host
+	}
+	return u.Scheme + "://" + host + ":" + port
+}
+
+// archiveClient returns the client that downloads the archives. It follows
+// redirects (GitHub's codeload does redirect) but never carries credentials
+// across an origin: the Authorization header is dropped as soon as the scheme,
+// the host or the port changes, and a redirect from https to http is refused.
+// (net/http alone would keep the header for subdomains and ignore the scheme and
+// the port.) Tests may supply their own transport through Actions.HTTPClient;
+// its redirect policy is replaced.
+func (j *job) archiveClient() *http.Client {
+	c := &http.Client{}
+	if base := j.cfg.Actions.HTTPClient; base != nil {
+		cp := *base
+		c = &cp
+	}
+	c.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 10 {
+			return errors.New("stopped after 10 redirects")
+		}
+		prev := via[len(via)-1]
+		if prev.URL.Scheme == "https" && req.URL.Scheme != "https" {
+			return fmt.Errorf("refusing to follow a redirect from https to %s", req.URL.Scheme)
+		}
+		if originOf(prev.URL.String()) != originOf(req.URL.String()) {
+			req.Header.Del("Authorization")
+		}
+		return nil
+	}
+	return c
 }
 
 // sleepBackoff waits a random 10 to 30 seconds (BackoffTimerHelper.
@@ -62,10 +100,11 @@ func (j *job) sleepBackoff(ctx context.Context) time.Duration {
 // The final error is the one of the last attempt, which is what the runner
 // shows (PrepareActionsAsync prints the inner exception of
 // FailedToDownloadActionException).
-func (j *job) downloadArchive(ctx context.Context, num int, url, token, file string) error {
+func (j *job) downloadArchive(ctx context.Context, num int, ra ResolvedAction, file string) error {
+	url := ra.TarballURL
 	var last error
 	for attempt := 1; attempt <= downloadAttempts; attempt++ {
-		err := j.fetch(ctx, url, token, file)
+		err := j.fetch(ctx, ra, file)
 		if err == nil {
 			return nil
 		}
@@ -95,7 +134,12 @@ func (j *job) downloadArchive(ctx context.Context, num int, url, token, file str
 	return last
 }
 
-func (j *job) fetch(ctx context.Context, url, token, file string) error {
+func (j *job) fetch(ctx context.Context, ra ResolvedAction, file string) error {
+	url, token := ra.TarballURL, ra.Token
+	// The token goes only to the origin the host named, never by the URL alone.
+	if token != "" && (ra.AuthOrigin == "" || ra.AuthOrigin != originOf(url)) {
+		token = ""
+	}
 	ctx, cancel := context.WithTimeout(ctx, downloadTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -106,7 +150,7 @@ func (j *job) fetch(ctx context.Context, url, token, file string) error {
 		req.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte("x-access-token:"+token)))
 	}
 	req.Header.Set("User-Agent", "ermite-runner")
-	resp, err := j.httpClient().Do(req)
+	resp, err := j.archiveClient().Do(req)
 	if err != nil {
 		return err
 	}
@@ -156,7 +200,7 @@ func (j *job) downloadAction(ctx context.Context, num int, ra ResolvedAction, na
 	}
 	defer func() { _ = os.RemoveAll(tmp) }()
 	archive := filepath.Join(tmp, uuid.NewString()+".tar.gz")
-	if err := j.downloadArchive(ctx, num, ra.TarballURL, ra.Token, archive); err != nil {
+	if err := j.downloadArchive(ctx, num, ra, archive); err != nil {
 		return err
 	}
 	staging := filepath.Join(tmp, "_staging")

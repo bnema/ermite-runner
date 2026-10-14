@@ -176,4 +176,9 @@ message ResolvedAction {
   string token = 6;
   string source = 7;
   string error = 8;
+  // auth_origin (scheme://host[:port], as the sandbox reaches it) is the only
+  // origin the token may be sent to; empty means the token is never sent. The
+  // host sets it for archives served by the ermite server, from its own
+  // configuration, never from the URL alone.
+  string auth_origin = 9;
 }

@@ -1252,6 +1252,11 @@ type ResolvedAction struct {
 	Token         string                 `protobuf:"bytes,6,opt,name=token,proto3" json:"token,omitempty"`
 	Source        string                 `protobuf:"bytes,7,opt,name=source,proto3" json:"source,omitempty"`
 	Error         string                 `protobuf:"bytes,8,opt,name=error,proto3" json:"error,omitempty"`
+	// auth_origin (scheme://host[:port], as the sandbox reaches it) is the only
+	// origin the token may be sent to; empty means the token is never sent. The
+	// host sets it for archives served by the ermite server, from its own
+	// configuration, never from the URL alone.
+	AuthOrigin    string `protobuf:"bytes,9,opt,name=auth_origin,json=authOrigin,proto3" json:"auth_origin,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1338,6 +1343,13 @@ func (x *ResolvedAction) GetSource() string {
 func (x *ResolvedAction) GetError() string {
 	if x != nil {
 		return x.Error
+	}
+	return ""
+}
+
+func (x *ResolvedAction) GetAuthOrigin() string {
+	if x != nil {
+		return x.AuthOrigin
 	}
 	return ""
 }
@@ -1432,7 +1444,7 @@ const file_exec_proto_rawDesc = "" +
 	"\x0fResolveResponse\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x03R\x02id\x12\x14\n" +
 	"\x05error\x18\x02 \x01(\tR\x05error\x12?\n" +
-	"\aactions\x18\x03 \x03(\v2%.ermite.runner.exec.v1.ResolvedActionR\aactions\"\xe6\x01\n" +
+	"\aactions\x18\x03 \x03(\v2%.ermite.runner.exec.v1.ResolvedActionR\aactions\"\x87\x02\n" +
 	"\x0eResolvedAction\x12\x10\n" +
 	"\x03ref\x18\x01 \x01(\tR\x03ref\x12&\n" +
 	"\x0fname_with_owner\x18\x02 \x01(\tR\rnameWithOwner\x12\x12\n" +
@@ -1442,7 +1454,9 @@ const file_exec_proto_rawDesc = "" +
 	"tarballUrl\x12\x14\n" +
 	"\x05token\x18\x06 \x01(\tR\x05token\x12\x16\n" +
 	"\x06source\x18\a \x01(\tR\x06source\x12\x14\n" +
-	"\x05error\x18\b \x01(\tR\x05error*Y\n" +
+	"\x05error\x18\b \x01(\tR\x05error\x12\x1f\n" +
+	"\vauth_origin\x18\t \x01(\tR\n" +
+	"authOrigin*Y\n" +
 	"\n" +
 	"StreamKind\x12\x1b\n" +
 	"\x17STREAM_KIND_UNSPECIFIED\x10\x00\x12\x16\n" +
