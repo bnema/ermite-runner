@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -756,5 +757,61 @@ func TestArchiveRedirectPolicy(t *testing.T) {
 	}
 	if err := c.CheckRedirect(mkreq("https://a.example/"), make([]*http.Request, 10)); err == nil {
 		t.Error("redirect loops must stop")
+	}
+}
+
+// GO-008: Go rebuilds the headers of a redirected request from the first
+// request, so a chain that leaves the origin and stays on the new one, or comes
+// back, would get the Authorization header again on the third request. Real
+// servers, real redirects.
+func TestArchiveRedirectChainNeverReauthorises(t *testing.T) {
+	type hit struct{ path, auth string }
+	var mu sync.Mutex
+	var hits []hit
+	record := func(r *http.Request) {
+		mu.Lock()
+		hits = append(hits, hit{r.URL.Path, r.Header.Get("Authorization")})
+		mu.Unlock()
+	}
+	var a, b *httptest.Server
+	// a (the authorised origin) and b are two servers on the same host and
+	// different ports: the case of Go's host-only comparison.
+	a = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		record(r)
+		switch r.URL.Path {
+		case "/start":
+			http.Redirect(w, r, b.URL+"/first", http.StatusFound)
+		case "/back":
+			_, _ = w.Write(tarOf(t, "o-x-1", files{"action.yml": nodeAction, "main.sh": "echo ok\n"}))
+		}
+	}))
+	defer a.Close()
+	b = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		record(r)
+		switch r.URL.Path {
+		case "/first":
+			http.Redirect(w, r, b.URL+"/second", http.StatusFound)
+		case "/second":
+			http.Redirect(w, r, a.URL+"/back", http.StatusFound) // and back to the origin
+		}
+	}))
+	defer b.Close()
+	res := func(context.Context, []string) ([]ResolvedAction, error) {
+		return []ResolvedAction{{Ref: "o/x@v1", NameWithOwner: "o/x", ResolvedSHA: strings.Repeat("e", 40), TarballURL: a.URL + "/start", Token: "tok", AuthOrigin: originOf(a.URL)}}, nil
+	}
+	_, r := actionRun(t, files{}, "      - uses: o/x@v1\n", func(c *Config) { c.Actions.Resolver = res })
+	if r.Conclusion != ConclusionSuccess {
+		t.Fatalf("%+v", r)
+	}
+	want := []hit{{"/start", "set"}, {"/first", ""}, {"/second", ""}, {"/back", ""}}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(hits) != len(want) {
+		t.Fatalf("hits %v", hits)
+	}
+	for i, h := range hits {
+		if h.path != want[i].path || (h.auth != "") != (want[i].auth != "") {
+			t.Errorf("hit %d: %+v, want %+v (auth %q)", i, h, want[i], h.auth)
+		}
 	}
 }
