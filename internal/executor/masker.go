@@ -296,10 +296,26 @@ func (m *masker) has(s string) bool { return m != nil && m.mask(s) != s }
 type maskReporter struct {
 	j    *job
 	next Reporter
+
+	mu    sync.Mutex
+	names map[int]string // the masked name each step started with
 }
 
+// StepStarted masks the name with the secrets known when the step starts, which
+// is when the runner masks it: ActionRunner.EvaluateDisplayName masks the name
+// once, as it evaluates it (ActionRunner.cs:343-347), and nothing masks the
+// name of the timeline record afterwards. A secret that the step itself
+// registers (add-mask, the token of stop-commands) is thus not applied to its
+// own name (recorded: cmd-stop-commands, "pause-logging allowed by step env").
 func (r *maskReporter) StepStarted(n int, name string, at time.Time) {
-	r.next.StepStarted(n, r.j.mask(name), at)
+	name = r.j.mask(name)
+	r.mu.Lock()
+	if r.names == nil {
+		r.names = map[int]string{}
+	}
+	r.names[n] = name
+	r.mu.Unlock()
+	r.next.StepStarted(n, name, at)
 }
 
 func (r *maskReporter) Log(n int, at time.Time, line string) {
@@ -309,7 +325,18 @@ func (r *maskReporter) Log(n int, at time.Time, line string) {
 func (r *maskReporter) StepCompleted(n int, name string, c Conclusion, at time.Time) {
 	// The results of the step (outcome, annotations, summary) go first.
 	r.j.flushStepResults(r.next, n, c)
-	r.next.StepCompleted(n, r.j.mask(name), c, at)
+	// The name as reported at the start: the secrets a step registers while it
+	// runs do not apply to its own name (see StepStarted).
+	r.mu.Lock()
+	started, ok := r.names[n]
+	delete(r.names, n)
+	r.mu.Unlock()
+	if ok {
+		name = started
+	} else {
+		name = r.j.mask(name)
+	}
+	r.next.StepCompleted(n, name, c, at)
 }
 
 func (r *maskReporter) JobCompleted(res Result) {

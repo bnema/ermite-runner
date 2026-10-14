@@ -216,7 +216,7 @@ func (j *job) runEmbedded(parent *stepRun, c *node, scope string) {
 	j.mu.Unlock()
 	env, envErr := j.stepEnvironment(s)
 	s.env = env
-	s.name = j.displayName(c.st, env)
+	s.name = j.displayNameOf(c.st, env, true)
 	// The display name is masked before it is cut and escaped. The runner masks
 	// the finished line (ExecutionContext.Write), after SanitizeDisplayName and
 	// EscapeValue, so a secret holding ";", "]" or "%" (escaped by then) or cut by

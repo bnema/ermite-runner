@@ -127,6 +127,14 @@ func firstLine(contents string) string {
 // ActionRunner.cs:363): the evaluated name, or "Run " and the first line of
 // the script or the action reference.
 func (j *job) displayName(st *workflow.Step, env *ordered) string {
+	return j.displayNameOf(st, env, false)
+}
+
+// displayNameOf is displayName; embedded is true for a step of a composite
+// action, whose name is evaluated only when the step starts
+// (CompositeActionHandler.cs:314-318), with the contexts of that step (the
+// inputs and steps of the action included), never with those of the job message.
+func (j *job) displayNameOf(st *workflow.Step, env *ordered, embedded bool) string {
 	tok := st.Name
 	prefix := ""
 	switch {
@@ -156,7 +164,7 @@ func (j *job) displayName(st *workflow.Step, env *ordered) string {
 	// with the contexts of the step, when the step starts.
 	var name string
 	var err error
-	if serverEvaluable(tok) {
+	if !embedded && serverEvaluable(tok) {
 		j.mu.Lock()
 		sc := j.state.ServerContexts()
 		j.mu.Unlock()

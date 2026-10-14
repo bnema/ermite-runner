@@ -1241,3 +1241,62 @@ runs:
 		t.Errorf("end marker:\n%s", log)
 	}
 }
+
+// act-composite-basic: the start marker of an inner step carries its display
+// name evaluated with the contexts of the step, the inputs of the composite
+// included (CompositeActionHandler.cs:314-318 passes step.ExecutionContext's
+// ExpressionValues, not the job message's, which hold the inputs of the
+// workflow): recorded `Run echo "greeting=hello world" >> "$GITHUB_OUTPUT"`.
+func TestCompositeMarkerNameSeesTheInputsOfTheAction(t *testing.T) {
+	tree := files{".github/actions/basic/action.yml": `name: basic
+inputs:
+  who:
+    default: world
+runs:
+  using: composite
+  steps:
+    - id: greet
+      shell: bash
+      run: |
+        echo "greeting=hello ${{ inputs.who }}" >> "$GITHUB_OUTPUT"
+`}
+	rec, res := actionRun(t, tree, "      - id: basic\n        uses: ./.github/actions/basic\n      - id: given\n        uses: ./.github/actions/basic\n        with:\n          who: Ermite\n", nil)
+	if res.Conclusion != ConclusionSuccess {
+		t.Fatalf("%+v\n%s", res, logOf(rec.steps[1]))
+	}
+	for i, w := range []string{
+		`##[start-action display=Run echo "greeting=hello world" >> "$GITHUB_OUTPUT";id=basic.greet]`,
+		`##[start-action display=Run echo "greeting=hello Ermite" >> "$GITHUB_OUTPUT";id=given.greet]`,
+	} {
+		if got := logOf(rec.steps[1+i]); !strings.Contains(got, w) {
+			t.Errorf("step %d: missing %q:\n%s", i+1, w, got)
+		}
+	}
+}
+
+// act-pre-post, act-post-on-failure: the Post step of a local action prints the
+// warning about `pre` too, before "Post job cleanup." (ActionRunner.cs:104-109
+// does not look at the stage). GitHub does the same: its jobs carry six such
+// annotations (three uses, three Post steps) and five of the six Post logs hold
+// the line. The recorded first Post step lacks it only because the harness
+// attributes it to the injected dump step, whose log it drops
+// (ermite-conformance, movePreHeaderLines).
+func TestPostStageOfALocalActionWarnsAboutPreToo(t *testing.T) {
+	act := "name: pp\nruns:\n  using: node20\n  pre: pre.sh\n  main: main.sh\n  post: post.sh\n"
+	tree := files{".github/actions/pp/action.yml": act,
+		".github/actions/pp/pre.sh": "echo pre\n", ".github/actions/pp/main.sh": "echo main\n", ".github/actions/pp/post.sh": "echo post\n"}
+	rec, res := actionRun(t, tree, "      - uses: ./.github/actions/pp\n", nil)
+	if res.Conclusion != ConclusionSuccess {
+		t.Fatalf("%+v %v", res, rec.names())
+	}
+	warn := "##[warning]`pre` execution is not supported for local action from './.github/actions/pp'"
+	for _, name := range []string{"Run ./.github/actions/pp", "Post Run ./.github/actions/pp"} {
+		log := rec.step(t, name).Log
+		if strings.Count(strings.Join(log, "\n"), warn) != 1 {
+			t.Errorf("%s: want one warning:\n%v", name, log)
+		}
+	}
+	if log := rec.step(t, "Post Run ./.github/actions/pp").Log; len(log) < 2 || log[0] != warn || log[1] != "Post job cleanup." {
+		t.Errorf("post log starts %v", log[:min(2, len(log))])
+	}
+}

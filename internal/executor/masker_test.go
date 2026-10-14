@@ -198,3 +198,36 @@ jobs:
 		}
 	}
 }
+
+// cmd-stop-commands: the token of ::stop-commands:: is a secret from then on
+// (ActionCommandManager.cs:117-119) but the name of the step that registers it
+// is not masked: the runner masks a display name once, when it evaluates it
+// (ActionRunner.cs:343-347). Recorded: "pause-logging allowed by step env". A
+// secret that is known when the step starts is still masked in its name, and a
+// later step's name gets the new secret.
+func TestSecretRegisteredByAStepIsNotAppliedToItsOwnName(t *testing.T) {
+	needTools(t, "bash")
+	yaml := `on: push
+jobs:
+  main:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: pause-logging allowed by step env
+        env:
+          ACTIONS_ALLOW_UNSECURE_STOPCOMMAND_TOKENS: 'true'
+        run: |
+          echo "::stop-commands::pause-logging"
+          echo "::pause-logging::"
+      - name: after pause-logging
+        run: echo hi
+      - name: leak ${{ github.token }}
+        run: echo hi
+`
+	rec, res := runLocal(t, yaml, "main", func(c *Config) { c.ContextsJSON = tokenContexts() })
+	if res.Conclusion != ConclusionSuccess {
+		t.Fatalf("%+v", res)
+	}
+	rec.step(t, "pause-logging allowed by step env")
+	rec.step(t, "after ***")
+	rec.step(t, "leak ***")
+}
