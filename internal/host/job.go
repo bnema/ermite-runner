@@ -75,6 +75,7 @@ type jobRun struct {
 	// the budget of resolution requests of the job (see resolveActions).
 	publicOrigin, serverOrigin, guestForge string
 	resolveRounds, resolveRefs             int
+	resolved                               map[string]*execpb.ResolvedAction // by "uses", for the job
 	// hard stops the sandbox at once; set before the session starts.
 	hard    func()
 	result  *execpb.JobResult

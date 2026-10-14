@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"connectrpc.com/connect"
 
@@ -18,48 +19,66 @@ import (
 // Limits of what the sandbox may ask the server through the host. The sandbox
 // runs untrusted code, so the host does not trust its requests.
 //
-// A job asks once per level of the actions it uses (the runner's depth limit is
-// 9, so at most 10 rounds for the steps of the job and the repository
-// composites below them), and once more for every local composite action that
-// has repository actions in its steps, when its step runs: a workflow has at
-// most 1,000 steps. The budget below is generous for that and bounded:
-// maxResolveRounds requests and maxResolveRefsTotal references per job, whatever
-// they ask. (Local composites restart the depth at 1 as in the runner; if the
-// recording of ermite-conformance corpus/act-composite-depth shows that
-// github.com limits them, the executor will count them, and these limits stay
-// as the safety net.)
+// Resolutions are cached for the job, by "uses" value: an action that was
+// resolved once is never asked again (the same sha for the whole job is what the
+// server promises anyway), so a local composite action used 500 times costs one
+// resolution. The budget counts only what reaches the server:
+//
+//   - a request from the sandbox has at most maxRequestRefs references (a
+//     workflow has at most 1,000 steps), split into calls of maxResolveRefs, the
+//     limit of ResolveActionsRequest;
+//   - a job makes at most maxResolveRounds calls (up to 10 levels of repository
+//     composites, then one call per local composite that brings new actions) and
+//     asks for at most maxResolveRefsTotal distinct references.
+//
+// These are explicit limits of ermite, not of GitHub: a job that needs more
+// distinct actions than that fails "Set up job" with the message below.
 const (
-	maxResolveRefs      = 100  // per request: ResolveActionsRequest.refs
-	maxResolveRounds    = 128  // per job
-	maxResolveRefsTotal = 2048 // per job
-	maxRefLen           = 512
-	maxSegmentLen       = 100
+	maxRequestRefs      = 1000
+	maxResolveRefs      = 100  // per call to the server: ResolveActionsRequest.refs
+	maxResolveRounds    = 128  // calls per job
+	maxResolveRefsTotal = 2048 // distinct references per job
+	maxRefLen           = 1024 // the whole "uses" value
+	maxOwnerRepoLen     = 100  // owner and repository names
+	maxPathElemLen      = 255  // an element of the path of the action: a file name
 	maxRefNameLen       = 255
 )
 
-// checkUses validates a "uses" value of a request: owner/repo[/path]@ref with
-// the characters repository names, paths and refs have. The server decides
-// whether the action exists; this keeps garbage and oversized strings from
-// reaching it.
+// checkUses validates a "uses" value of a request: owner/repo[/path]@ref. The
+// owner and the repository have the characters of repository names; the path of
+// the action is a path in the repository (any characters but control ones, with
+// no empty, "." or ".." element and no backslash, which the runner reads as a
+// separator, action.ParseUses); the ref has the characters git allows. The
+// server decides whether the action exists; this keeps garbage and oversized
+// strings from reaching it.
 func checkUses(u string) error {
-	if u == "" || len(u) > maxRefLen {
-		return fmt.Errorf("%q is not a valid action reference", cut(u))
+	bad := func() error { return fmt.Errorf("%q is not a valid action reference", cut(u)) }
+	if u == "" || len(u) > maxRefLen || !utf8.ValidString(u) {
+		return bad()
 	}
 	name, ref, ok := strings.Cut(u, "@")
 	if !ok || ref == "" || len(ref) > maxRefNameLen || strings.ContainsFunc(ref, badRefRune) {
-		return fmt.Errorf("%q is not a valid action reference", cut(u))
+		return bad()
 	}
 	segs := strings.Split(name, "/")
 	if len(segs) < 2 {
-		return fmt.Errorf("%q is not a valid action reference", cut(u))
+		return bad()
 	}
-	for _, seg := range segs {
-		if seg == "" || seg == "." || seg == ".." || len(seg) > maxSegmentLen || strings.ContainsFunc(seg, badSegmentRune) {
-			return fmt.Errorf("%q is not a valid action reference", cut(u))
+	for _, seg := range segs[:2] {
+		if seg == "" || seg == "." || seg == ".." || len(seg) > maxOwnerRepoLen || strings.ContainsFunc(seg, badSegmentRune) {
+			return bad()
+		}
+	}
+	for _, seg := range segs[2:] {
+		if seg == "" || seg == "." || seg == ".." || len(seg) > maxPathElemLen || strings.ContainsFunc(seg, badPathRune) {
+			return bad()
 		}
 	}
 	return nil
 }
+
+// badPathRune: control characters (NUL included) and the backslash.
+func badPathRune(r rune) bool { return r < ' ' || r == 0x7f || r == '\\' || r == utf8.RuneError }
 
 func cut(s string) string {
 	if len(s) > 80 {
@@ -81,11 +100,13 @@ func badRefRune(r rune) bool {
 // resolveActions answers a ResolveRequest of the executor with
 // RunnerService.ResolveActions. The job token stays here: the executor only
 // gets what the server returns (the per-archive tokens included, which it
-// masks). Requests come one at a time (see execstream.JobHandler.Resolve). A
-// call that fails without a verdict is retried like the other job calls; a
-// failure of the call itself is reported to the executor, which fails "Set up
-// job" (ActionManager: FailedToResolveActionDownloadInfoException). ctx ends
-// with the session.
+// masks). Requests come one at a time (see execstream.JobHandler.Resolve). What
+// was resolved before in the job comes from the cache; the rest goes to the
+// server in calls of at most maxResolveRefs, under the budget above. A call that
+// fails without a verdict is retried like the other job calls; a failure of the
+// call itself is reported to the executor, which fails "Set up job"
+// (ActionManager: FailedToResolveActionDownloadInfoException). ctx ends with the
+// session.
 func (j *jobRun) resolveActions(ctx context.Context, req *execpb.ResolveRequest) *execpb.ResolveResponse {
 	fail := func(format string, a ...any) *execpb.ResolveResponse {
 		return &execpb.ResolveResponse{Error: fmt.Sprintf(format, a...)}
@@ -93,38 +114,91 @@ func (j *jobRun) resolveActions(ctx context.Context, req *execpb.ResolveRequest)
 	if len(req.Uses) == 0 {
 		return fail("an empty request for action resolution")
 	}
-	if len(req.Uses) > maxResolveRefs {
-		return fail("cannot resolve %d actions at once (the limit is %d)", len(req.Uses), maxResolveRefs)
+	if len(req.Uses) > maxRequestRefs {
+		return fail("cannot resolve %d actions at once (the limit is %d)", len(req.Uses), maxRequestRefs)
 	}
 	for _, u := range req.Uses {
 		if err := checkUses(u); err != nil {
 			return fail("%v", err)
 		}
 	}
-	j.mu.Lock()
-	j.resolveRounds++
-	j.resolveRefs += len(req.Uses)
-	over := j.resolveRounds > maxResolveRounds || j.resolveRefs > maxResolveRefsTotal
-	j.mu.Unlock()
-	if over {
-		return fail("this job asked to resolve too many actions (the limits are %d requests and %d references)", maxResolveRounds, maxResolveRefsTotal)
-	}
-	refs := make([]*ermite.ActionRef, len(req.Uses))
-	for i, u := range req.Uses {
-		refs[i] = &ermite.ActionRef{Uses: u}
-	}
-	// The job ending, or the session, stops the call.
+	// The job ending, or the session, stops the calls.
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	stop := context.AfterFunc(j.ctx, cancel)
 	defer stop()
+
+	got := map[string]*execpb.ResolvedAction{}
+	var pending []string
+	j.mu.Lock()
+	for _, u := range req.Uses {
+		if _, dup := got[u]; dup {
+			continue
+		}
+		if c, ok := j.resolved[u]; ok {
+			got[u] = c
+			continue
+		}
+		got[u] = nil
+		pending = append(pending, u)
+	}
+	j.mu.Unlock()
+	for len(pending) > 0 {
+		n := min(len(pending), maxResolveRefs)
+		chunk := pending[:n]
+		pending = pending[n:]
+		j.mu.Lock()
+		j.resolveRounds++
+		j.resolveRefs += len(chunk)
+		over := j.resolveRounds > maxResolveRounds || j.resolveRefs > maxResolveRefsTotal
+		j.mu.Unlock()
+		if over {
+			return fail("this job asked to resolve too many actions (the limits are %d requests and %d distinct references)", maxResolveRounds, maxResolveRefsTotal)
+		}
+		res, errResp := j.callResolve(ctx, chunk)
+		if errResp != nil {
+			return errResp
+		}
+		j.mu.Lock()
+		for i, u := range chunk {
+			got[u] = res[i]
+			if res[i].Error == "" { // an error is not cached: it may be a passing one
+				if j.resolved == nil {
+					j.resolved = map[string]*execpb.ResolvedAction{}
+				}
+				j.resolved[u] = res[i]
+			}
+		}
+		j.mu.Unlock()
+	}
+	out := &execpb.ResolveResponse{}
+	for _, u := range req.Uses {
+		out.Actions = append(out.Actions, got[u])
+	}
+	return out
+}
+
+// callResolve makes one call to the server, with retries, and converts the
+// answer; the second result is the error to send to the executor.
+func (j *jobRun) callResolve(ctx context.Context, uses []string) ([]*execpb.ResolvedAction, *execpb.ResolveResponse) {
+	fail := func(format string, a ...any) ([]*execpb.ResolvedAction, *execpb.ResolveResponse) {
+		return nil, &execpb.ResolveResponse{Error: fmt.Sprintf(format, a...)}
+	}
+	refs := make([]*ermite.ActionRef, len(uses))
+	for i, u := range uses {
+		refs[i] = &ermite.ActionRef{Uses: u}
+	}
 	b := backoff{min: j.t.BackoffMin, max: j.t.BackoffMax}
 	for attempt := 1; ; attempt++ {
 		cctx, ccancel := context.WithTimeout(ctx, j.t.CallTimeout)
 		resp, err := j.client.ResolveActions(cctx, connect.NewRequest(&ermite.ResolveActionsRequest{JobId: j.job.JobId, Refs: refs}))
 		ccancel()
 		if err == nil {
-			return j.resolveResponse(resp.Msg, len(req.Uses))
+			conv := j.resolveResponse(resp.Msg, len(uses))
+			if conv.Error != "" {
+				return fail("%s", conv.Error)
+			}
+			return conv.Actions, nil
 		}
 		if ctx.Err() != nil {
 			return fail("the job was cancelled while its actions were resolved")

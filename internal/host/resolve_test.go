@@ -5,6 +5,7 @@ package host
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -19,15 +20,25 @@ import (
 
 type resolveStub struct {
 	stubClient
-	got  *ermite.ResolveActionsRequest
-	resp *ermite.ResolveActionsResponse
-	err  error
+	got    *ermite.ResolveActionsRequest
+	resp   *ermite.ResolveActionsResponse
+	err    error
+	fn     func(*ermite.ResolveActionsRequest) *ermite.ResolveActionsResponse
+	onCall func(*ermite.ResolveActionsRequest)
+	calls  int
 }
 
 func (c *resolveStub) ResolveActions(_ context.Context, r *connect.Request[ermite.ResolveActionsRequest]) (*connect.Response[ermite.ResolveActionsResponse], error) {
 	c.got = r.Msg
+	c.calls++
+	if c.onCall != nil {
+		c.onCall(r.Msg)
+	}
 	if c.err != nil {
 		return nil, c.err
+	}
+	if c.fn != nil {
+		return connect.NewResponse(c.fn(r.Msg)), nil
 	}
 	return connect.NewResponse(c.resp), nil
 }
@@ -99,15 +110,22 @@ func TestSetGitHubToken(t *testing.T) {
 }
 
 func TestCheckUses(t *testing.T) {
+	long := func(n int) string { return strings.Repeat("a", n) }
 	for u, ok := range map[string]bool{
 		"actions/checkout@v4": true, "o/r/sub/dir@refs/heads/feat/x": true, "o/r@" + strings.Repeat("a", 40): true, "o/r.go_x-y@v1.2.3": true,
+		// GO-011: the path of the action is a path, not a repository name.
+		"o/r/action+tools@v1": true, "o/r/déploiement/日本語@v1": true, "o/r/with space/x@v1": true, "o/r/a(b)[c]{d}~e#f%g@v1": true,
+		"o/r/" + long(255) + "@v1": true, "o/r/.github/actions/x@v1": true, "o/r/.hidden@v1": true, "o/r/a..b@v1": true,
 		"": false, "o/r": false, "o@v1": false, "o/r@": false, "/r@v1": false, "o//r@v1": false, "o/../r@v1": false, "o/r/..@v1": false,
+		"o/r/a/../b@v1": false, "o/r/./a@v1": false, "o/r/a//b@v1": false, "o/r/a/@v1": false,
+		"o/r/a\\b@v1": false, "o/r/a\x00b@v1": false, "o/r/a\nb@v1": false, "o/r/a\x7fb@v1": false, "o/r/\xff@v1": false,
+		"o/r/" + long(256) + "@v1": false, long(101) + "/r@v1": false, "o/" + long(101) + "@v1": false,
+		"o/r@" + long(256): false, "o/r/" + strings.Repeat("a/", 600) + "x@v1": false,
 		"o/r@v1 x": false, "o/r@v1\n": false, "o/r@v~1": false, "o/r@v:1": false, "o /r@v1": false, "o/r@v1@v2": false,
-		"o/r\x00@v1": false, strings.Repeat("a", 101) + "/r@v1": false, "o/r@" + strings.Repeat("a", 256): false,
-		"o/" + strings.Repeat("a/", 300) + "r@v1": false, "ö/r@v1": false,
+		"o/r\x00@v1": false, "ö/r@v1": false, "o/r+x@v1": false, "o/r:x@v1": false,
 	} {
 		if err := checkUses(u); (err == nil) != ok {
-			t.Errorf("%q: %v, want ok=%v", u, err, ok)
+			t.Errorf("%q: %v, want ok=%v", cut(u), err, ok)
 		}
 	}
 }
@@ -123,10 +141,14 @@ func TestResolveActionsRejectsAndBudgets(t *testing.T) {
 			t.Errorf("%q: error %q, called=%v", uses, r.Error, c.got != nil)
 		}
 	}
+	// Distinct references, one per request: the rounds are the limit.
+	c.resp = nil
+	j = resolveJob(c)
+	c.fn = func(r *ermite.ResolveActionsRequest) *ermite.ResolveActionsResponse { return echo(r) }
 	var calls int
 	for i := 0; i < maxResolveRounds+20; i++ {
 		c.got = nil
-		r := j.resolveActions(context.Background(), &execpb.ResolveRequest{Uses: []string{"a/b@v1"}})
+		r := j.resolveActions(context.Background(), &execpb.ResolveRequest{Uses: []string{fmt.Sprintf("a/b%d@v1", i)}})
 		if c.got != nil {
 			calls++
 		}
@@ -137,24 +159,85 @@ func TestResolveActionsRejectsAndBudgets(t *testing.T) {
 	if calls != maxResolveRounds {
 		t.Errorf("%d calls, the budget is %d", calls, maxResolveRounds)
 	}
-	// The references count too.
+	// Distinct references in big requests: the references are the limit.
 	j = resolveJob(c)
-	c.resp = &ermite.ResolveActionsResponse{}
-	for i := 0; i < maxResolveRefs; i++ {
-		c.resp.Actions = append(c.resp.Actions, &ermite.ResolvedAction{Ref: "a/b@v1"})
-	}
-	big := make([]string, maxResolveRefs)
-	for i := range big {
-		big[i] = "a/b@v1"
-	}
 	served := 0
 	for i := 0; i < 40; i++ {
+		big := make([]string, maxResolveRefs)
+		for k := range big {
+			big[k] = fmt.Sprintf("a/b%d_%d@v1", i, k)
+		}
 		if r := j.resolveActions(context.Background(), &execpb.ResolveRequest{Uses: big}); r.Error == "" {
 			served++
 		}
 	}
 	if served != maxResolveRefsTotal/maxResolveRefs {
 		t.Errorf("served %d requests of %d refs, the budget is %d refs", served, maxResolveRefs, maxResolveRefsTotal)
+	}
+}
+
+func echo(r *ermite.ResolveActionsRequest) *ermite.ResolveActionsResponse {
+	out := &ermite.ResolveActionsResponse{}
+	for _, ref := range r.Refs {
+		out.Actions = append(out.Actions, &ermite.ResolvedAction{Ref: ref.Uses, NameWithOwner: "a/b"})
+	}
+	return out
+}
+
+// GO-010: a resolution is cached for the job, so repeated invocations of a local
+// composite action cost nothing, and a big request is split into calls.
+func TestResolveActionsCacheAndBatches(t *testing.T) {
+	c := &resolveStub{}
+	c.fn = echo
+	j := resolveJob(c)
+	for i := 0; i < 500; i++ {
+		r := j.resolveActions(context.Background(), &execpb.ResolveRequest{Uses: []string{"a/b@v1", "a/c/sub@v2"}})
+		if r.Error != "" || len(r.Actions) != 2 || r.Actions[1].Ref != "a/c/sub@v2" {
+			t.Fatalf("invocation %d: %+v", i, r)
+		}
+	}
+	if c.calls != 1 {
+		t.Errorf("%d calls for 500 invocations of the same actions", c.calls)
+	}
+	// A new action goes through; only it is asked.
+	c.got = nil
+	if r := j.resolveActions(context.Background(), &execpb.ResolveRequest{Uses: []string{"a/b@v1", "a/new@v1"}}); r.Error != "" || len(c.got.Refs) != 1 || c.got.Refs[0].Uses != "a/new@v1" {
+		t.Errorf("%+v %v", r, c.got)
+	}
+	// Duplicates in one request are asked once, answered in order.
+	j = resolveJob(c)
+	c.calls = 0
+	r := j.resolveActions(context.Background(), &execpb.ResolveRequest{Uses: []string{"a/x@v1", "a/y@v1", "a/x@v1"}})
+	if r.Error != "" || len(r.Actions) != 3 || r.Actions[2].Ref != "a/x@v1" || r.Actions[1].Ref != "a/y@v1" || c.calls != 1 || len(c.got.Refs) != 2 {
+		t.Errorf("%+v calls %d", r, c.calls)
+	}
+	// 250 distinct references: three calls of at most 100, in order.
+	j = resolveJob(c)
+	c.calls = 0
+	var sizes []int
+	c.onCall = func(r *ermite.ResolveActionsRequest) { sizes = append(sizes, len(r.Refs)) }
+	many := make([]string, 250)
+	for i := range many {
+		many[i] = fmt.Sprintf("a/b%d@v1", i)
+	}
+	r = j.resolveActions(context.Background(), &execpb.ResolveRequest{Uses: many})
+	if r.Error != "" || len(r.Actions) != 250 || r.Actions[249].Ref != many[249] || fmt.Sprint(sizes) != "[100 100 50]" {
+		t.Errorf("%q calls %v", r.Error, sizes)
+	}
+	// An error of one action is not cached.
+	c.fn = func(r *ermite.ResolveActionsRequest) *ermite.ResolveActionsResponse {
+		return &ermite.ResolveActionsResponse{Actions: []*ermite.ResolvedAction{{Ref: r.Refs[0].Uses, Error: "not found"}}}
+	}
+	j = resolveJob(c)
+	c.calls = 0
+	_ = j.resolveActions(context.Background(), &execpb.ResolveRequest{Uses: []string{"a/gone@v1"}})
+	_ = j.resolveActions(context.Background(), &execpb.ResolveRequest{Uses: []string{"a/gone@v1"}})
+	if c.calls != 2 {
+		t.Errorf("an error was cached: %d calls", c.calls)
+	}
+	// More than the request limit.
+	if r := j.resolveActions(context.Background(), &execpb.ResolveRequest{Uses: make([]string, maxRequestRefs+1)}); r.Error == "" {
+		t.Error("a request over the limit was served")
 	}
 }
 
