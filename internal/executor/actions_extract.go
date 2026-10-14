@@ -9,8 +9,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path"
+	"path/filepath"
 	"strings"
 )
 
@@ -78,7 +80,7 @@ func extractTarball(ctx context.Context, r io.Reader, dir string, owner *[2]int)
 		}
 		h, err := tr.Next()
 		if errors.Is(err, io.EOF) {
-			return nil
+			return verifyLinks(ctx, root, dir)
 		}
 		if err != nil {
 			var ea errArchive
@@ -208,7 +210,10 @@ func extractEntry(root *os.Root, tr *tar.Reader, h *tar.Header, owner *[2]int, t
 		}
 		return chown()
 	case tar.TypeSymlink:
-		if !linkInside(name, h.Linkname, false) {
+		// Only the shape is checked here: where the link leads depends on the links
+		// that come before and after it, so verifyLinks resolves every symlink of
+		// the finished tree.
+		if h.Linkname == "" || strings.HasPrefix(h.Linkname, "/") || strings.ContainsRune(h.Linkname, 0) {
 			return errArchive(fmt.Sprintf("the archive has a link that points outside of it: %q -> %q", name, h.Linkname))
 		}
 		_ = root.Remove(name)
@@ -225,4 +230,90 @@ func extractEntry(root *os.Root, tr *tar.Reader, h *tar.Header, owner *[2]int, t
 		return root.Link(tgt, name)
 	}
 	return nil // devices, fifos: skipped
+}
+
+// maxLinkHops bounds the symbolic links followed to resolve one link (Linux
+// stops at 40).
+const maxLinkHops = 40
+
+// verifyLinks resolves every symbolic link of the extracted tree component by
+// component, following the links met on the way, and rejects the archive when
+// one leads out of the tree or loops. A lexical check is not enough: with
+// "a -> ." a link "link -> a/../outside" looks like it stays in the tree, and
+// leaves it. A link to something that does not exist is allowed (git archives
+// have such links); the rest of its target is still resolved.
+func verifyLinks(ctx context.Context, root *os.Root, dir string) error {
+	return filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if d.Type()&fs.ModeSymlink == 0 {
+			return nil
+		}
+		rel, err := filepath.Rel(dir, p)
+		if err != nil {
+			return err
+		}
+		target, err := root.Readlink(filepath.ToSlash(rel))
+		if err != nil {
+			return err
+		}
+		if err := resolveInside(root, path.Dir(filepath.ToSlash(rel)), target); err != nil {
+			return errArchive(fmt.Sprintf("the archive has a link that points outside of it: %q -> %q (%v)", filepath.ToSlash(rel), target, err))
+		}
+		return nil
+	})
+}
+
+// resolveInside resolves target, relative to the directory dirRel of the tree
+// (slash separated, "." for the root), the way the kernel would, and fails when
+// the path leaves the root, is absolute, or needs more than maxLinkHops links.
+func resolveInside(root *os.Root, dirRel, target string) error {
+	var cur []string // resolved directory components, none of them a link
+	if dirRel != "." && dirRel != "" {
+		cur = strings.Split(dirRel, "/")
+	}
+	pending := strings.Split(target, "/")
+	hops := 0
+	for len(pending) > 0 {
+		c := pending[0]
+		pending = pending[1:]
+		switch c {
+		case "", ".":
+			continue
+		case "..":
+			if len(cur) == 0 {
+				return errors.New("leaves the tree")
+			}
+			cur = cur[:len(cur)-1]
+			continue
+		}
+		p := strings.Join(append(append([]string(nil), cur...), c), "/")
+		fi, err := root.Lstat(p)
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+			cur = append(cur, c)
+			continue
+		case err != nil:
+			return err
+		case fi.Mode()&fs.ModeSymlink == 0:
+			cur = append(cur, c)
+			continue
+		}
+		if hops++; hops > maxLinkHops {
+			return errors.New("too many levels of links")
+		}
+		next, err := root.Readlink(p)
+		if err != nil {
+			return err
+		}
+		if strings.HasPrefix(next, "/") || next == "" {
+			return errors.New("an absolute or empty link")
+		}
+		pending = append(strings.Split(next, "/"), pending...)
+	}
+	return nil
 }

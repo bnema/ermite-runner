@@ -209,3 +209,49 @@ func TestExtractTarballCancelled(t *testing.T) {
 		t.Fatalf("%v", err)
 	}
 }
+
+// GO-007: where a link leads depends on the other links. "a -> ." makes
+// "link -> a/../outside" leave the tree, which a lexical check accepts.
+func TestExtractTarballLinkChainsAreResolved(t *testing.T) {
+	sym := func(name, to string) tent { return tent{name: "top/" + name, typ: tar.TypeSymlink, link: to} }
+	for name, tc := range map[string]struct {
+		ents []tent
+		ok   bool
+	}{
+		"two links escape":         {[]tent{sym("a", "."), sym("link", "a/../outside")}, false},
+		"two links, reverse order": {[]tent{sym("link", "a/../outside"), sym("a", ".")}, false}, // forward reference
+		"three hops":               {[]tent{sym("a", "b"), sym("b", "."), sym("link", "a/../../x")}, false},
+		"through a directory link": {[]tent{{name: "top/d/e/f", body: "x"}, sym("d/up", "../.."), sym("link", "d/up/..")}, false},
+		"absolute inside a hop":    {[]tent{sym("a", "/etc"), sym("link", "a/passwd")}, false},
+		"loop":                     {[]tent{sym("a", "b"), sym("b", "a"), sym("link", "a/x")}, false},
+		"long chain":               {chain(45), false},
+		"stays inside":             {[]tent{{name: "top/d/f", body: "1"}, sym("a", "."), sym("link", "a/d/f"), sym("up", "d/..")}, true},
+		"dangling is fine":         {[]tent{sym("link", "nowhere/at/all")}, true},
+		"forward ref inside":       {[]tent{sym("link", "a/b"), sym("a", "d"), {name: "top/d/b", body: "1"}}, true},
+		"dotdot after real dir":    {[]tent{{name: "top/d/f", body: "1"}, sym("link", "d/../d/f")}, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			parent := t.TempDir()
+			dir := filepath.Join(parent, "stage")
+			_ = os.Mkdir(dir, 0o755)
+			err := extractTarball(context.Background(), tarball(t, tc.ents...), dir, nil)
+			if (err == nil) != tc.ok {
+				t.Fatalf("accepted=%v, want %v (%v)", err == nil, tc.ok, err)
+			}
+		})
+	}
+}
+
+// chain makes n links, each one to the next, the last to ".": more hops than
+// the kernel follows.
+func chain(n int) []tent {
+	var out []tent
+	for i := 0; i < n; i++ {
+		to := "l" + string(rune('A'+(i+1)%26)) + string(rune('a'+(i+1)/26))
+		if i == n-1 {
+			to = "."
+		}
+		out = append(out, tent{name: "top/l" + string(rune('A'+i%26)) + string(rune('a'+i/26)), typ: tar.TypeSymlink, link: to})
+	}
+	return append(out, tent{name: "top/start", typ: tar.TypeSymlink, link: "lAa/x"})
+}
