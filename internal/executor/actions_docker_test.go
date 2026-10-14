@@ -229,3 +229,26 @@ func TestTranslatePath(t *testing.T) {
 		}
 	}
 }
+
+// The Dockerfile is passed as written (Path.Combine) and the build context is
+// Directory.GetParent(dockerFile).FullName, which Path.GetFullPath resolves
+// lexically: "." and ".." are folded, symlinks are not looked at. Recorded in
+// act-docker-pre-post: -f ".../work/r/r/./.github/actions/x/Dockerfile" with the
+// context ".../work/r/r/.github/actions/x".
+func TestDockerfileContextIsTheLexicalParent(t *testing.T) {
+	tree := files{
+		"act/action.yml": "name: d\nruns:\n  using: docker\n  image: sub/../Dockerfile\n",
+		"act/Dockerfile": "FROM alpine\n",
+		"act/sub/keep":   "",
+	}
+	rec, res, cs, _ := dockerRun(t, tree, "      - uses: ./act\n", 0)
+	if res.Conclusion != ConclusionSuccess {
+		t.Fatalf("%+v\n%s", res, logOf(rec.steps[1]))
+	}
+	if len(cs) < 1 || cs[0][0] != "build" {
+		t.Fatalf("calls %v", cs)
+	}
+	if f, c := cs[0][4], cs[0][5]; !strings.HasSuffix(f, "/./act/sub/../Dockerfile") || !strings.HasSuffix(c, "/act") || strings.Contains(c, "..") || strings.Contains(c, "/./") {
+		t.Errorf("-f %q, context %q", f, c)
+	}
+}

@@ -108,7 +108,7 @@ func TestNodeActionInContainerUsesExternalsAndAlpine(t *testing.T) {
 			t.Errorf("probe: %v", ex[0])
 		}
 		run := strings.Join(ex[1], "\n")
-		if !strings.Contains(run, "\n/__e/"+tc.node+"/bin/node\n") || !strings.Contains(run, "\n/__w/hello/hello/.github/actions/x/index.js") {
+		if !strings.Contains(run, "\n/__e/"+tc.node+"/bin/node\n") || !strings.Contains(run, "\n/__w/hello/hello/./.github/actions/x/index.js") {
 			t.Errorf("%s: node call:\n%s", tc.node, run)
 		}
 		if got := logOf(rec.step(t, "a")); !strings.Contains(got, "exec  "+strings.Repeat("0", 63)+"1 sh -c \"cat /etc/*release | grep ^ID\"") {

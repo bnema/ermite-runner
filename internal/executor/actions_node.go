@@ -177,7 +177,7 @@ func (j *job) runNode(s *stepRun, def *actionDef, in *inputSet, env *ordered, ca
 	if target == "" {
 		return fail(ghErrorf("Value cannot be null or empty. (Parameter 'target')"))
 	}
-	script := filepath.Join(def.dir, filepath.FromSlash(target))
+	script := pathCombine(def.dir, filepath.FromSlash(target))
 	if st, err := os.Stat(script); err != nil || st.IsDir() {
 		return fail(ghErrorf("File not found: '%s'", script))
 	}

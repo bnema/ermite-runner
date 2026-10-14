@@ -4,7 +4,7 @@ package executor
 
 import (
 	"fmt"
-	"os"
+	"path/filepath"
 	"time"
 )
 
@@ -83,7 +83,10 @@ func (j *job) buildActionImage(s *stepRun, info buildInfo, users []*node, cancel
 	tag := newImageTag(j.dockerLabel())
 	code := 0
 	for try := 1; try <= buildAttempts; try++ {
-		c := j.dockerBuildCmd(tag, info.dockerfile, dirOf(info.dockerfile))
+		// Directory.GetParent(Dockerfile).FullName: the parent after Path.GetFullPath,
+		// which folds "." and ".." lexically, as filepath.Dir does; the Dockerfile
+		// itself is passed as written.
+		c := j.dockerBuildCmd(tag, info.dockerfile, filepath.Dir(info.dockerfile))
 		var err error
 		code, err = j.runDockerCmd(s, c, dirOrCwd(info.workDir), nil, cancel)
 		if err == errCancelled {
@@ -116,15 +119,6 @@ func (j *job) buildActionImage(s *stepRun, info buildInfo, users []*node, cancel
 		n.image = tag
 	}
 	return resSucceeded
-}
-
-func dirOf(p string) string {
-	for i := len(p) - 1; i >= 0; i-- {
-		if p[i] == os.PathSeparator {
-			return p[:i]
-		}
-	}
-	return "."
 }
 
 // pullBackoff is a random wait of 1 to 10 seconds.

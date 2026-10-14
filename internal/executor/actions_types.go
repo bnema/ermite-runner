@@ -158,6 +158,9 @@ type node struct {
 	// postRegistered is Root.StepsWithPostRegistered / EmbeddedStepsWithPostRegistered.
 	postRegistered bool
 	postCond       string
+	// runtimePrepared marks the steps of a local composite action, which are
+	// prepared when the action runs (see registrar).
+	runtimePrepared bool
 }
 
 // nodeSeq numbers the nodes, for their state keys.

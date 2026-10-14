@@ -50,6 +50,9 @@ func (j *job) prepareLocalComposite(s *stepRun, def *actionDef, cancel <-chan st
 	if err != nil {
 		return err
 	}
+	for _, k := range kids {
+		k.runtimePrepared = true
+	}
 	n.children = kids
 	n.preSteps, n.postSteps = nil, nil
 	j.out(s.num, "Prepare all required actions")
@@ -150,7 +153,7 @@ func (j *job) runComposite(s *stepRun, def *actionDef, in *inputSet, env *ordere
 	ok := resSucceeded
 	s.result = &ok
 	for _, c := range kids {
-		j.runEmbedded(s, c)
+		j.runEmbedded(s, c, scope)
 	}
 	// Outputs are evaluated in the steps context of the action and belong to the
 	// step that uses it (ExecutionContext.SetOutput of the composite step).
@@ -196,7 +199,10 @@ func (j *job) compositeOutputs(s *stepRun, def *actionDef) []Pair {
 // step of the composite action runs inside the step that uses it, with its own
 // environment, condition, cancellation watch and result. Its log lines belong
 // to the outer step.
-func (j *job) runEmbedded(parent *stepRun, c *node) {
+//
+// scope is the steps context of the action; with the id of the step it is the
+// id of the step's markers (the fully qualified context name).
+func (j *job) runEmbedded(parent *stepRun, c *node, scope string) {
 	s := &stepRun{j: j, num: parent.num, st: c.st, n: c, stage: parent.stage, parent: parent, fc: j.fc.Fork()}
 	// The issues, summaries and state of an inner step belong to the step that
 	// uses the action, whose collector counts them (10 per level, the outer
@@ -211,9 +217,26 @@ func (j *job) runEmbedded(parent *stepRun, c *node) {
 	env, envErr := j.stepEnvironment(s)
 	s.env = env
 	s.name = j.displayName(c.st, env)
+	// The display name is masked before it is cut and escaped. The runner masks
+	// the finished line (ExecutionContext.Write), after SanitizeDisplayName and
+	// EscapeValue, so a secret holding ";", "]" or "%" (escaped by then) or cut by
+	// the 1000-character limit would escape its masker. Masking first is stricter;
+	// the line is masked again when it is written, as every line is.
+	id := scope + "." + c.st.ID
 	if envErr != nil {
+		// The error of the environment is logged and the step marked failed, then
+		// the start marker is printed (CompositeActionHandler.cs:296-302, :308-324).
+		// DIVERGENCE: the runner does not stop there. It falls through to the
+		// condition (:372-390); success() of an embedded main step reads
+		// github.action_status, set from the composite's result before the env was
+		// evaluated (:246-248, SuccessFunction.cs:28), so the default condition still
+		// holds and the runner RUNS the step, without the env that failed, and ends
+		// with the marker of its failed result and the elapsed time. Here the step
+		// does not run and the end marker says duration_ms=0.
 		j.errorf(s.num, "%s", templateNotValid(envErr, true))
+		j.out(parent.num, startMarker(j.mask(s.name), id))
 		j.finishStep(s, resFailed)
+		j.out(parent.num, endMarker(id, "failure", "failure", 0))
 		return
 	}
 	q := qstep{n: c, stage: parent.stage}
@@ -225,5 +248,18 @@ func (j *job) runEmbedded(parent *stepRun, c *node) {
 	case stagePost:
 		q.cond = c.postCond
 	}
-	j.runGuarded(s, q, true)
+	j.out(parent.num, startMarker(j.mask(s.name), id))
+	start := j.now()
+	r := j.runGuarded(s, q, true)
+	// Outcome is the result before continue-on-error, conclusion the final one;
+	// a skipped step takes no time (CompositeActionHandler.cs:415, :448).
+	outcome := r
+	if s.outcome != nil {
+		outcome = *s.outcome
+	}
+	ms := j.now().Sub(start).Milliseconds()
+	if r == resSkipped {
+		ms = 0
+	}
+	j.out(parent.num, endMarker(id, markerResult(outcome), markerResult(r), ms))
 }

@@ -82,6 +82,7 @@ func (j *job) dockerBuildCmd(tag, dockerfile, context string) dockerCmd {
 
 // buildImage builds an image from a Dockerfile, in the step.
 func (j *job) buildImage(s *stepRun, tag, dockerfile, workDir string, cancel <-chan struct{}) error {
+	// The context is Directory.GetParent(dockerfile).FullName (see buildActionImage).
 	c := j.dockerBuildCmd(tag, dockerfile, filepath.Dir(dockerfile))
 	code, err := j.runDockerCmd(s, c, dirOrCwd(workDir), nil, cancel)
 	if err != nil {
@@ -122,7 +123,7 @@ func (j *job) runDocker(s *stepRun, def *actionDef, in *inputSet, env *ordered, 
 			if im.Kind == action.ImageRegistry {
 				image = im.Ref
 			} else {
-				build = filepath.Join(def.dir, filepath.FromSlash(im.Path))
+				build = pathCombine(def.dir, filepath.FromSlash(im.Path))
 			}
 		}
 		if build != "" {

@@ -22,8 +22,8 @@ import (
 func (j *job) loadManifest(num int, dir string) (*action.Action, string, error) {
 	var file string
 	for _, name := range []string{"action.yml", "action.yaml"} {
-		if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
-			file = filepath.Join(dir, name)
+		if _, err := os.Stat(pathCombine(dir, name)); err == nil {
+			file = pathCombine(dir, name)
 			break
 		}
 	}
@@ -79,8 +79,8 @@ func (j *job) loadDef(num int, dir string) (*actionDef, error) {
 		return d, nil
 	}
 	for _, name := range []string{"Dockerfile", "dockerfile"} {
-		if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
-			return &actionDef{kind: kindDocker, dir: dir, dockerfile: filepath.Join(dir, name)}, nil
+		if _, err := os.Stat(pathCombine(dir, name)); err == nil {
+			return &actionDef{kind: kindDocker, dir: dir, dockerfile: pathCombine(dir, name)}, nil
 		}
 	}
 	return nil, errNoAction
@@ -94,11 +94,11 @@ var errNoAction = fmt.Errorf("no action")
 func (j *job) actionDir(n *node) string {
 	switch n.uses.Kind {
 	case action.UsesLocal:
-		return filepath.Join(j.state.GitHub("workspace"), filepath.FromSlash(strings.ReplaceAll(n.uses.Path, `\`, "/")))
+		return pathCombine(j.state.GitHub("workspace"), filepath.FromSlash(strings.ReplaceAll(n.uses.Path, `\`, "/")))
 	case action.UsesRepository:
-		d := filepath.Join(j.state.Layout().Actions, filepath.FromSlash(n.uses.Name), n.uses.Ref)
+		d := pathCombine(j.state.Layout().Actions, filepath.FromSlash(n.uses.Name), n.uses.Ref)
 		if n.uses.Path != "" {
-			d = filepath.Join(d, filepath.FromSlash(n.uses.Path))
+			d = pathCombine(d, filepath.FromSlash(n.uses.Path))
 		}
 		return d
 	}
@@ -120,4 +120,26 @@ func refString(u action.Uses) string {
 		return "docker://" + u.Image
 	}
 	return ""
+}
+
+// pathCombine is .NET's Path.Combine: the parts are joined with a separator and
+// nothing is cleaned, so a "./" in the path of a local action stays in the
+// messages and in github.action_path (recorded: ".../work/repo/repo/./.github/
+// actions/basic"); a rooted part replaces what precedes it (an absolute `main`
+// is that file). Paths are not confined to the action directory, as in the
+// runner: ../ and symlinks may leave it.
+func pathCombine(parts ...string) string {
+	out := ""
+	for _, p := range parts {
+		switch {
+		case p == "":
+		case out == "" || filepath.IsAbs(p):
+			out = p
+		case strings.HasSuffix(out, string(filepath.Separator)):
+			out += p
+		default:
+			out += string(filepath.Separator) + p
+		}
+	}
+	return out
 }

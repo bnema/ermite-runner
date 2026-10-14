@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -377,7 +378,7 @@ runs:
 		t.Fatalf("%+v", res)
 	}
 	got := logOf(rec.steps[1])
-	if !strings.Contains(got, "##[error]Process completed with exit code 3.") || strings.Contains(got, "never") ||
+	if !strings.Contains(got, "##[error]Process completed with exit code 3.") || strings.Contains(got, "\nnever") ||
 		!strings.Contains(got, "status=failure") {
 		t.Errorf("%s", got)
 	}
@@ -946,5 +947,247 @@ func TestTokenAllowedOrigins(t *testing.T) {
 	}
 	if tokenAllowed(ResolvedAction{TarballURL: "https://a.test/x", AuthOrigin: "https://a.test"}) {
 		t.Error("no token, nothing to allow")
+	}
+}
+
+// The markers of the runner around the steps of a composite action
+// (CompositeActionHandler.cs:323, :415-466), as recorded in act-composite-basic,
+// act-composite-nested and act-composite-depth: the id is the dotted context
+// name, a step without an id gets the id the workflow reader generated.
+func TestCompositeStepMarkers(t *testing.T) {
+	tree := files{
+		".github/actions/mid/action.yml": `name: mid
+runs:
+  using: composite
+  steps:
+    - id: leaf-step
+      shell: bash
+      name: "multi %; ] line"
+      run: echo leaf
+    - uses: ./.github/actions/leaf
+`,
+		".github/actions/leaf/action.yml": `name: leaf
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: echo "level 2"
+    - shell: bash
+      if: false
+      run: echo skipped
+    - shell: bash
+      continue-on-error: true
+      run: exit 1
+`,
+	}
+	rec, res := actionRun(t, tree, "      - id: call\n        uses: ./.github/actions/mid\n      - uses: ./.github/actions/leaf\n", nil)
+	if res.Conclusion != ConclusionSuccess {
+		t.Fatalf("%+v\n%s", res, logOf(rec.steps[1]))
+	}
+	var got []string
+	for _, st := range rec.steps[1:3] {
+		for _, l := range st.Log {
+			if strings.HasPrefix(l, "##[start-action") || strings.HasPrefix(l, "##[end-action") {
+				if !strings.Contains(l, "outcome=skipped") {
+					l = regexp.MustCompile(`duration_ms=\d+`).ReplaceAllString(l, "duration_ms=N")
+				}
+				got = append(got, l)
+			}
+		}
+	}
+	want := []string{
+		"##[start-action display=multi %25%3B %5D line;id=call.leaf-step]",
+		"##[end-action id=call.leaf-step;outcome=success;conclusion=success;duration_ms=N]",
+		"##[start-action display=Run ./.github/actions/leaf;id=call.__self]",
+		`##[start-action display=Run echo "level 2";id=call.__self.__run]`,
+		"##[end-action id=call.__self.__run;outcome=success;conclusion=success;duration_ms=N]",
+		"##[start-action display=Run echo skipped;id=call.__self.__run_2]",
+		"##[end-action id=call.__self.__run_2;outcome=skipped;conclusion=skipped;duration_ms=0]",
+		"##[start-action display=Run exit 1;id=call.__self.__run_3]",
+		"##[end-action id=call.__self.__run_3;outcome=failure;conclusion=success;duration_ms=N]",
+		"##[end-action id=call.__self;outcome=success;conclusion=success;duration_ms=N]",
+		`##[start-action display=Run echo "level 2";id=__self.__run]`,
+		"##[end-action id=__self.__run;outcome=success;conclusion=success;duration_ms=N]",
+		"##[start-action display=Run echo skipped;id=__self.__run_2]",
+		"##[end-action id=__self.__run_2;outcome=skipped;conclusion=skipped;duration_ms=0]",
+		"##[start-action display=Run exit 1;id=__self.__run_3]",
+		"##[end-action id=__self.__run_3;outcome=failure;conclusion=success;duration_ms=N]",
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("markers:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+// A local composite action that uses other local composite actions has one post
+// step, which prints "Post job cleanup." once (act-composite-depth: 9, 10 and 12
+// levels, one line on GitHub). What the runner registers while it prepares the
+// steps of a local composite is keyed by the id of the step of the job.
+func TestNestedLocalCompositePostsOnce(t *testing.T) {
+	tree := files{
+		"c1/action.yml": "name: c1\nruns:\n  using: composite\n  steps:\n    - shell: bash\n      run: echo one\n    - uses: ./c2\n",
+		"c2/action.yml": "name: c2\nruns:\n  using: composite\n  steps:\n    - shell: bash\n      run: echo two\n    - uses: ./c3\n",
+		"c3/action.yml": "name: c3\nruns:\n  using: composite\n  steps:\n    - shell: bash\n      run: echo three\n",
+	}
+	rec, res := actionRun(t, tree, "      - uses: ./c1\n", nil)
+	if res.Conclusion != ConclusionSuccess {
+		t.Fatalf("%+v", res)
+	}
+	post := logOf(rec.step(t, "Post Run ./c1"))
+	if post != "Post job cleanup." {
+		t.Errorf("post of c1: %q", post)
+	}
+	for _, n := range rec.names() {
+		if strings.HasPrefix(n, "Post ") && n != "Post Run ./c1" {
+			t.Errorf("unexpected step %q in %v", n, rec.names())
+		}
+	}
+}
+
+// A local action's directory is the workspace and the path of the step joined as
+// .NET's Path.Combine does, without cleaning: github.action_path and the paths in
+// the manifest errors keep the "./" of "uses: ./.github/actions/x" (recorded in
+// act-composite-basic and act-manifest-errors).
+func TestLocalActionPathKeepsDotSlash(t *testing.T) {
+	tree := files{
+		".github/actions/ok/action.yml":  "name: ok\nruns:\n  using: composite\n  steps:\n    - shell: bash\n      run: echo \"path=$GITHUB_ACTION_PATH\"\n",
+		".github/actions/bad/action.yml": "name: bad\nruns:\n  using: composite\n  steps:\n    - run: echo no shell\n",
+	}
+	rec, res := actionRun(t, tree, "      - uses: ./.github/actions/ok\n      - uses: ./.github/actions/bad\n", nil)
+	if res.Conclusion != ConclusionFailure {
+		t.Fatalf("%+v", res)
+	}
+	ws := regexp.MustCompile(`path=(.*)/\./\.github/actions/ok`).FindStringSubmatch(logOf(rec.steps[1]))
+	if ws == nil {
+		t.Fatalf("action_path lost its ./:\n%s", logOf(rec.steps[1]))
+	}
+	bad := logOf(rec.steps[2])
+	if !strings.Contains(bad, "##[error]"+ws[1]+"/./.github/actions/bad/action.yml (Line: 5, Col: 7): Required property is missing: shell") ||
+		!strings.Contains(bad, "##[error]Failed to load "+ws[1]+"/./.github/actions/bad/action.yml") {
+		t.Errorf("manifest errors:\n%s", bad)
+	}
+}
+
+// The markers of a composite step go through the masker like every log line
+// (ExecutionContext.Write masks tag+message after the marker was built): a
+// secret in the name of an inner step, from the configuration or from an
+// ::add-mask:: of an earlier step, never reaches the log.
+func TestCompositeMarkersAreMasked(t *testing.T) {
+	tree := files{
+		".github/actions/m/action.yml": `name: m
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: echo "::add-mask::late-secret-""value"
+    - name: "token ${{ github.token }} and late-secret-value"
+      shell: bash
+      run: echo hi
+    - name: "env ${{ env.TOK }}"
+      env:
+        TOK: late-secret-value
+      shell: bash
+      run: echo hi
+`,
+	}
+	rec, res := actionRun(t, tree, "      - uses: ./.github/actions/m\n", func(c *Config) { c.ContextsJSON = tokenContexts() })
+	if res.Conclusion != ConclusionSuccess {
+		t.Fatalf("%+v\n%s", res, logOf(rec.steps[1]))
+	}
+	log := logOf(rec.steps[1])
+	for _, secret := range []string{testToken, "late-secret-value"} {
+		if strings.Contains(log, secret) {
+			t.Errorf("%q is in the log:\n%s", secret, log)
+		}
+	}
+	// A secret with a character the marker escapes is masked before the escape.
+	if got := markerEscaper.Replace(sanitizeDisplayName("a;b")); got != "a%3Bb" {
+		t.Errorf("escape %q", got)
+	}
+	for _, w := range []string{"##[start-action display=token *** and ***;id=", "##[start-action display=env ***;id="} {
+		if !strings.Contains(log, w) {
+			t.Errorf("missing %q:\n%s", w, log)
+		}
+	}
+}
+
+// An inner step whose env does not evaluate still gets its markers: the error
+// is logged while the environment is set up, the start marker follows, then the
+// end marker with the step failed (CompositeActionHandler.cs:296-302, :308-324).
+// The runner would go on and run the step; this port does not (see runEmbedded).
+func TestCompositeEnvErrorKeepsMarkers(t *testing.T) {
+	tree := files{
+		".github/actions/e/action.yml": `name: e
+runs:
+  using: composite
+  steps:
+    - name: bad env
+      shell: bash
+      env:
+        X: ${{ fromJSON('{') }}
+      run: echo never
+`,
+	}
+	rec, res := actionRun(t, tree, "      - uses: ./.github/actions/e\n", nil)
+	if res.Conclusion != ConclusionFailure {
+		t.Fatalf("%+v", res)
+	}
+	var got []string
+	for _, l := range rec.steps[1].Log {
+		switch {
+		case strings.HasPrefix(l, "##[error]"):
+			got = append(got, "error")
+		case strings.HasPrefix(l, "##[start-action"), strings.HasPrefix(l, "##[end-action"):
+			got = append(got, l)
+		}
+	}
+	want := []string{"error", "##[start-action display=bad env;id=__self.__run]", "##[end-action id=__self.__run;outcome=failure;conclusion=failure;duration_ms=0]"}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") || strings.Contains(logOf(rec.steps[1]), "never") {
+		t.Errorf("markers:\n%s\n%s", strings.Join(got, "\n"), logOf(rec.steps[1]))
+	}
+}
+
+// A secret that the marker would escape, or that the cut at 1000 characters
+// would split, is masked before: the display name of an inner step holding it
+// leaves no part of it in the log.
+func TestCompositeMarkerMasksBeforeEscapeAndCut(t *testing.T) {
+	secret := "sec;ret]%value"
+	long := strings.Repeat("x", 996) + secret // the cut falls inside the secret
+	tree := files{
+		".github/actions/m/action.yml": "name: m\nruns:\n  using: composite\n  steps:\n" +
+			"    - name: \"pre ${{ env.S }}\"\n      shell: bash\n      run: echo hi\n" +
+			"    - name: \"" + long + "\"\n      shell: bash\n      run: echo hi\n",
+	}
+	rec, res := actionRun(t, tree, "      - run: echo \"::add-mask::"+secret+"\"\n      - uses: ./.github/actions/m\n        env:\n          S: "+secret+"\n", nil)
+	if res.Conclusion != ConclusionSuccess {
+		t.Fatalf("%+v\n%s", res, logOf(rec.steps[2]))
+	}
+	log := logOf(rec.steps[2])
+	for _, frag := range []string{"sec;", "sec%3B", "value", "%5D%25", "xsec"} {
+		if strings.Contains(log, frag) {
+			t.Errorf("%q is in the log:\n%.1500s", frag, log)
+		}
+	}
+	if !strings.Contains(log, "##[start-action display=pre ***;id=") {
+		t.Errorf("marker:\n%s", log)
+	}
+}
+
+// pathCombine is Path.Combine: a rooted part replaces what precedes it, an empty
+// part is skipped, nothing is cleaned.
+func TestPathCombine(t *testing.T) {
+	for _, c := range []struct {
+		in   []string
+		want string
+	}{
+		{[]string{"/w/r", "./.github/a"}, "/w/r/./.github/a"},
+		{[]string{"/w/r/", "x"}, "/w/r/x"},
+		{[]string{"/w/r/a", "/etc/x.js"}, "/etc/x.js"},
+		{[]string{"/w/r/a", "../../x.js"}, "/w/r/a/../../x.js"},
+		{[]string{"", "x"}, "x"},
+		{[]string{"/w", ""}, "/w"},
+	} {
+		if got := pathCombine(c.in...); got != c.want {
+			t.Errorf("%q: %q, want %q", c.in, got, c.want)
+		}
 	}
 }

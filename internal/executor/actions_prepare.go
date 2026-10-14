@@ -247,7 +247,7 @@ func (j *job) dockerImageOf(def *actionDef) (pull, build string, err error) {
 		return "", "", err
 	}
 	if im.Kind == action.ImageDockerfile {
-		return "", def.dir + "/" + im.Path, nil
+		return "", pathCombine(def.dir, im.Path), nil
 	}
 	return im.Ref, "", nil
 }
@@ -275,7 +275,7 @@ func (j *job) registerStages(n *node, depth int) {
 		}
 		return
 	}
-	if p := n.parent; p != nil {
+	if p := n.registrar(); p != nil {
 		if pre {
 			p.preSteps = append(p.preSteps, n)
 		}
@@ -285,9 +285,29 @@ func (j *job) registerStages(n *node, depth int) {
 	}
 }
 
+// registrar is the node whose pre and post steps the node is registered with:
+// its parent, except for the steps of a local composite action prepared when
+// the action runs. The runner keys what it registers there by the id of the
+// execution context (ActionManager.cs:92-113 and :424-430, rootStepId =
+// ExecutionContext.Id), and an inner step's context shares the record, hence
+// the id, of the step of the job that contains it: everything lands on that
+// step, and the inner composite actions themselves never get a post of their
+// own (recorded: one "Post job cleanup." for act-composite-depth, not one per
+// level).
+func (n *node) registrar() *node {
+	if n.runtimePrepared {
+		for p := n.parent; p != nil; p = p.parent {
+			if p.parent == nil {
+				return p
+			}
+		}
+	}
+	return n.parent
+}
+
 // parentPost is the assumption for a local action inside a composite action.
 func (n *node) parentPost() {
-	if p := n.parent; p != nil {
+	if p := n.registrar(); p != nil {
 		p.postSteps = append(p.postSteps, n)
 	}
 }
