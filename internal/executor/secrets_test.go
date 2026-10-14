@@ -317,3 +317,39 @@ func TestOnlyDiagUsesTheDiagnosticsLogger(t *testing.T) {
 		}
 	}
 }
+
+// The group prints what the server sent in Job.permissions, as GitHub's runner
+// prints system.github.token.permissions, and not what the workflow says.
+func TestSetUpJobPrintsTheServersTokenPermissions(t *testing.T) {
+	needTools(t, "bash")
+	group := func(log string) string {
+		_, rest, _ := strings.Cut(log, "##[group]GITHUB_TOKEN Permissions\n")
+		g, _, _ := strings.Cut(rest, "\n##[endgroup]")
+		return g
+	}
+	// The workflow asks for write-all; the server lowered it (an untrusted run).
+	yaml := "on: push\npermissions: write-all\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo hi\n"
+	for _, tc := range []struct {
+		name   string
+		levels map[string]string
+		want   string
+	}{
+		{"lowered by the server", map[string]string{"contents": "read", "pull-requests": "read", "issues": "read", "metadata": "read"},
+			"Contents: read\nIssues: read\nMetadata: read\nPullRequests: read"},
+		{"write kept", map[string]string{"contents": "write", "metadata": "read", "packages": "read"}, "Contents: write\nMetadata: read\nPackages: read"},
+		{"none and id-token are not listed, metadata always is", map[string]string{"contents": "none", "id-token": "write", "actions": "read"},
+			"Actions: read\nMetadata: read"},
+		{"nothing at all is metadata only", map[string]string{}, "Metadata: read"},
+		{"a key the runner does not know", map[string]string{"made-up-key": "read"}, "MadeUpKey: read\nMetadata: read"},
+	} {
+		got := group(setupLog(t, yaml, "j", func(c *Config) { c.TokenPermissions = tc.levels }))
+		if got != tc.want {
+			t.Errorf("%s:\n%s\nwant:\n%s", tc.name, got, tc.want)
+		}
+	}
+	// A server that sends none: worked out from the workflow, as before.
+	got := group(setupLog(t, yaml, "j", nil))
+	if !strings.Contains(got, "Contents: write") || !strings.Contains(got, "Models: read") {
+		t.Errorf("fallback to the workflow:\n%s", got)
+	}
+}

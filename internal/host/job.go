@@ -697,6 +697,9 @@ func (j *jobRun) drive(conn sandbox.Conn, rt *Runner) (*execpb.Exit, error) {
 		// only when the server has ci.secrets.
 		SecretsWithheld: j.features.secrets && !j.job.Trusted,
 	}}
+	if p := j.job.Permissions; p != nil && j.features.secrets {
+		run.Job.TokenPermissions = &execpb.TokenPermissions{Levels: p.GetLevels()}
+	}
 	run.Job.CachePort, run.Job.CacheToken = j.cacheFor(rt)
 	_, exit, err := execstream.DriveJob(conn, run, j.cancelCh, execstream.JobHandler{
 		StepStarted: j.stepStarted, StepCompleted: j.stepCompleted,

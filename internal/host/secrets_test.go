@@ -9,6 +9,7 @@ import (
 	"go/format"
 	"go/parser"
 	"go/token"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -16,6 +17,8 @@ import (
 	"testing"
 
 	"google.golang.org/protobuf/proto"
+
+	ermite "bnema.dev/ermite-api/gen/ermite"
 
 	"bnema.dev/ermite-runner/internal/execstream/execpb"
 )
@@ -298,5 +301,49 @@ func TestPrintLeaksHeuristic(t *testing.T) {
 		if got := printLeaks(t, fset, "n.go", []byte("package p\nfunc f() {\n"+c+"\n}\n")); len(got) != 0 {
 			t.Errorf("false positive: %s: %v", c, got)
 		}
+	}
+}
+
+// Job.permissions reaches the executor in the Run frame when the server has
+// ci.secrets (it sent them); an old server's absent field stays unset, so that
+// the executor works them out from the workflow.
+func TestTokenPermissionsReachTheExecutor(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		features []string
+		perms    *ermite.JobPermissions
+		want     map[string]string // nil: unset in the frame
+	}{
+		{"sent", []string{FeatureSecrets}, &ermite.JobPermissions{Levels: map[string]string{"contents": "write", "metadata": "read"}},
+			map[string]string{"contents": "write", "metadata": "read"}},
+		{"sent and empty", []string{FeatureSecrets}, &ermite.JobPermissions{}, map[string]string{}},
+		{"not sent", []string{FeatureSecrets}, nil, nil},
+		{"old server", []string{FeatureAnnotations}, &ermite.JobPermissions{Levels: map[string]string{"contents": "write"}}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			seenRun.Store(nil)
+			h := newHarness(t, resultsScript(nil))
+			h.runner.Cfg.StateDir = t.TempDir()
+			h.runner.Features = func(context.Context) ([]string, error) { return tc.features, nil }
+			j := testJob("j1")
+			j.Permissions = tc.perms
+			h.srv.jobs = []*ermite.Job{j}
+			stop := h.run(t)
+			eventually(t, "CompleteJob", func() bool { return h.srv.completeCount() == 1 })
+			if err := stop(); err != nil {
+				t.Fatal(err)
+			}
+			run := seenRun.Load()
+			if run == nil {
+				t.Fatal("no Run frame")
+			}
+			got := run.Job.GetTokenPermissions()
+			switch {
+			case tc.want == nil && got != nil:
+				t.Errorf("unexpected permissions %v", got.GetLevels())
+			case tc.want != nil && (got == nil || !maps.Equal(got.GetLevels(), tc.want)):
+				t.Errorf("permissions %v, want %v", got.GetLevels(), tc.want)
+			}
+		})
 	}
 }

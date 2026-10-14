@@ -13,12 +13,20 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/protobuf/proto"
+
 	"bnema.dev/ermite-runner/internal/execstream"
 	"bnema.dev/ermite-runner/internal/execstream/execpb"
 )
 
 // runJobSession starts Exec on a unix socket and drives it with a job.
 func runJobSession(t *testing.T, yaml string, cancelOn string, tweak func(*ExecConfig)) (steps []string, logs []*execpb.Log, res *execpb.JobResult, exit *execpb.Exit) {
+	t.Helper()
+	return runJobSessionSpec(t, yaml, cancelOn, tweak, nil)
+}
+
+// runJobSessionSpec is runJobSession with a change to the JobSpec sent.
+func runJobSessionSpec(t *testing.T, yaml string, cancelOn string, tweak func(*ExecConfig), spec func(*execpb.JobSpec)) (steps []string, logs []*execpb.Log, res *execpb.JobResult, exit *execpb.Exit) {
 	t.Helper()
 	sock := filepath.Join(t.TempDir(), "s")
 	ln, err := net.Listen("unix", sock)
@@ -53,10 +61,14 @@ func runJobSession(t *testing.T, yaml string, cancelOn string, tweak func(*ExecC
 	}
 	var cancelOnce sync.Once
 	var mu sync.Mutex
-	_, exit, err = execstream.DriveJob(conn, &execpb.Run{Job: &execpb.JobSpec{
+	js := &execpb.JobSpec{
 		WorkflowPath: ".github/workflows/ci.yml", WorkflowYaml: yaml, JobKey: "j", Repo: "hello", RunnerName: "r", RunnerVersion: "v",
 		Contexts: `{"github":{"repository":"octo/hello","event_name":"push","job":"j"}}`, Matrix: "{}",
-	}}, cancel, execstream.JobHandler{
+	}
+	if spec != nil {
+		spec(js)
+	}
+	_, exit, err = execstream.DriveJob(conn, &execpb.Run{Job: js}, cancel, execstream.JobHandler{
 		StepStarted: func(s *execpb.StepStarted) {
 			mu.Lock()
 			steps = append(steps, s.Name)
@@ -328,6 +340,77 @@ func TestExecSendsResultsFrames(t *testing.T) {
 		}
 		if sum == nil || sum.Step != 2 || sum.Markdown != "# sum\n" {
 			t.Errorf("summary %+v", sum)
+		}
+	}
+}
+
+// The permissions the server sent reach "Set up job" through the Run frame as
+// the guest reads them: absent keeps the workflow's, present but empty is
+// "Metadata only", populated is printed as sent. The frame is marshalled and
+// parsed on the way, where a nil and an empty map would look alike.
+func TestExecJobPrintsTheServersTokenPermissions(t *testing.T) {
+	requireBash(t)
+	yaml := "on: push\npermissions: write-all\njobs:\n  j:\n    runs-on: x\n    steps:\n      - run: echo hi\n"
+	group := func(logs []*execpb.Log) string {
+		var lines []string
+		in := false
+		for _, l := range logs {
+			switch {
+			case l.Text == "##[group]GITHUB_TOKEN Permissions":
+				in = true
+			case l.Text == "##[endgroup]":
+				in = false
+			case in:
+				lines = append(lines, l.Text)
+			}
+		}
+		return strings.Join(lines, "\n")
+	}
+	for _, tc := range []struct {
+		name string
+		set  func(*execpb.JobSpec)
+		want string
+	}{
+		{"absent: from the workflow", nil, "Actions: write\nArtifactMetadata: write\nAttestations: write\nChecks: write\nCodeQuality: write\nContents: write\n" +
+			"CopilotRequests: write\nDeployments: write\nDiscussions: write\nDrives: write\nIssues: write\nMetadata: read\nModels: read\nPackages: write\n" +
+			"Pages: write\nPullRequests: write\nRepositoryProjects: write\nSecurityEvents: write\nStatuses: write\nVulnerabilityAlerts: read"},
+		{"present and empty: metadata only", func(s *execpb.JobSpec) { s.TokenPermissions = &execpb.TokenPermissions{} }, "Metadata: read"},
+		{"populated: as sent", func(s *execpb.JobSpec) {
+			s.TokenPermissions = &execpb.TokenPermissions{Levels: map[string]string{"contents": "read", "issues": "none"}}
+		}, "Contents: read\nMetadata: read"},
+	} {
+		_, logs, res, _ := runJobSessionSpec(t, yaml, "", nil, tc.set)
+		if res == nil || res.Conclusion != execpb.StepConclusion_STEP_CONCLUSION_SUCCESS {
+			t.Fatalf("%s: %+v", tc.name, res)
+		}
+		if got := group(logs); got != tc.want {
+			t.Errorf("%s:\n%s\nwant:\n%s", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestTokenPermissionsNilVersusEmpty(t *testing.T) {
+	for name, tc := range map[string]struct {
+		spec    *execpb.JobSpec
+		wantNil bool
+		want    int
+	}{
+		"absent":    {&execpb.JobSpec{}, true, 0},
+		"empty":     {&execpb.JobSpec{TokenPermissions: &execpb.TokenPermissions{}}, false, 0},
+		"populated": {&execpb.JobSpec{TokenPermissions: &execpb.TokenPermissions{Levels: map[string]string{"contents": "read"}}}, false, 1},
+	} {
+		// After the trip a frame makes.
+		raw, err := proto.Marshal(tc.spec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got execpb.JobSpec
+		if err := proto.Unmarshal(raw, &got); err != nil {
+			t.Fatal(err)
+		}
+		m := tokenPermissions(&got)
+		if (m == nil) != tc.wantNil || len(m) != tc.want {
+			t.Errorf("%s: %#v", name, m)
 		}
 	}
 }

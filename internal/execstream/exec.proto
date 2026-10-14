@@ -107,6 +107,18 @@ message JobSpec {
   // secrets are not available. Never set for servers without the feature, for
   // which an absent Job.trusted only means "not sent".
   bool secrets_withheld = 19;
+  // token_permissions are the effective permissions of the job's GITHUB_TOKEN
+  // as the server sent them (Job.permissions, feature ci.secrets): "Set up job"
+  // prints them instead of working them out from the workflow. Unset when the
+  // server sent none (an older server): the executor then reads them from the
+  // workflow.
+  TokenPermissions token_permissions = 20;
+}
+
+// TokenPermissions maps a permission key ("contents", "pull-requests", ...) to
+// "read", "write" or "none"; a key that is absent is none.
+message TokenPermissions {
+  map<string, string> levels = 1;
 }
 
 enum StreamKind {

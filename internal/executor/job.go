@@ -85,6 +85,11 @@ type Config struct {
 	// SecretsWithheld says that the server did not send secrets because the run
 	// is not trusted: "Set up job" says so.
 	SecretsWithheld bool
+	// TokenPermissions are the permissions of GITHUB_TOKEN as the server sent
+	// them (Job.permissions: key to "read", "write" or "none"), which "Set up
+	// job" prints as they are. Nil means the server sent none: they are then
+	// worked out from the workflow. An empty, non-nil map is "none at all".
+	TokenPermissions map[string]string
 	// Debug turns ##[debug] lines on (ACTIONS_STEP_DEBUG).
 	Debug bool
 	// Actions configures the actions of the job (resolution, downloads, Node.js,
@@ -729,13 +734,21 @@ const SecretsWithheldLine = "Secrets are not available to this job: the run was 
 // and the cache mode.
 //
 // GitHub's runner prints what the server sends as
-// system.github.token.permissions (JobExtension.cs:154-166); ermite's Job
-// message does not carry it, so the group is worked out from the workflow
-// with the rules recorded on github.com (tokenPermissionLines). It is always
-// printed: Metadata is listed even for "permissions: {}".
+// system.github.token.permissions (JobExtension.cs:154-166). ermite's server
+// sends them in Job.permissions, already merged and lowered by its trust rule:
+// they are printed as they are (serverPermissionLines). From a server that
+// sends none the group is worked out from the workflow with the rules recorded
+// on github.com (tokenPermissionLines). It is always printed: Metadata is listed
+// even for "permissions: {}".
 func (j *job) printTokenInfo() {
 	j.out(1, "##[group]GITHUB_TOKEN Permissions")
-	for _, p := range tokenPermissionLines(j.wf, j.jb) {
+	var lines []permissionLine
+	if j.cfg.TokenPermissions != nil {
+		lines = serverPermissionLines(j.cfg.TokenPermissions)
+	} else {
+		lines = tokenPermissionLines(j.wf, j.jb)
+	}
+	for _, p := range lines {
 		j.out(1, p.name+": "+p.level)
 	}
 	j.out(1, "##[endgroup]")

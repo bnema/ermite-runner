@@ -4,6 +4,7 @@ package executor
 
 import (
 	"sort"
+	"strings"
 
 	"bnema.dev/ermite-actions/workflow"
 )
@@ -105,4 +106,38 @@ func tokenPermissionLines(wf *workflow.Workflow, jb *workflow.Job) []permissionL
 	}
 	sort.Slice(lines, func(a, b int) bool { return lines[a].name < lines[b].name })
 	return lines
+}
+
+// serverPermissionLines returns the lines of the group for the permissions the
+// server sent (Job.permissions): one per key at "read" or "write", sorted by
+// display name like GitHub's runner prints them. Metadata is always listed as
+// read. A key at "none" or absent is not listed, nor is id-token (GitHub never
+// lists it); a key the runner does not know is listed under its name in Pascal
+// case, as the known ones are ("pull-requests" is "PullRequests").
+func serverPermissionLines(levels map[string]string) []permissionLine {
+	lines := []permissionLine{{"Metadata", "read"}}
+	for key, level := range levels {
+		if (level != "read" && level != "write") || key == "metadata" || key == "id-token" {
+			continue
+		}
+		lines = append(lines, permissionLine{displayName(key), level})
+	}
+	sort.Slice(lines, func(a, b int) bool { return lines[a].name < lines[b].name })
+	return lines
+}
+
+// displayName is the name "Set up job" prints for a permission key.
+func displayName(key string) string {
+	for _, s := range tokenScopes {
+		if s.key == key {
+			return s.display
+		}
+	}
+	var b strings.Builder
+	for _, part := range strings.Split(key, "-") {
+		if part != "" {
+			b.WriteString(strings.ToUpper(part[:1]) + part[1:])
+		}
+	}
+	return b.String()
 }

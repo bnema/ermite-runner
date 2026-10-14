@@ -259,7 +259,7 @@ func runJob(ctx context.Context, conn *execstream.Conn, cfg ExecConfig, spec *ex
 		Home:          su.Home, ToolCache: os.Getenv("RUNNER_TOOL_CACHE"), BaseEnv: stepEnv(os.Environ(), su), Credential: su.Credential,
 		CacheURL: cacheURL(os.Getenv("ERMITE_GATEWAY"), spec.GetCachePort()), CacheToken: spec.GetCacheToken(),
 		Debug: spec.GetDebug(), Reporter: rep, Actions: executor.DefaultActionsConfig(res.resolve), Log: zerowrap.FromCtx(ctx),
-		Secrets: vals.secrets, Vars: vals.vars, SecretsWithheld: spec.GetSecretsWithheld(),
+		Secrets: vals.secrets, Vars: vals.vars, SecretsWithheld: spec.GetSecretsWithheld(), TokenPermissions: tokenPermissions(spec),
 		SendAnnotations: spec.GetSendAnnotations(), SendSummaries: spec.GetSendSummaries(),
 		TermAfter: cfg.TermAfter, KillAfter: cfg.KillAfter, WaitDelay: cfg.WaitDelay,
 	})
@@ -289,4 +289,17 @@ func failSetup(conn *execstream.Conn, msg string) int {
 	rep.StepCompleted(1, executor.SetUpJobName, executor.ConclusionFailure, time.Now())
 	rep.JobCompleted(executor.Result{Conclusion: executor.ConclusionFailure, Error: msg})
 	return 1
+}
+
+// tokenPermissions is the permissions of GITHUB_TOKEN the server sent, nil when
+// it sent none (the executor then works them out from the workflow).
+func tokenPermissions(spec *execpb.JobSpec) map[string]string {
+	p := spec.GetTokenPermissions()
+	if p == nil {
+		return nil
+	}
+	if p.GetLevels() == nil {
+		return map[string]string{}
+	}
+	return p.GetLevels()
 }
