@@ -11,6 +11,8 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+
+	"bnema.dev/ermite-runner/internal/cachesvc"
 )
 
 // Environment variables read by LoadConfig. The other ERMITE_RUNNER_* variables
@@ -118,6 +120,11 @@ type Config struct {
 	// GuestForge, when not nil, is the one host endpoint that every sandbox may
 	// reach, and the name the DNS forwarder answers with the sandbox's gateway.
 	GuestForge *GuestForge
+	// Cache, when not nil, is the runner's cache service (package cachesvc),
+	// served on the gateway of every sandbox on CachePort. The caller makes it
+	// before building the drivers, like GuestForge.
+	Cache     *cachesvc.Service
+	CachePort uint16
 	// Rate limits of micro-VMs; zero disables.
 	DiskBandwidthMiB, DiskIOPS, NetMbit int
 

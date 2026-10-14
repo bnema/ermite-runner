@@ -151,6 +151,25 @@ func (j *job) externalsDir() string {
 	return defaultExternalsDir
 }
 
+// addRuntimeEnv is the "Add Actions Runtime server info" part of the handlers
+// (NodeScriptActionHandler.cs:55-72, ContainerActionHandler.cs:219-236): the
+// variables @actions/cache reads. ermite has no Actions runtime service, only
+// the cache of the runner, so only ACTIONS_CACHE_URL (the base of
+// "_apis/artifactcache/…": the toolkit appends to it, cacheHttpClient.ts:47, so
+// it ends with a slash), ACTIONS_RUNTIME_URL (same value, for clients that
+// require the variable) and ACTIONS_RUNTIME_TOKEN are set. ACTIONS_CACHE_SERVICE_V2
+// is never set: the toolkit would then ignore ACTIONS_CACHE_URL (config.ts:42-58)
+// and, on a server URL that is not github.com, uses v1 anyway (config.ts:22-27).
+// Without a cache service in the job nothing is set.
+func (j *job) addRuntimeEnv(env *ordered) {
+	if j.cfg.CacheURL == "" || j.cfg.CacheToken == "" {
+		return
+	}
+	env.Set("ACTIONS_RUNTIME_URL", j.cfg.CacheURL)
+	env.Set("ACTIONS_RUNTIME_TOKEN", j.cfg.CacheToken)
+	env.Set("ACTIONS_CACHE_URL", j.cfg.CacheURL)
+}
+
 // runNode is NodeScriptActionHandler.RunAsync (NodeScriptActionHandler.cs:
 // 27-196) on the host of the steps (a job container is phase H): INPUT_
 // variables and the PATH of the previous steps in the environment, the
@@ -161,6 +180,7 @@ func (j *job) runNode(s *stepRun, def *actionDef, in *inputSet, env *ordered, ca
 		v, _ := in.Get(k)
 		env.Set(inputEnvName(k), v)
 	}
+	j.addRuntimeEnv(env)
 	// The PATH of the previous steps is added by procEnv.
 	env.Remove("NODE_ICU_DATA") // https://github.com/actions/runner/issues/795
 	r := def.runs()

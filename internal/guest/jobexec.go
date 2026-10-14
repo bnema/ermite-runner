@@ -5,6 +5,7 @@ package guest
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"os/user"
 	"strconv"
@@ -256,6 +257,7 @@ func runJob(ctx context.Context, conn *execstream.Conn, cfg ExecConfig, spec *ex
 		Runner:        executor.RunnerInfo{Name: spec.GetRunnerName(), Environment: env},
 		RunnerVersion: spec.GetRunnerVersion(),
 		Home:          su.Home, ToolCache: os.Getenv("RUNNER_TOOL_CACHE"), BaseEnv: stepEnv(os.Environ(), su), Credential: su.Credential,
+		CacheURL: cacheURL(os.Getenv("ERMITE_GATEWAY"), spec.GetCachePort()), CacheToken: spec.GetCacheToken(),
 		Debug: spec.GetDebug(), Reporter: rep, Actions: executor.DefaultActionsConfig(res.resolve), Log: zerowrap.FromCtx(ctx),
 		SendAnnotations: spec.GetSendAnnotations(), SendSummaries: spec.GetSendSummaries(),
 		TermAfter: cfg.TermAfter, KillAfter: cfg.KillAfter, WaitDelay: cfg.WaitDelay,
@@ -264,6 +266,16 @@ func runJob(ctx context.Context, conn *execstream.Conn, cfg ExecConfig, spec *ex
 		return 0
 	}
 	return 1
+}
+
+// cacheURL is ACTIONS_CACHE_URL: the cache service of the runner on the gateway
+// of the sandbox. The trailing slash matters: the toolkit appends "_apis/…"
+// to it (cacheHttpClient.ts:47). Empty when the job has no cache service.
+func cacheURL(gateway string, port uint32) string {
+	if gateway == "" || port == 0 || port > 65535 {
+		return ""
+	}
+	return "http://" + net.JoinHostPort(gateway, strconv.FormatUint(uint64(port), 10)) + "/"
 }
 
 // failSetup ends a job that cannot start, like a failed "Set up job": step 1

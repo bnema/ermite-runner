@@ -104,6 +104,7 @@ func (j *job) runDocker(s *stepRun, def *actionDef, in *inputSet, env *ordered, 
 		v, _ := in.Get(k)
 		env.Set(inputEnvName(k), v)
 	}
+	j.addRuntimeEnv(env)
 	j.mu.Lock()
 	workspace := j.state.GitHub("workspace")
 	temp := j.state.Layout().Temp

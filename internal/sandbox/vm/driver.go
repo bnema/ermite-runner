@@ -152,6 +152,7 @@ func New(ctx context.Context, cfg sandbox.Config, opt Options) (*Driver, error) 
 	if d.net == nil {
 		n := netsetup.New(opt.Run, cfg.DNSPort, "")
 		n.DNS.Override = cfg.GuestForge.DNSName()
+		n.Cache, n.CachePort = cfg.Cache, cfg.CachePort
 		d.net = n
 	}
 	if cfg.GuestForge != nil {

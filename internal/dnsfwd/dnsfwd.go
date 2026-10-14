@@ -122,18 +122,28 @@ func (f *Forwarder) Listen(ctx context.Context, addr netip.Addr) error {
 			return serr
 		}
 	}
-	pc, err := lc.ListenPacket(ctx, "udp", hp)
-	if err != nil {
-		return fmt.Errorf("dnsfwd: listen udp %s: %w", hp, err)
-	}
-	// With port 0 (tests) UDP and TCP must share the port the kernel picked.
-	if f.port == 0 {
-		hp = pc.LocalAddr().String()
-	}
-	tl, err := lc.Listen(ctx, "tcp", hp)
-	if err != nil {
+	var (
+		pc  net.PacketConn
+		tl  net.Listener
+		err error
+	)
+	// With port 0 (tests) UDP and TCP must share the port the kernel picked for
+	// UDP, which a TCP socket may already hold: pick again a few times.
+	for attempt := 0; ; attempt++ {
+		bind := hp
+		if pc, err = lc.ListenPacket(ctx, "udp", bind); err != nil {
+			return fmt.Errorf("dnsfwd: listen udp %s: %w", bind, err)
+		}
+		if f.port == 0 {
+			bind = pc.LocalAddr().String()
+		}
+		if tl, err = lc.Listen(ctx, "tcp", bind); err == nil {
+			break
+		}
 		_ = pc.Close()
-		return fmt.Errorf("dnsfwd: listen tcp %s: %w", hp, err)
+		if f.port != 0 || attempt == 9 || !errors.Is(err, syscall.EADDRINUSE) {
+			return fmt.Errorf("dnsfwd: listen tcp %s: %w", bind, err)
+		}
 	}
 	lctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	l := &listener{addr: addr, udp: pc, tcp: tl, cancel: cancel, inflight: make(chan struct{}, MaxInflight), conns: make(chan struct{}, MaxTCPConns)}

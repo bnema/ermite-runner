@@ -652,8 +652,18 @@ type JobSpec struct {
 	// sends StepAnnotations and StepSummary frames only when they are set.
 	SendAnnotations bool `protobuf:"varint,13,opt,name=send_annotations,json=sendAnnotations,proto3" json:"send_annotations,omitempty"`
 	SendSummaries   bool `protobuf:"varint,14,opt,name=send_summaries,json=sendSummaries,proto3" json:"send_summaries,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// cache_port and cache_token, when set, are the runner's cache service for
+	// this job: it listens on the sandbox's gateway address (the executor knows
+	// it: ERMITE_GATEWAY) on that TCP port. The executor gives
+	// ACTIONS_CACHE_URL=http://<gateway>:<port>/ and the token as
+	// ACTIONS_RUNTIME_TOKEN to node and docker actions only, as the official
+	// runner does, and masks the token. The token is not an ermite credential: it
+	// is an HMAC that only the runner's cache service accepts, scoped to this
+	// job's repository and refs.
+	CachePort     uint32 `protobuf:"varint,15,opt,name=cache_port,json=cachePort,proto3" json:"cache_port,omitempty"`
+	CacheToken    string `protobuf:"bytes,16,opt,name=cache_token,json=cacheToken,proto3" json:"cache_token,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *JobSpec) Reset() {
@@ -782,6 +792,20 @@ func (x *JobSpec) GetSendSummaries() bool {
 		return x.SendSummaries
 	}
 	return false
+}
+
+func (x *JobSpec) GetCachePort() uint32 {
+	if x != nil {
+		return x.CachePort
+	}
+	return 0
+}
+
+func (x *JobSpec) GetCacheToken() string {
+	if x != nil {
+		return x.CacheToken
+	}
+	return ""
 }
 
 type Output struct {
@@ -1713,7 +1737,7 @@ const file_exec_proto_rawDesc = "" +
 	"\x03job\x18\x03 \x01(\v2\x1e.ermite.runner.exec.v1.JobSpecR\x03job\x1a6\n" +
 	"\bEnvEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xdd\x03\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x9d\x04\n" +
 	"\aJobSpec\x12#\n" +
 	"\rworkflow_path\x18\x01 \x01(\tR\fworkflowPath\x12#\n" +
 	"\rworkflow_yaml\x18\x02 \x01(\tR\fworkflowYaml\x12\x17\n" +
@@ -1731,7 +1755,11 @@ const file_exec_proto_rawDesc = "" +
 	"\vdeadline_ms\x18\f \x01(\x03R\n" +
 	"deadlineMs\x12)\n" +
 	"\x10send_annotations\x18\r \x01(\bR\x0fsendAnnotations\x12%\n" +
-	"\x0esend_summaries\x18\x0e \x01(\bR\rsendSummaries\"t\n" +
+	"\x0esend_summaries\x18\x0e \x01(\bR\rsendSummaries\x12\x1d\n" +
+	"\n" +
+	"cache_port\x18\x0f \x01(\rR\tcachePort\x12\x1f\n" +
+	"\vcache_token\x18\x10 \x01(\tR\n" +
+	"cacheToken\"t\n" +
 	"\x06Output\x129\n" +
 	"\x06stream\x18\x01 \x01(\x0e2!.ermite.runner.exec.v1.StreamKindR\x06stream\x12\x12\n" +
 	"\x04data\x18\x02 \x01(\fR\x04data\x12\x1b\n" +

@@ -292,3 +292,48 @@ func TestGuestForgeRuleScopeAndOrder(t *testing.T) {
 		}
 	}
 }
+
+func cacheGuest(t *testing.T, iface string, slot int, forge, cache uint16) Guest {
+	t.Helper()
+	g := guest(t, iface, slot)
+	g.ForgePort, g.CachePort = forge, cache
+	return g
+}
+
+func TestRulesetCacheGolden(t *testing.T) {
+	golden(t, "cache.nft", Ruleset([]Guest{cacheGuest(t, "ertap0", 0, 8088, 8089), cacheGuest(t, "erbr1", 1, 0, 8089)}))
+}
+
+// The cache port is open to the guest's own source and gateway only, closed to
+// every other interface, and a runner without the cache has no such rule
+// (one.nft and guest_forge.nft are unchanged).
+func TestCachePortScope(t *testing.T) {
+	rs := Ruleset([]Guest{cacheGuest(t, "ertap0", 0, 0, 8089), cacheGuest(t, "erbr1", 1, 0, 8089), guest(t, "ertap2", 2)})
+	in := rs[strings.Index(rs, "chain input"):strings.Index(rs, "chain forward")]
+	for _, want := range []string{
+		`iifname "ertap0" ip saddr 10.200.0.2 ip daddr 10.200.0.1 tcp dport 8089 accept`,
+		`iifname "erbr1" ip saddr 10.200.0.6 ip daddr 10.200.0.5 tcp dport 8089 accept`,
+		`ip daddr 10.200.0.1 tcp dport 8089 iifname != "ertap0" drop`,
+		`ip daddr 10.200.0.5 tcp dport 8089 iifname != "erbr1" drop`,
+	} {
+		if strings.Count(in, want) != 1 {
+			t.Errorf("want exactly one %q in the input chain:\n%s", want, in)
+		}
+	}
+	if strings.Count(rs, "8089") != 4 {
+		t.Errorf("port 8089 appears %d times, want 4:\n%s", strings.Count(rs, "8089"), rs)
+	}
+	// Drops of other interfaces come before every accept, accepts before the
+	// guest's catch-all drop.
+	if strings.LastIndex(in, `iifname != "erbr1" drop`) > strings.Index(in, `dport 53 accept`) {
+		t.Error("the cross-interface drops must precede the accepts")
+	}
+	if strings.Index(in, `tcp dport 8089 accept`) > strings.Index(in, `iifname "ertap0" drop`) {
+		t.Error("the cache accept must precede the guest's catch-all drop")
+	}
+	plain := Ruleset([]Guest{guest(t, "ertap0", 0), guest(t, "erbr1", 1), guest(t, "ertap2", 2)})
+	tail := func(s string) string { return s[strings.Index(s, "chain forward"):] }
+	if tail(rs) != tail(plain) {
+		t.Error("the forward/postrouting chains changed with the cache port")
+	}
+}

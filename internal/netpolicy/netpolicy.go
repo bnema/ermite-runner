@@ -16,6 +16,9 @@
 //     only): TCP from the guest's source address to its own gateway address on
 //     that one port. The host's own listener on that port receives the traffic;
 //     nothing is proxied, and every other host port stays closed;
+//   - optionally (Guest.CachePort, when the runner serves the GitHub Actions
+//     cache): the same, for the cache service port; that port of a gateway is
+//     also closed to every other interface;
 //   - IPv6 from the guest is dropped (the guest also disables IPv6);
 //   - forwarded traffic must carry the guest's own source address;
 //   - forwarded traffic to RFC 1918, CGNAT 100.64.0.0/10 (VPN overlays),
@@ -82,6 +85,11 @@ type Guest struct {
 	// guest's interface, source and gateway, so it neither reaches other
 	// addresses of the host nor other guests.
 	ForgePort uint16
+	// CachePort, when not 0, is the port of the runner's cache service on
+	// Gateway (package cachesvc). Same scope as ForgePort, and in addition the
+	// port is dropped from every other interface, as port 53 is: the service
+	// answers the guest of that gateway only.
+	CachePort uint16
 }
 
 // Validate checks the fields used in generated rules.
@@ -161,6 +169,11 @@ func Ruleset(guests []Guest) string {
 		}
 	}
 	for _, g := range gs {
+		if g.CachePort != 0 {
+			fmt.Fprintf(&b, "\t\tip daddr %s tcp dport %d iifname != \"%s\" drop\n", g.Gateway, g.CachePort, g.Iface)
+		}
+	}
+	for _, g := range gs {
 		for _, proto := range []string{"udp", "tcp"} {
 			fmt.Fprintf(&b, "\t\tiifname \"%s\" ip saddr %s ip daddr %s %s dport 53 accept\n", g.Iface, g.Addr, g.Gateway, proto)
 		}
@@ -168,6 +181,9 @@ func Ruleset(guests []Guest) string {
 			// New connections only: the replies leave through the output hook,
 			// which this table does not touch.
 			fmt.Fprintf(&b, "\t\tiifname \"%s\" ip saddr %s ip daddr %s tcp dport %d accept\n", g.Iface, g.Addr, g.Gateway, g.ForgePort)
+		}
+		if g.CachePort != 0 {
+			fmt.Fprintf(&b, "\t\tiifname \"%s\" ip saddr %s ip daddr %s tcp dport %d accept\n", g.Iface, g.Addr, g.Gateway, g.CachePort)
 		}
 		fmt.Fprintf(&b, "\t\tiifname \"%s\" drop\n", g.Iface)
 	}

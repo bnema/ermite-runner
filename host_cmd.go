@@ -9,12 +9,15 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/bnema/zerowrap"
 
 	"bnema.dev/ermite-api/gen/ermite/ermiteconnect"
 
+	"bnema.dev/ermite-runner/internal/cachesvc"
 	"bnema.dev/ermite-runner/internal/externals"
 	"bnema.dev/ermite-runner/internal/host"
 	"bnema.dev/ermite-runner/internal/sandbox"
@@ -32,6 +35,35 @@ func loadHostConfig() (sandbox.Config, host.Config, error) {
 	hcfg, err := host.LoadConfig(os.Getenv, name, scfg.StateDir, scfg.Capacity, version)
 	return scfg, hcfg, err
 }
+
+// setupCache starts the cache service of the runner (README, "Cache") and hands
+// it to the sandbox drivers through scfg. ERMITE_RUNNER_CACHE=0 turns it off;
+// ERMITE_RUNNER_CACHE_MAX is the size cap (default 10 GiB).
+func setupCache(ctx context.Context, scfg *sandbox.Config) (*cachesvc.Service, error) {
+	log := zerowrap.FromCtx(ctx)
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(envCache))) {
+	case "", "1", "true", "yes":
+	case "0", "false", "no":
+		log.Info().Msg("the cache service is off (" + envCache + "=0)")
+		return nil, nil
+	default:
+		return nil, fmt.Errorf("%s: %q is not 0 or 1", envCache, os.Getenv(envCache))
+	}
+	max, err := cachesvc.ParseMax(os.Getenv(cachesvc.EnvMax))
+	if err != nil {
+		return nil, err
+	}
+	svc, err := cachesvc.New(cachesvc.Config{Dir: filepath.Join(scfg.StateDir, "cache"), Max: max, Log: log})
+	if err != nil {
+		return nil, err
+	}
+	scfg.Cache, scfg.CachePort = svc, cachesvc.DefaultPort
+	log.Info().Int64("max_bytes", max).Uint16("port", scfg.CachePort).Msg("cache service on")
+	return svc, nil
+}
+
+// envCache=0 turns the cache service off.
+const envCache = "ERMITE_RUNNER_CACHE"
 
 // externalsWait is how long the start of the runner waits for the Node.js
 // downloads. A runner with a working network is then ready for its first job; one
@@ -144,6 +176,14 @@ func runCmd(ctx context.Context) int {
 		hcfg.GuestForgeOrigin = gf.Origin
 	}
 	setupExternals(ctx, &scfg)
+	cache, err := setupCache(ctx, &scfg)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "ermite-runner:", err)
+		return 2
+	}
+	if cache != nil {
+		defer func() { _ = cache.CloseAll() }()
+	}
 	drv, err := buildDriver(ctx, scfg)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ermite-runner:", err)
@@ -160,6 +200,7 @@ func runCmd(ctx context.Context) int {
 			return hcfg.Client(url, tok)
 		},
 		Features: hcfg.ServerFeaturesFunc(url),
+		Cache:    cache, CachePort: scfg.CachePort,
 	}
 	r.Cfg.URL = url
 	if err := r.Run(ctx); err != nil {

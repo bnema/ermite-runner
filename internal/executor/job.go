@@ -74,6 +74,10 @@ type Config struct {
 	ToolCache string
 	// BaseEnv is the environment steps inherit; nil means os.Environ().
 	BaseEnv []string
+	// CacheURL and CacheToken, when set, are ACTIONS_CACHE_URL and
+	// ACTIONS_RUNTIME_TOKEN of the node and docker actions of the job: the cache
+	// service of the runner. The token is masked in the log.
+	CacheURL, CacheToken string
 	// Debug turns ##[debug] lines on (ACTIONS_STEP_DEBUG).
 	Debug bool
 	// Actions configures the actions of the job (resolution, downloads, Node.js,
@@ -448,6 +452,7 @@ func (j *job) setUp() ([]qstep, error) {
 	}
 	j.state = state
 	j.masker.Store(newMasker(state.Secrets()...))
+	j.masker.Load().add(cfg.CacheToken)
 
 	// Features that arrive in later phases fail the job with a clear message.
 	switch {

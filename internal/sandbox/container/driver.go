@@ -163,7 +163,9 @@ func New(ctx context.Context, cfg sandbox.Config, opt Options) (*Driver, error) 
 	}
 	d.net = opt.Net
 	if d.net == nil {
-		d.net = newNet(opt.Run, cfg.DNSPort, info.Podman, cfg.GuestForge.DNSName())
+		n := newNet(opt.Run, cfg.DNSPort, info.Podman, cfg.GuestForge.DNSName())
+		n.Cache, n.CachePort, n.CacheFreeBind = cfg.Cache, cfg.CachePort, info.Podman
+		d.net = n
 	}
 	if err := d.net.EnableForwarding(); err != nil {
 		return fail(err)
@@ -447,7 +449,7 @@ func (s *containerSandbox) runContainer(ctx context.Context, spec sandbox.JobSpe
 		Name:       "ermite-" + s.id,
 		Image:      d.image,
 		Entrypoint: []string{entry, "init"},
-		Env:        []string{"ERMITE_CONNECT=unix:" + sandbox.ContainerRunDir + "/" + sandbox.ContainerSocket},
+		Env:        []string{"ERMITE_CONNECT=unix:" + sandbox.ContainerRunDir + "/" + sandbox.ContainerSocket, "ERMITE_GATEWAY=" + netw.Gateway.String()},
 		Labels:     labels,
 		Runtime:    d.runtime,
 		Privileged: d.privileged,

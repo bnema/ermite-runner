@@ -19,6 +19,7 @@ import (
 	ermite "bnema.dev/ermite-api/gen/ermite"
 	"bnema.dev/ermite-api/gen/ermite/ermiteconnect"
 
+	"bnema.dev/ermite-runner/internal/cachesvc"
 	"bnema.dev/ermite-runner/internal/execstream/execpb"
 	"bnema.dev/ermite-runner/internal/sandbox"
 )
@@ -36,6 +37,12 @@ type Runner struct {
 	// step summaries are sent only when it says "ci.annotations" and
 	// "ci.summaries". Nil means neither is sent.
 	Features ServerFeatures
+	// Cache, when not nil, is the cache service of the runner; the sandbox
+	// drivers serve it on CachePort of each sandbox's gateway (see
+	// sandbox.Config.Cache), and each job gets a token scoped to its repository
+	// and refs.
+	Cache     *cachesvc.Service
+	CachePort uint16
 
 	// now returns the current time; tests replace it.
 	now func() time.Time

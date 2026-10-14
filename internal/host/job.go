@@ -691,6 +691,7 @@ func (j *jobRun) drive(conn sandbox.Conn, rt *Runner) (*execpb.Exit, error) {
 		RunnerName: rt.Cfg.Name, RunnerVersion: rt.Cfg.Version, RunnerEnvironment: rt.Cfg.environment(),
 		SendAnnotations: j.features.annotations, SendSummaries: j.features.summaries,
 	}}
+	run.Job.CachePort, run.Job.CacheToken = j.cacheFor(rt)
 	_, exit, err := execstream.DriveJob(conn, run, j.cancelCh, execstream.JobHandler{
 		StepStarted: j.stepStarted, StepCompleted: j.stepCompleted,
 		Log:             j.logLine,

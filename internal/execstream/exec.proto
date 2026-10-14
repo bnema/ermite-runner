@@ -75,6 +75,16 @@ message JobSpec {
   // sends StepAnnotations and StepSummary frames only when they are set.
   bool send_annotations = 13;
   bool send_summaries = 14;
+  // cache_port and cache_token, when set, are the runner's cache service for
+  // this job: it listens on the sandbox's gateway address (the executor knows
+  // it: ERMITE_GATEWAY) on that TCP port. The executor gives
+  // ACTIONS_CACHE_URL=http://<gateway>:<port>/ and the token as
+  // ACTIONS_RUNTIME_TOKEN to node and docker actions only, as the official
+  // runner does, and masks the token. The token is not an ermite credential: it
+  // is an HMAC that only the runner's cache service accepts, scoped to this
+  // job's repository and refs.
+  uint32 cache_port = 15;
+  string cache_token = 16;
 }
 
 enum StreamKind {
