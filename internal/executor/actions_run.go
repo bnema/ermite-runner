@@ -153,7 +153,10 @@ func (j *job) runAction(s *stepRun, cancel <-chan struct{}) stepResult {
 	local := n.uses.Kind == action.UsesLocal
 	// A local composite action is expanded when it runs (ActionRunner.cs:77-96).
 	if def.kind == kindComposite && s.stage == stageMain && local {
-		if err := j.prepareLocalComposite(s, def); err != nil {
+		if err := j.prepareLocalComposite(s, def, cancel); err != nil {
+			if err == errSetupCancelled {
+				return resCanceled // logged by the command that was stopped
+			}
 			return fail(err)
 		}
 	}

@@ -3,6 +3,8 @@
 package executor
 
 import (
+	"context"
+
 	"bnema.dev/ermite-actions/expr"
 )
 
@@ -21,11 +23,19 @@ func compositeGitHubKeys() []string {
 // composite action (ActionRunner.cs:77-96): its steps are prepared when the
 // step runs, in the log of the step, and the pulls and builds they need run
 // first as embedded steps.
-func (j *job) prepareLocalComposite(s *stepRun, def *actionDef) error {
+func (j *job) prepareLocalComposite(s *stepRun, def *actionDef, cancel <-chan struct{}) error {
 	n := s.n
 	if n.children != nil {
 		return nil // pre and post stages reuse the nodes of the main stage
 	}
+	// Depth restarts at 1 for the steps of a local composite action, as in the
+	// runner (ActionRunner.cs:77-96 calls PrepareActionsAsync with depth 1), so a
+	// chain of local composites has no depth limit here
+	// (TestLocalCompositeChainHasNoDepthLimit). Whether github.com limits it is
+	// to be settled by the recording of ermite-conformance
+	// corpus/act-composite-depth. Every level that needs a resolution is counted
+	// by the host's per-job budget (host/resolve.go), so the server is safe
+	// whatever is decided.
 	kids, err := newNodes(def.act.Runs.Steps, n, n.scope)
 	if err != nil {
 		return err
@@ -39,14 +49,30 @@ func (j *job) prepareLocalComposite(s *stepRun, def *actionDef) error {
 	saved := *j.actions
 	j.actions.pullOrder, j.actions.buildOrder = nil, nil
 	j.actions.pullUsers, j.actions.buildUsers = map[string][]*node{}, map[string][]*node{}
-	if err := j.prepare(j.ctx(), s.num, kids, 1, n); err != nil {
+	// The preparation stops with the step: its context ends when the step is
+	// cancelled (and with the job, whose context it derives from).
+	ctx, stop := context.WithCancel(j.ctx())
+	defer stop()
+	if cancel != nil {
+		go func() {
+			select {
+			case <-cancel:
+				stop()
+			case <-ctx.Done():
+			}
+		}()
+	}
+	if err := j.prepare(ctx, s.num, kids, 1, n); err != nil {
 		return err
 	}
 	setups := j.setupSteps()
 	j.actions.pullOrder, j.actions.buildOrder = saved.pullOrder, saved.buildOrder
 	j.actions.pullUsers, j.actions.buildUsers = saved.pullUsers, saved.buildUsers
 	for _, q := range setups {
-		if r := q.setup(s, nil); r != resSucceeded {
+		if r := q.setup(s, cancel); r != resSucceeded {
+			if r == resCanceled {
+				return errSetupCancelled
+			}
 			return errSetupFailed
 		}
 	}
@@ -55,6 +81,10 @@ func (j *job) prepareLocalComposite(s *stepRun, def *actionDef) error {
 
 // errSetupFailed ends a composite whose image setup failed; the cause is in the
 // log already.
+// errSetupCancelled: the step was cancelled while its images were prepared; the
+// cancellation is logged by the docker command already.
+var errSetupCancelled = ghErrorf("The operation was canceled.")
+
 var errSetupFailed = ghErrorf("A container setup step of the composite action failed.")
 
 // runComposite is CompositeActionHandler.RunAsync (CompositeActionHandler.cs:
