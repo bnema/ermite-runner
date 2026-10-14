@@ -5,6 +5,7 @@ package executor
 import (
 	"archive/tar"
 	"compress/gzip"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -14,10 +15,14 @@ import (
 )
 
 // Limits of an action archive. The runner has none (it runs tar); these keep a
-// hostile archive from filling the sandbox.
-const (
+// hostile archive from filling the sandbox. They are variables for the tests.
+var (
 	maxArchiveEntries = 200_000
-	maxArchiveBytes   = 2 << 30 // unpacked
+	// maxArchiveBytes bounds the sizes of the regular files; maxStreamBytes the
+	// whole decompressed tar stream, headers and PAX/GNU long-name records
+	// included, which the entry and size counters do not see.
+	maxArchiveBytes = int64(2 << 30)
+	maxStreamBytes  = maxArchiveBytes + 64<<20
 )
 
 // errArchive is returned for an archive that is not safe or not valid. Its text
@@ -27,12 +32,34 @@ type errArchive string
 
 func (e errArchive) Error() string { return string(e) }
 
+// capReader fails once more than n bytes were read.
+type capReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *capReader) Read(p []byte) (int, error) {
+	if c.n <= 0 {
+		return 0, errArchive("the archive is too large once unpacked")
+	}
+	if int64(len(p)) > c.n {
+		p = p[:c.n]
+	}
+	n, err := c.r.Read(p)
+	c.n -= int64(n)
+	return n, err
+}
+
 // extractTarball unpacks a gzip-compressed tar into dir, which must exist and
-// be empty. Every name is checked: no absolute path, no "..", no link whose
-// target leaves dir, and everything is written through an os.Root, so that a
-// link planted by an earlier entry cannot redirect a later one. owner, when
-// set, is the uid and gid of the files.
-func extractTarball(r io.Reader, dir string, owner *[2]int) error {
+// be empty, and strips the single top directory of the archive (GitHub's
+// archives have exactly one, ActionManager.cs:1380-1393): the content lands in
+// dir itself, so no file moves afterwards and a link that is valid here stays
+// valid. Every name is checked: no absolute path, no "..", one top directory,
+// no link whose target leaves dir, and everything is written through an
+// os.Root, so that a link planted by an earlier entry cannot redirect a later
+// one. The decompressed stream is capped, and ctx is checked between entries.
+// owner, when set, is the uid and gid of the files.
+func extractTarball(ctx context.Context, r io.Reader, dir string, owner *[2]int) error {
 	zr, err := gzip.NewReader(r)
 	if err != nil {
 		return errArchive("the archive is not a gzip file: " + err.Error())
@@ -43,14 +70,21 @@ func extractTarball(r io.Reader, dir string, owner *[2]int) error {
 		return err
 	}
 	defer func() { _ = root.Close() }()
-	tr := tar.NewReader(zr)
-	entries, total := 0, int64(0)
+	tr := tar.NewReader(&capReader{r: zr, n: maxStreamBytes})
+	entries, total, top := 0, int64(0), ""
 	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		h, err := tr.Next()
 		if errors.Is(err, io.EOF) {
 			return nil
 		}
 		if err != nil {
+			var ea errArchive
+			if errors.As(err, &ea) {
+				return ea
+			}
 			return errArchive("the archive is not a valid tar file: " + err.Error())
 		}
 		if entries++; entries > maxArchiveEntries {
@@ -59,10 +93,33 @@ func extractTarball(r io.Reader, dir string, owner *[2]int) error {
 		if total += h.Size; total > maxArchiveBytes {
 			return errArchive("the archive is too large once unpacked")
 		}
-		if err := extractEntry(root, tr, h, owner); err != nil {
+		if err := extractEntry(root, tr, h, owner, &top); err != nil {
 			return err
 		}
 	}
+}
+
+// stripTop validates the name of an entry, drops its top directory and returns
+// the rest, clean and relative to the final root ("" for the top directory
+// itself). All entries must share one top directory.
+func stripTop(name string, top *string) (string, error) {
+	c, err := cleanEntry(name)
+	if err != nil {
+		return "", err
+	}
+	if c == "" {
+		return "", nil
+	}
+	first, rest, hasRest := strings.Cut(c, "/")
+	if *top == "" {
+		*top = first
+	} else if first != *top {
+		return "", errArchive(fmt.Sprintf("the archive has more than one top-level directory: %q and %q", *top, first))
+	}
+	if !hasRest {
+		return "", nil
+	}
+	return rest, nil
 }
 
 // cleanEntry validates the name of an entry and returns it clean and relative.
@@ -97,14 +154,20 @@ func linkInside(name, target string, hard bool) bool {
 	return t != ".." && !strings.HasPrefix(t, "../")
 }
 
-func extractEntry(root *os.Root, tr *tar.Reader, h *tar.Header, owner *[2]int) error {
+func extractEntry(root *os.Root, tr *tar.Reader, h *tar.Header, owner *[2]int, top *string) error {
 	switch h.Typeflag {
 	case tar.TypeXGlobalHeader, tar.TypeXHeader:
 		return nil // git archive's pax_global_header: the commit id
 	}
-	name, err := cleanEntry(h.Name)
-	if err != nil || name == "" {
+	name, err := stripTop(h.Name, top)
+	if err != nil {
 		return err
+	}
+	if name == "" {
+		if h.Typeflag != tar.TypeDir {
+			return errArchive(fmt.Sprintf("the archive has a file next to its top-level directory: %q", h.Name))
+		}
+		return nil
 	}
 	perm := os.FileMode(h.Mode) & 0o777
 	chown := func() error {
@@ -154,7 +217,7 @@ func extractEntry(root *os.Root, tr *tar.Reader, h *tar.Header, owner *[2]int) e
 		}
 		return chown()
 	case tar.TypeLink:
-		tgt, err := cleanEntry(h.Linkname)
+		tgt, err := stripTop(h.Linkname, top)
 		if err != nil || tgt == "" || !linkInside(name, tgt, true) {
 			return errArchive(fmt.Sprintf("the archive has a link that points outside of it: %q -> %q", name, h.Linkname))
 		}

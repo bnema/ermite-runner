@@ -171,32 +171,21 @@ func (j *job) downloadAction(ctx context.Context, num int, ra ResolvedAction, na
 	if c := j.cfg.Credential; c != nil {
 		owner = &[2]int{int(c.Uid), int(c.Gid)}
 	}
-	err = extractTarball(af, staging, owner)
+	// The top directory is stripped while extracting, so that links are checked
+	// against the tree they will live in (see extractTarball).
+	err = extractTarball(ctx, af, staging, owner)
 	_ = af.Close()
 	if err != nil {
 		return ghErrorf("Can't extract the archive of action %s@%s: %v", name, ref, err)
-	}
-	ents, err := os.ReadDir(staging)
-	if err != nil {
-		return err
-	}
-	var dirs []os.DirEntry
-	for _, e := range ents {
-		if e.IsDir() {
-			dirs = append(dirs, e)
-		}
-	}
-	if len(dirs) != 1 || len(ents) != 1 {
-		return fmt.Errorf("'%s' contains '%d' directories", archive, len(dirs))
 	}
 	_ = os.RemoveAll(dir)
 	if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
 		return err
 	}
-	if err := os.Rename(filepath.Join(staging, dirs[0].Name()), dir); err != nil {
+	if err := os.Rename(staging, dir); err != nil {
 		return err
 	}
-	j.debug(num, fmt.Sprintf("Unwrap '%s' to '%s'", dirs[0].Name(), dir))
+	j.debug(num, fmt.Sprintf("Unwrap the archive to '%s'", dir))
 	if err := os.WriteFile(watermark(dir), []byte(j.now().UTC().Format(time.DateTime)), 0o644); err != nil {
 		return err
 	}
