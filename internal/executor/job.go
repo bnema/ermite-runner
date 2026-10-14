@@ -178,6 +178,7 @@ type job struct {
 	collectors map[int]*issueCollector // by step number
 	outcomes   map[int]Conclusion
 	summaries  map[int]string
+	logLines   map[int]int            // lines written to the log of each step, under mu
 	states     map[string]*intraState // intra-action state, see saveState
 }
 
@@ -305,11 +306,23 @@ func (j *job) timeoutMinutes() int {
 
 // ---------------------------------------------------------------- logging
 
-// write sends one log line to the Reporter, in order.
-func (j *job) write(num int, line string) {
+// write sends one log line to the Reporter, in order. It returns the 1-based
+// number of the line in the log of the step num, what the runner calls
+// logFileLineNumber (_logger.TotalLines + 1 in ExecutionContext.Write). The
+// steps inside a composite action write to the log of the step that uses it,
+// so they count in the same sequence.
+func (j *job) write(num int, line string) int {
 	j.mu.Lock()
 	defer j.mu.Unlock()
+	if j.logLines == nil {
+		j.logLines = map[int]int{}
+	}
+	n := j.logLines[num] + 1
+	// A line with a line feed in it is several lines of the log (Logging.cs:
+	// 90-101); the host splits the text the same way.
+	j.logLines[num] += 1 + strings.Count(line, "\n")
 	j.cfg.Reporter.Log(num, j.now(), line)
+	return n
 }
 
 // out writes a message that may hold several lines (ExecutionContext.Output).

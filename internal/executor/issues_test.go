@@ -88,8 +88,11 @@ func TestAnnotationsFromCommands(t *testing.T) {
 	got := rr.results[2].Annotations
 	want := []Annotation{
 		{Level: LevelWarning, Title: "T", Message: "careful", File: "src/a.go", StartLine: 3, EndLine: 5},
-		{Level: LevelFailure, Message: "broken\nline two"},
-		{Level: LevelNotice, Message: "fyi"},
+		// No file and no line: the line of the ##[error] and ##[notice] lines in
+		// the step log (header: group, 3 script lines, shell, endgroup = 6 lines;
+		// the warning is line 7, the error 8 and its second line 9, the notice 10).
+		{Level: LevelFailure, Message: "broken\nline two", StartLine: 8, EndLine: 8},
+		{Level: LevelNotice, Message: "fyi", StartLine: 10, EndLine: 10},
 	}
 	// col and endColumn are dropped because the lines differ.
 	if fmt.Sprint(got) != fmt.Sprint(want) {
@@ -222,5 +225,132 @@ func TestSaveStateInRunStep(t *testing.T) {
 		if !strings.Contains(log, w) {
 			t.Errorf("log lacks %q:\n%s", w, log)
 		}
+	}
+}
+
+// IssueExtensions.ToAnnotation (Sdk/RSWebApi/Contracts/IssueExtensions.cs:25-29):
+// an issue without file and line takes the number of its own line in the step
+// log (logFileLineNumber, ExecutionContext.cs:855) as start and end line.
+func TestAnnotationOfAPathlessIssueIsItsLogLine(t *testing.T) {
+	j := &job{}
+	j.masker.Store(newMasker())
+	for _, tc := range []struct {
+		name    string
+		props   map[string]string
+		logLine int
+		want    [2]int32
+	}{
+		{"no props", nil, 103, [2]int32{103, 103}},
+		{"not logged", nil, 0, [2]int32{0, 0}},
+		{"blank file", map[string]string{"file": "  "}, 5, [2]int32{5, 5}},
+		{"zero line", map[string]string{"line": "0"}, 5, [2]int32{5, 5}},
+		{"line not a number", map[string]string{"line": "x"}, 5, [2]int32{5, 5}},
+		{"a file", map[string]string{"file": "a.go"}, 5, [2]int32{0, 0}},
+		{"a line", map[string]string{"line": "2"}, 5, [2]int32{2, 2}},
+		{"a line range", map[string]string{"line": "2", "endline": "4"}, 5, [2]int32{2, 4}},
+		{"negative line, no file", map[string]string{"line": "-1"}, 5, [2]int32{0, 0}},
+	} {
+		a := j.annotationOf(issue{Level: LevelWarning, Props: tc.props}, "m", tc.logLine)
+		wantFile := tc.props["file"]
+		if strings.TrimSpace(wantFile) == "" {
+			wantFile = ""
+		}
+		if got := [2]int32{a.StartLine, a.EndLine}; got != tc.want || a.File != wantFile {
+			t.Errorf("%s: %+v, want lines %v", tc.name, a, tc.want)
+		}
+	}
+}
+
+// ann-*: a plain ::warning:: gets the number of its line in the log of the step,
+// the header counted (recorded: 103 for the exit code error closing a 103 line
+// log). Here: group, script (4 lines), shell, endgroup, then the output.
+func TestPlainWarningLineIsItsLogLine(t *testing.T) {
+	needTools(t, "bash")
+	rr, _ := runResults(t, wfHead+`    steps:
+      - name: s
+        run: |
+          echo out
+          echo "::warning::x"
+          echo "::warning::x"
+          exit 3
+`, nil)
+	log := rr.step(t, "s").Log
+	var want []int32
+	for i, l := range log {
+		if strings.HasPrefix(l, "##[warning]") || strings.HasPrefix(l, "##[error]") {
+			want = append(want, int32(i+1))
+		}
+	}
+	if fmt.Sprint(want) != "[9 10 11]" {
+		t.Fatalf("log layout changed: %v\n%s", want, strings.Join(log, "\n"))
+	}
+	var got []int32
+	for _, a := range rr.results[2].Annotations {
+		if a.File != "" || a.StartLine != a.EndLine {
+			t.Errorf("%+v", a)
+		}
+		got = append(got, a.StartLine)
+	}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("start lines %v, log lines %v\n%s", got, want, strings.Join(log, "\n"))
+	}
+}
+
+// Mirror of the recording match-catastrophic (GitHub): the annotations of a
+// matcher with no file are at the line of their ##[warning] line, 10, 13, 16,
+// 18 and 20 in the steps of the corpus script (the removal warning at 14 and,
+// in the next step, 7). The step logs are laid out as the recorded ones.
+func TestMatcherAnnotationsWithoutFileHaveTheirLogLine(t *testing.T) {
+	needTools(t, "bash")
+	rr, res := runResults(t, wfHead+`    steps:
+      - name: workspace as a repository
+        run: |
+          mkdir -p src .github
+          cat > .github/bad.json <<'JSON'
+          {"problemMatcher":[{"owner":"catastrophic","pattern":[{"regexp":"^((a+)+)$","message":1}]}]}
+          JSON
+          cat > .github/good.json <<'JSON'
+          {"problemMatcher":[{"owner":"good","severity":"warning","pattern":[{"regexp":"^good: (.+)$","message":1}]}]}
+          JSON
+          printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!\n' > .github/long-line.txt
+      - name: catastrophic matcher
+        run: |
+          echo "::add-matcher::.github/bad.json"
+          echo "::add-matcher::.github/good.json"
+          echo "good: before the long line"
+          cat .github/long-line.txt
+          echo "good: after the long line"
+          echo "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!"
+          echo "good: after a second long line"
+          echo "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          echo "good: matcher still alive"
+      - name: the matcher stays removed in the next step
+        run: |
+          echo "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!"
+          echo "aaa"
+          echo "good: still alive"
+`, nil)
+	if res.Conclusion != ConclusionSuccess {
+		t.Fatalf("%+v", res)
+	}
+	lines := func(num int) (out []string) {
+		for _, a := range rr.results[num].Annotations {
+			if a.File != "" || a.StartLine != a.EndLine {
+				t.Errorf("step %d: %+v", num, a)
+			}
+			m, _, _ := strings.Cut(a.Message, ".")
+			out = append(out, fmt.Sprintf("%d:%s", a.StartLine, m))
+		}
+		return out
+	}
+	// The first step has no annotation; the removal message is line 14.
+	want3 := "[13:before the long line 14:Removing issue matcher 'catastrophic'" +
+		" 16:after the long line 18:after a second long line 20:matcher still alive]"
+	if got := fmt.Sprint(lines(3)); got != want3 {
+		t.Errorf("catastrophic matcher: %v\nwant %v\n%s", got, want3, logOf(rr.step(t, "catastrophic matcher")))
+	}
+	want4 := "[7:Removing issue matcher 'catastrophic' 10:still alive]"
+	if got := fmt.Sprint(lines(4)); got != want4 {
+		t.Errorf("next step: %v\nwant %v\n%s", got, want4, logOf(rr.step(t, "the matcher stays removed in the next step")))
 	}
 }

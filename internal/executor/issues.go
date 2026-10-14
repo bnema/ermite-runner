@@ -4,6 +4,7 @@ package executor
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"sync"
@@ -158,25 +159,31 @@ func (j *job) addIssue(num int, c *issueCollector, embedded bool, is issue) {
 	if c == nil {
 		c = j.collector(num)
 	}
-	if msg != "" {
-		c.add(j.annotationOf(is, msg), embedded)
-	}
 	logMsg := msg
 	if is.LogText != "" {
 		logMsg = j.mask(is.LogText)
 	}
-	if logMsg != "" { // an empty message is not logged (:855)
-		j.logTagged(num, tagOf(is.Level), logMsg)
+	// logFileLineNumber: the line of the step log that holds the tag, 0 when
+	// the issue is not logged (an empty message is not, :855).
+	logLine := 0
+	if logMsg != "" {
+		logLine = j.logTagged(num, tagOf(is.Level), logMsg)
+	}
+	if msg != "" {
+		c.add(j.annotationOf(is, msg, logLine), embedded)
 	}
 }
 
-// logTagged writes tag+message; only the first line carries the tag.
-func (j *job) logTagged(num int, tag, msg string) {
+// logTagged writes tag+message; only the first line carries the tag. It
+// returns the 1-based number, in the log of the step, of the first line
+// (ExecutionContext.Write, :1099-1118).
+func (j *job) logTagged(num int, tag, msg string) int {
 	lines := strings.Split(strings.ReplaceAll(msg, "\r\n", "\n"), "\n")
-	j.write(num, tag+lines[0])
+	first := j.write(num, tag+lines[0])
 	for _, l := range lines[1:] {
 		j.write(num, l)
 	}
+	return first
 }
 
 // parseInt is int.TryParse(string, out int): white space around, an optional
@@ -196,11 +203,20 @@ func parseInt(s string) (int, bool) {
 // Deliberate divergence: GitHub keeps negative and zero lines (int.TryParse,
 // ActionCommandManager.cs:723-725; ann-levels records start_line -1); ermite's
 // contract is positive lines, 0 = no line, and the host clamps.
-func (j *job) annotationOf(is issue, msg string) Annotation {
+//
+// logLine is the number of the issue's own line in the step log (0 if it was
+// not logged). As in IssueExtensions.ToAnnotation (Sdk/RSWebApi/Contracts/
+// IssueExtensions.cs:25-29), an issue with no file and a line that is 0 or
+// absent takes it as start and end line, GitHub's way to point at the log from
+// an annotation that has no place in the code. Unlike GitHub, which then puts
+// the annotation on a placeholder file ".github", ermite sets no file.
+func (j *job) annotationOf(is issue, msg string, logLine int) Annotation {
 	a := Annotation{Level: is.Level, Message: msg}
 	p := is.Props
 	a.Title = truncateRunes(j.mask(p["title"]), maxAnnotationTitle)
-	if f := j.mask(p["file"]); utf8.RuneCountInString(f) <= maxAnnotationFile {
+	// A blank file is no file (GitHub: path == null for a blank file), so the
+	// annotation is path-less and points at its log line below.
+	if f := j.mask(p["file"]); strings.TrimSpace(f) != "" && utf8.RuneCountInString(f) <= maxAnnotationFile {
 		a.File = f
 	}
 	num := func(k string) int32 {
@@ -221,6 +237,12 @@ func (j *job) annotationOf(is issue, msg string) Annotation {
 	}
 	if a.StartColumn != 0 && a.EndColumn == 0 {
 		a.EndColumn = a.StartColumn
+	}
+	// path == null && lineNumber == 0 && logLineNumber != 0. The raw line is
+	// the one that counts: a negative line is not 0 and keeps GitHub's value
+	// (which ermite cannot send, see above).
+	if n, ok := parseInt(p["line"]); strings.TrimSpace(p["file"]) == "" && (!ok || n == 0) && logLine > 0 && logLine <= math.MaxInt32 {
+		a.StartLine, a.EndLine = int32(logLine), int32(logLine)
 	}
 	return a
 }

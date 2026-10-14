@@ -65,11 +65,11 @@ func TestInvalidStopTokenFailsTheStepWithTheMessageOnly(t *testing.T) {
 func TestAnnotationEndsWhereItStartsByDefault(t *testing.T) {
 	j := &job{}
 	j.masker.Store(newMasker())
-	a := j.annotationOf(issue{Level: LevelWarning, Props: map[string]string{"line": "2", "col": "3"}}, "m")
+	a := j.annotationOf(issue{Level: LevelWarning, Props: map[string]string{"line": "2", "col": "3"}}, "m", 0)
 	if a.StartLine != 2 || a.EndLine != 2 || a.StartColumn != 3 || a.EndColumn != 3 {
 		t.Errorf("%+v", a)
 	}
-	a = j.annotationOf(issue{Level: LevelWarning, Props: map[string]string{"line": "2", "endline": "5"}}, "m")
+	a = j.annotationOf(issue{Level: LevelWarning, Props: map[string]string{"line": "2", "endline": "5"}}, "m", 0)
 	if a.EndLine != 5 || a.EndColumn != 0 {
 		t.Errorf("%+v", a)
 	}
