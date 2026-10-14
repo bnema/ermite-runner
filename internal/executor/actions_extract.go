@@ -60,6 +60,9 @@ func (c *capReader) Read(p []byte) (int, error) {
 // no link whose target leaves dir, and everything is written through an
 // os.Root, so that a link planted by an earlier entry cannot redirect a later
 // one. The decompressed stream is capped, and ctx is checked between entries.
+// Links are validated at install time: a running step can change the action
+// tree like any file of its own sandbox, so this is not a confinement guarantee
+// for what happens later.
 // owner, when set, is the uid and gid of the files.
 func extractTarball(ctx context.Context, r io.Reader, dir string, owner *[2]int) error {
 	zr, err := gzip.NewReader(r)
