@@ -32,6 +32,10 @@ type containerSet struct {
 	networkTry string   // network name, set before docker network create
 	netRemoved bool     // the network is gone
 	dirs       []string // docker --config directories that could not be removed
+	// deadline is the end of the cleanup budget, fixed by the first cleanup of
+	// the job: "Stop containers" and the fallback share it, so the cleanup of a
+	// job is bounded as a whole.
+	deadline time.Time
 }
 
 func (cs *containerSet) tryNetwork(name string) { cs.mu.Lock(); cs.networkTry = name; cs.mu.Unlock() }

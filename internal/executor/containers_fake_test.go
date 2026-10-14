@@ -30,7 +30,7 @@ func newFakeCtr(t *testing.T) *fakeCtr {
 D=` + d + `
 { echo "--"; for a in "$@"; do printf "%s\n" "$a"; done; echo "ENV:CVAR=$CVAR:EMPTYV=${EMPTYV-unset}:PATH=$PATH"; } >> $D/calls
 [ "$1" = "--config" ] && { CFG=$2; shift 2; }
-hang() { trap 'exit 130' INT TERM; while :; do sleep 0.05; done; }
+hang() { if [ -f $D/hang_ignore ]; then trap '' INT; trap 'exit 143' TERM; else trap 'exit 130' INT TERM; fi; while :; do sleep 0.05; done; }
 [ -f $D/hang_$1 ] && hang
 if [ -f $D/hang_for ]; then case "$*" in *"$(cat $D/hang_for)"*) hang ;; esac; fi
 case "$1" in

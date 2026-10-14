@@ -151,29 +151,29 @@ func (j *job) cleanupContainers(s *stepRun) (errs []error) {
 	cs.cleanupMu.Lock()
 	defer cs.cleanupMu.Unlock()
 	t := j.timeouts()
-	budget, budgetOut, stop := bound(nil, t.CleanupBudget)
+	cs.mu.Lock()
+	if cs.deadline.IsZero() {
+		cs.deadline = time.Now().Add(t.CleanupBudget)
+	}
+	remaining := time.Until(cs.deadline)
+	cs.mu.Unlock()
+	budget, budgetOut, stop := bound(nil, max(remaining, time.Nanosecond))
 	defer stop()
+	defer func() { errs = dedupeErrors(errs) }()
 	out := func(line string) {
 		if s != nil {
 			j.out(s.num, line)
 		}
 	}
 	run := func(c dockerCmd) (int, error) {
-		select {
-		case <-budget:
-			if budgetOut() {
-				return 0, ghErrorf("The cleanup of the containers ran out of time (%s)", t.CleanupBudget)
-			}
-		default:
-		}
-		_, code, err := j.dockerDo(c, dockerOpts{s: s, cancel: budget, all: true, timeout: t.CleanupCommand})
+		_, code, err := j.dockerDoCleanup(c, s, budget, budgetOut, t, t.CleanupCommand)
 		return code, err
 	}
 	// rm runs `docker rm --force target`. It reports whether the target is
 	// gone: removed, or docker says it does not exist. Any other failure leaves
 	// it pending, for the fallback of the job to try again.
 	rm := func(kind string, c dockerCmd) (gone bool) {
-		lines, code, err := j.dockerDoCleanup(c, s, budget, t.CleanupCommand)
+		lines, code, err := j.dockerDoCleanup(c, s, budget, budgetOut, t, t.CleanupCommand)
 		switch {
 		case err != nil:
 			errs = append(errs, err)
@@ -197,7 +197,7 @@ func (j *job) cleanupContainers(s *stepRun) (errs []error) {
 	}
 	if len(unresolved) > 0 {
 		ok := true
-		ids, code, err := j.dockerDoCleanup(j.newDockerCmd("ps", raw("--all", "--quiet", "--no-trunc"), quotedOpt("--filter", "label="+j.dockerLabel())), nil, budget, t.CleanupCommand)
+		ids, code, err := j.dockerDoCleanup(j.newDockerCmd("ps", raw("--all", "--quiet", "--no-trunc"), quotedOpt("--filter", "label="+j.dockerLabel())), nil, budget, budgetOut, t, t.CleanupCommand)
 		switch {
 		case err != nil:
 			errs, ok = append(errs, err), false
@@ -290,7 +290,35 @@ func absent(lines []string) bool {
 }
 
 // dockerDoCleanup runs a command of the cleanup: bounded by its own limit and
-// by the budget, its output (stdout and stderr) returned, logged to s if any.
-func (j *job) dockerDoCleanup(c dockerCmd, s *stepRun, budget <-chan struct{}, limit time.Duration) ([]string, int, error) {
-	return j.dockerDo(c, dockerOpts{s: s, cancel: budget, all: true, timeout: limit, errToOut: true})
+// by the budget of the whole cleanup, its output (stdout and stderr) returned,
+// logged to s if any. The budget is checked here, before every command: once
+// it is spent nothing is started (a command started with a closed cancel would
+// still cost a signal escalation) and the object stays pending.
+func (j *job) dockerDoCleanup(c dockerCmd, s *stepRun, budget <-chan struct{}, budgetOut func() bool, t ContainerTimeouts, limit time.Duration) ([]string, int, error) {
+	spent := func() error {
+		return ghErrorf("The cleanup of the containers ran out of time (%s): not run: docker %s", t.CleanupBudget, j.dockerArgString(c))
+	}
+	select {
+	case <-budget:
+		return nil, 0, spent()
+	default:
+	}
+	lines, code, err := j.dockerDo(c, dockerOpts{s: s, cancel: budget, all: true, timeout: limit, errToOut: true})
+	if err == errCancelled && budgetOut() {
+		return lines, code, ghErrorf("The cleanup of the containers ran out of time (%s): stopped: docker %s", t.CleanupBudget, j.dockerArgString(c))
+	}
+	return lines, code, err
+}
+
+// dedupeErrors keeps the first of the errors that read the same.
+func dedupeErrors(errs []error) []error {
+	seen := map[string]bool{}
+	var out []error
+	for _, e := range errs {
+		if !seen[e.Error()] {
+			seen[e.Error()] = true
+			out = append(out, e)
+		}
+	}
+	return out
 }

@@ -334,3 +334,47 @@ func TestInvalidEnvNamesAreRefused(t *testing.T) {
 		t.Errorf("docker exec called %d times", n)
 	}
 }
+
+// GO-008: the budget of the whole cleanup is checked before every command. With
+// a budget spent by the first stalled removal, the others (and the retry of the
+// fallback) are not started: they would each cost a signal escalation.
+func TestCleanupBudgetIsCheckedBeforeEveryCommand(t *testing.T) {
+	f := newFakeCtr(t)
+	f.set(t, "hang_for", "rm --force")
+	f.set(t, "hang_ignore", "1") // SIGINT is ignored: a started command costs TermAfter
+	svcs := ""
+	for _, n := range []string{"a", "b", "c", "d", "e", "f", "g", "h"} {
+		svcs += "      " + n + ":\n        image: redis:7\n"
+	}
+	start := time.Now()
+	rec, res := ctrRun(t, f, "    container: ubuntu:24.04\n    services:\n"+svcs, "      - run: echo ok\n", func(c *Config) {
+		c.Actions.Containers = ContainerTimeouts{Command: time.Minute, Pull: time.Minute, CleanupCommand: time.Minute, CleanupBudget: time.Second}
+	})
+	total := time.Since(start)
+	if res.Conclusion == ConclusionSuccess {
+		t.Fatalf("an unfinished cleanup must be visible: %+v", res)
+	}
+	stop := rec.step(t, "Stop containers")
+	took := stop.Completed.Sub(stop.Started)
+	// The budget (1 s) and one escalation (TermAfter 200 ms in the tests, plus the kill delay).
+	if took > 1900*time.Millisecond || total > 12*time.Second {
+		t.Errorf("Stop containers took %s (run %s), want about the budget plus one escalation", took, total)
+	}
+	rms := 0
+	for _, c := range f.calls(t) {
+		if c[0] == "rm" {
+			rms++
+		}
+	}
+	if rms != 1 {
+		t.Errorf("%d removals started, want 1 (the budget was spent by it)", rms)
+	}
+	log := logOf(stop)
+	if !strings.Contains(log, "##[error]The cleanup of the containers ran out of time (1s): stopped: docker rm --force ") ||
+		!strings.Contains(log, "ran out of time (1s): not run: docker ") {
+		t.Errorf("log:\n%s", log)
+	}
+	if strings.Count(log, "not run: docker network rm") != 1 {
+		t.Errorf("the network removal must be reported as not run once:\n%s", log)
+	}
+}
