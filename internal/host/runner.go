@@ -32,6 +32,10 @@ type Runner struct {
 	// Job builds the client of a job from its job token.
 	Job    func(jobToken string) ermiteconnect.RunnerServiceClient
 	Timing Timing
+	// Features lists the features of the server (GetVersion). Annotations and
+	// step summaries are sent only when it says "ci.annotations" and
+	// "ci.summaries". Nil means neither is sent.
+	Features ServerFeatures
 
 	// now returns the current time; tests replace it.
 	now func() time.Time
@@ -182,6 +186,7 @@ func (r *Runner) startJob(ctx context.Context, log zerowrap.Logger, job *ermite.
 		r: r, job: job, client: r.Job(job.JobToken), t: t, ctx: jctx, cancel: cancel,
 		log:        zerowrap.Logger{Logger: log.With().Str("job_id", job.JobId).Int64("run_id", job.RunId).Int32("attempt", job.Attempt).Logger()},
 		receivedAt: r.clock(), cancelCh: make(chan *execpb.Cancel, 1), steps: map[int32]*ermite.StepUpdate{},
+		annSeen: map[int32]bool{}, sumSeen: map[int32]bool{},
 	}
 	jr.log.Info().Str("job_key", job.JobKey).Msg("job assigned")
 	r.active.Add(1)

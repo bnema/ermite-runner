@@ -70,6 +70,14 @@ type jobRun struct {
 	// contexts is Job.Contexts as handed to the executor: with the server URLs
 	// pointed at the runner's URL when guest forge access is on.
 	contexts string
+	// features is what the server accepts; annLists are the annotations the
+	// executor sent for steps that have not completed yet (see results.go).
+	features jobFeatures
+	annLists map[int32][]*ermite.Annotation
+	// annSeen and sumSeen are the steps that sent their annotations and their
+	// summary: each is sent once.
+	annSeen, sumSeen map[int32]bool
+	annDropped       int // annotations dropped for lack of room, see reportDroppedAnnotations
 	// hard stops the sandbox at once; set before the session starts.
 	hard    func()
 	result  *execpb.JobResult
@@ -282,7 +290,7 @@ func (j *jobRun) stepStarted(s *execpb.StepStarted) {
 	u := &ermite.StepUpdate{Number: s.Number, Name: cutName(s.Name), State: ermite.StepState_STEP_STATE_IN_PROGRESS, StartedAt: tsOf(s.UnixNano)}
 	j.steps[s.Number] = u
 	j.mu.Unlock()
-	j.outbox.Step(u)
+	j.outbox.Step(u, nil)
 }
 
 func (j *jobRun) stepCompleted(s *execpb.StepCompleted) {
@@ -312,9 +320,18 @@ func (j *jobRun) stepCompleted(s *execpb.StepCompleted) {
 		u.Conclusion = ermite.CiConclusion_CI_CONCLUSION_FAILURE
 	}
 	u.CompletedAt = tsOf(s.UnixNano)
+	// The outcome is how the step ended before continue-on-error; a runner that
+	// does not say leaves it unspecified, which means the conclusion.
+	if o := conclusionOf(s.Outcome); o != ermite.CiConclusion_CI_CONCLUSION_UNSPECIFIED {
+		if o == ermite.CiConclusion_CI_CONCLUSION_TIMED_OUT {
+			o = ermite.CiConclusion_CI_CONCLUSION_FAILURE
+		}
+		u.Outcome = o
+	}
 	j.steps[s.Number] = u
+	anns := j.takeAnnotations(s.Number)
 	j.mu.Unlock()
-	j.outbox.Step(u)
+	j.outbox.Step(u, anns)
 }
 
 // logLine checks and queues a line of the log. The step must be one that was
@@ -358,6 +375,8 @@ func (j *jobRun) logLine(l *execpb.Log) {
 }
 
 // cutName bounds a step name to what the server keeps, on a character boundary.
+// The result is a copy: a substring would keep the whole name the guest sent
+// alive (see cutRunes).
 func cutName(s string) string {
 	if len(s) <= maxNameLen {
 		return strings.ToValidUTF8(s, "\ufffd")
@@ -366,7 +385,7 @@ func cutName(s string) string {
 	for !utf8.ValidString(s) && len(s) > 0 {
 		s = s[:len(s)-1]
 	}
-	return s
+	return strings.Clone(s)
 }
 
 func cloneStep(u *ermite.StepUpdate) *ermite.StepUpdate {
@@ -439,6 +458,15 @@ func (j *jobRun) run(rt *Runner, shutdown <-chan struct{}) {
 	j.outbox.start(ctx)
 
 	stopHard := j.startStopTimers(ctx, shutdown)
+	// The hard stop frees the reader of the stream if it waits for room in the
+	// outbox (the server keeps failing): nothing else would wake it.
+	go func() {
+		select {
+		case <-stopHard:
+			j.outbox.releaseProducers()
+		case <-ctx.Done():
+		}
+	}()
 	out := j.execute(ctx, rt, stopHard)
 	j.report(ctx, out, shutdown)
 }
@@ -546,10 +574,16 @@ func (j *jobRun) report(ctx context.Context, out outcome, shutdown <-chan struct
 		j.sandboxError(msg)
 		out = failure()
 	}
-	j.outbox.Close(rctx)
+	// The flush gets half of the budget: when the server keeps failing the
+	// uploads, the other half is still there for CompleteJob, which is what
+	// ends the job for the server.
+	fctx, fcancel := context.WithTimeout(rctx, budget/2)
+	j.outbox.Close(fctx)
+	fcancel()
 	if err := j.abandoned(); err != nil {
 		return
 	}
+	j.reportDroppedAnnotations(rctx, budget/4)
 	j.complete(rctx, out.conclusion, out.outputs, out.shutdown)
 }
 
@@ -577,6 +611,7 @@ func (j *jobRun) execute(ctx context.Context, rt *Runner, stopHard <-chan struct
 	}
 	// Stop runs to completion even when the job context is done.
 	defer j.stopSandbox(ctx, rt, sb)
+	j.features = j.loadFeatures(ctx, rt)
 
 	conn, err := j.startSandbox(ctx, rt, sb, stopHard)
 	if err != nil {
@@ -643,11 +678,13 @@ func (j *jobRun) drive(conn sandbox.Conn, rt *Runner) (*execpb.Exit, error) {
 		Matrix: j.job.Matrix, Contexts: j.contexts, Repo: j.job.Repo, TimeoutMinutes: int32(j.timeoutMinutes()),
 		DeadlineMs: max(1, time.Until(j.deadline()).Milliseconds()),
 		RunnerName: rt.Cfg.Name, RunnerVersion: rt.Cfg.Version, RunnerEnvironment: rt.Cfg.environment(),
+		SendAnnotations: j.features.annotations, SendSummaries: j.features.summaries,
 	}}
 	_, exit, err := execstream.DriveJob(conn, run, j.cancelCh, execstream.JobHandler{
 		StepStarted: j.stepStarted, StepCompleted: j.stepCompleted,
-		Log:       j.logLine,
-		JobResult: func(r *execpb.JobResult) { j.mu.Lock(); j.result = r; j.mu.Unlock() },
+		Log:             j.logLine,
+		JobResult:       func(r *execpb.JobResult) { j.mu.Lock(); j.result = r; j.mu.Unlock() },
+		StepAnnotations: j.stepAnnotations, StepSummary: j.stepSummary,
 	})
 	return exit, err
 }
@@ -742,6 +779,9 @@ func (j *jobRun) complete(ctx context.Context, conclusion ermite.CiConclusion, o
 		JobId: j.job.JobId, Conclusion: conclusion, Outputs: outputs,
 		RunnerShutdown: shutdown && conclusion == ermite.CiConclusion_CI_CONCLUSION_CANCELLED,
 		Steps:          j.finalSteps(conclusion),
+		// The annotations no UpdateJob has carried: all of them with the
+		// step they belong to, whole lists (replace semantics).
+		Annotations: j.allPendingAnnotations(),
 	}
 	err := j.sendComplete(ctx, req, conclusion)
 	if err == nil || ctx.Err() != nil || classify(err) != kindPermanent {
@@ -797,13 +837,18 @@ func (j *jobRun) sendComplete(ctx context.Context, req *ermite.CompleteJobReques
 
 // errorLog appends a line to the log after the outbox is closed.
 func (j *jobRun) errorLog(ctx context.Context, msg string) {
+	j.appendLogLine(ctx, "##[error]"+msg)
+}
+
+// appendLogLine appends one line, in the last step, after the outbox is closed.
+func (j *jobRun) appendLogLine(ctx context.Context, text string) {
 	j.mu.Lock()
 	var last int32 = 1
 	for n := range j.steps {
 		last = max(last, n)
 	}
 	j.mu.Unlock()
-	j.outbox.AppendNow(ctx, logLine{step: last, unixNano: time.Now().UnixNano(), text: "##[error]" + msg})
+	j.outbox.AppendNow(ctx, logLine{step: last, unixNano: time.Now().UnixNano(), text: text})
 }
 
 // rebuiltSteps returns every known step as a valid, completed snapshot: number

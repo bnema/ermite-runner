@@ -257,3 +257,77 @@ func TestFailSetupReportsAFailedFirstStep(t *testing.T) {
 		t.Fatalf("%s", g)
 	}
 }
+
+// The executor over the stream: annotations, summary and outcome frames
+// arrive before the StepCompleted of their step, only when the host asked.
+func TestExecSendsResultsFrames(t *testing.T) {
+	requireBash(t)
+	yaml := "on: push\njobs:\n  j:\n    runs-on: x\n    steps:\n      - run: |\n          echo '::warning title=T::careful'\n          echo '# sum' >> \"$GITHUB_STEP_SUMMARY\"\n          exit 1\n        continue-on-error: true\n"
+	for _, on := range []bool{true, false} {
+		sock := filepath.Join(t.TempDir(), "s")
+		ln, err := net.Listen("unix", sock)
+		if err != nil {
+			t.Skip(err)
+		}
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		t.Setenv("RUNNER_TOOL_CACHE", filepath.Join(home, "toolcache"))
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			_, _ = Exec(context.Background(), ExecConfig{Target: Target{"unix", sock}, Sandbox: "container", Version: "test", RunTimeout: 5 * time.Second,
+				TermAfter: 200 * time.Millisecond, KillAfter: 200 * time.Millisecond, WaitDelay: 300 * time.Millisecond})
+		}()
+		conn, err := ln.Accept()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var order []string
+		var anns *execpb.StepAnnotations
+		var sum *execpb.StepSummary
+		var done2 *execpb.StepCompleted
+		_, _, err = execstream.DriveJob(conn, &execpb.Run{Job: &execpb.JobSpec{
+			WorkflowPath: ".github/workflows/ci.yml", WorkflowYaml: yaml, JobKey: "j", Repo: "hello", RunnerName: "r", RunnerVersion: "v",
+			Contexts: `{"github":{"repository":"octo/hello","event_name":"push","job":"j"}}`, Matrix: "{}",
+			SendAnnotations: on, SendSummaries: on,
+		}}, nil, execstream.JobHandler{
+			StepAnnotations: func(a *execpb.StepAnnotations) { order = append(order, "ann"); anns = a },
+			StepSummary:     func(s *execpb.StepSummary) { order = append(order, "sum"); sum = s },
+			StepCompleted: func(s *execpb.StepCompleted) {
+				if s.Number == 2 {
+					order = append(order, "done")
+					done2 = s
+				}
+			},
+		})
+		_ = conn.Close()
+		_ = ln.Close()
+		<-done
+		if err != nil {
+			t.Fatal(err)
+		}
+		if done2 == nil || done2.Conclusion != execpb.StepConclusion_STEP_CONCLUSION_SUCCESS || done2.Outcome != execpb.StepConclusion_STEP_CONCLUSION_FAILURE {
+			t.Fatalf("on=%v: %+v", on, done2)
+		}
+		if !on {
+			if len(order) != 1 {
+				t.Errorf("frames without the features: %v", order)
+			}
+			continue
+		}
+		if strings.Join(order, ",") != "ann,sum,done" {
+			t.Errorf("order %v", order)
+		}
+		// the failing exit code is also an annotation
+		var msgs []string
+		for _, a := range anns.Annotations {
+			msgs = append(msgs, a.Level.String()+":"+a.Title+":"+a.Message)
+		}
+		if anns.Step != 2 || len(msgs) != 2 || msgs[0] != "ANNOTATION_LEVEL_WARNING:T:careful" || msgs[1] != "ANNOTATION_LEVEL_FAILURE::Process completed with exit code 1." {
+			t.Errorf("annotations %v", msgs)
+		}
+		if sum == nil || sum.Step != 2 || sum.Markdown != "# sum\n" {
+			t.Errorf("summary %+v", sum)
+		}
+	}
+}

@@ -44,14 +44,19 @@ type fakeServer struct {
 	beatHook  func(n int) error
 	registers []*ermite.RegisterRunnerRequest
 
-	store      *hosttest.LogStore
-	violations []string
-	lines      []string // log text, one per line (mirror of store)
-	cont       []bool
-	steps      map[int32]*ermite.StepUpdate
-	appendReq  []*ermite.AppendLogRequest
-	appendHook func(n int, req *ermite.AppendLogRequest) (applyThenFail bool, err error)
-	appendN    int
+	store       *hosttest.LogStore
+	violations  []string
+	lines       []string // log text, one per line (mirror of store)
+	cont        []bool
+	steps       map[int32]*ermite.StepUpdate
+	annots      map[int32][]*ermite.Annotation // by step, replaced by each call that names the step
+	summaries   map[int32]string
+	updates     []*ermite.UpdateJobRequest
+	updateHook  func(n int, req *ermite.UpdateJobRequest) error
+	summaryHook func(req *ermite.UploadSummaryRequest) error
+	appendReq   []*ermite.AppendLogRequest
+	appendHook  func(n int, req *ermite.AppendLogRequest) (applyThenFail bool, err error)
+	appendN     int
 
 	completes    []*ermite.CompleteJobRequest
 	completeHook func(n int) (applyThenFail bool, err error)
@@ -170,10 +175,50 @@ func (s *fakeServer) UpdateJob(_ context.Context, r *connect.Request[ermite.Upda
 		}
 		return nil, endedErr(je)
 	}
+	s.updates = append(s.updates, r.Msg)
+	if s.updateHook != nil {
+		if err := s.updateHook(len(s.updates), r.Msg); err != nil {
+			return nil, err
+		}
+	}
 	for _, u := range r.Msg.Steps {
 		s.steps[u.Number] = u
 	}
+	s.replaceAnnotations(r.Msg.Annotations)
 	return connect.NewResponse(&ermite.UpdateJobResponse{}), nil
+}
+
+// replaceAnnotations applies the replace-per-step rule of runner.proto.
+func (s *fakeServer) replaceAnnotations(anns []*ermite.Annotation) {
+	if s.annots == nil {
+		s.annots = map[int32][]*ermite.Annotation{}
+	}
+	named := map[int32]bool{}
+	for _, a := range anns {
+		if !named[a.StepNumber] {
+			named[a.StepNumber] = true
+			s.annots[a.StepNumber] = nil
+		}
+		s.annots[a.StepNumber] = append(s.annots[a.StepNumber], a)
+	}
+}
+
+func (s *fakeServer) UploadSummary(_ context.Context, r *connect.Request[ermite.UploadSummaryRequest]) (*connect.Response[ermite.UploadSummaryResponse], error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, err := s.checkJob(r.Header(), r.Msg.JobId); err != nil {
+		return nil, err
+	}
+	if s.summaryHook != nil {
+		if err := s.summaryHook(r.Msg); err != nil {
+			return nil, err
+		}
+	}
+	if s.summaries == nil {
+		s.summaries = map[int32]string{}
+	}
+	s.summaries[r.Msg.StepNumber] = r.Msg.Markdown
+	return connect.NewResponse(&ermite.UploadSummaryResponse{}), nil
 }
 
 func (s *fakeServer) AppendLog(_ context.Context, r *connect.Request[ermite.AppendLogRequest]) (*connect.Response[ermite.AppendLogResponse], error) {
@@ -223,6 +268,7 @@ func (s *fakeServer) CompleteJob(_ context.Context, r *connect.Request[ermite.Co
 	}
 	s.completeN++
 	s.completes = append(s.completes, r.Msg)
+	s.replaceAnnotations(r.Msg.Annotations)
 	if s.completeHook != nil {
 		thenFail, err := s.completeHook(s.completeN)
 		if err != nil {
@@ -507,11 +553,12 @@ func newHarness(t *testing.T, sc script) *harness {
 		}
 	})
 	h.runner = &Runner{
-		Cfg:    Config{URL: url, Name: "r1", Capacity: 1, Version: "test"},
-		Driver: drv,
-		Poll:   NewClient(url, "ermiterun_tok", http.DefaultTransport),
-		Job:    func(tok string) ermiteconnect.RunnerServiceClient { return NewClient(url, tok, http.DefaultTransport) },
-		Timing: fastTiming(),
+		Cfg:      Config{URL: url, Name: "r1", Capacity: 1, Version: "test"},
+		Driver:   drv,
+		Poll:     NewClient(url, "ermiterun_tok", http.DefaultTransport),
+		Features: func(context.Context) ([]string, error) { return []string{FeatureAnnotations, FeatureSummaries}, nil },
+		Job:      func(tok string) ermiteconnect.RunnerServiceClient { return NewClient(url, tok, http.DefaultTransport) },
+		Timing:   fastTiming(),
 	}
 	return h
 }

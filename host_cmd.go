@@ -159,6 +159,7 @@ func runCmd(ctx context.Context) int {
 		Job: func(tok string) ermiteconnect.RunnerServiceClient {
 			return hcfg.Client(url, tok)
 		},
+		Features: hcfg.ServerFeaturesFunc(url),
 	}
 	r.Cfg.URL = url
 	if err := r.Run(ctx); err != nil {
