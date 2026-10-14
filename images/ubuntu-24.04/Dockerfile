@@ -15,6 +15,20 @@ RUN apt-get update \
       iptables jq kmod procps python-is-python3 python3 sudo tzdata unzip xz-utils zip \
  && rm -rf /var/lib/apt/lists/*
 
+# The command-line tools of GitHub's ubuntu-24.04 image that workflows call
+# directly (runner-images, images/ubuntu/toolsets/toolset-2404.json:
+# apt.vital_packages and apt.cmd_packages), minus the daemons and services
+# (haveged, pollinate, sphinxsearch, systemd-coredump). parallel pulls in
+# sysstat, whose collection units are masked: a job image runs no services.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      acl aria2 binutils bison brotli bzip2 coreutils file findutils flex ftp \
+      libnss3-tools lz4 m4 mediainfo netcat-openbsd net-tools p7zip-full parallel \
+      patchelf pigz rsync shellcheck sqlite3 openssh-client sshpass swig telnet \
+      time wget \
+ && rm -rf /var/lib/apt/lists/* \
+ && for u in sysstat.service sysstat-collect.timer sysstat-summary.timer; do ln -sf /dev/null /etc/systemd/system/$u; done
+
 # Docker Engine from Docker's apt repository (the job gets its own daemon).
 RUN install -m 0755 -d /etc/apt/keyrings \
  && curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc \
