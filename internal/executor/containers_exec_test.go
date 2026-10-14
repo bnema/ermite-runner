@@ -116,3 +116,38 @@ func TestNodeActionInContainerUsesExternalsAndAlpine(t *testing.T) {
 		}
 	}
 }
+
+func TestCommandPathsFromTheContainerAreTranslated(t *testing.T) {
+	f := newFakeCtr(t)
+	// The step prints an annotation for a file at its container path.
+	f.set(t, "exec_out", "::error file=/__w/hello/hello/src/a.go,line=3::boom\n")
+	rec, res := ctrRun(t, f, ctrJob, "      - name: s\n        run: echo\n", nil)
+	if res.Conclusion != ConclusionSuccess {
+		t.Fatalf("%+v", res)
+	}
+	log := logOf(rec.step(t, "s"))
+	if !strings.Contains(log, "##[error]boom") {
+		t.Errorf("log:\n%s", log)
+	}
+}
+
+func TestDockerActionJoinsTheJobNetworkAndContextHasContainerKey(t *testing.T) {
+	f := newFakeCtr(t)
+	rec, res := ctrRun(t, f, "    services:\n      redis:\n        image: redis:7\n",
+		"      - uses: docker://alpine:3.20\n      - name: ctx\n        run: echo \"${{ toJSON(job.container) }}\"\n", nil)
+	if res.Conclusion != ConclusionSuccess {
+		t.Fatalf("%+v %v", res, rec.names())
+	}
+	var run []string
+	for _, c := range f.calls(t) {
+		if c[0] == "run" {
+			run = c
+		}
+	}
+	if run == nil || !strings.Contains(strings.Join(run, "\n"), "\n--network\ngithub_network_") {
+		t.Errorf("docker run without the job network: %v", run)
+	}
+	if got := logOf(rec.step(t, "ctx")); !strings.Contains(got, "\"network\": \"github_network_") {
+		t.Errorf("ctx:\n%s", got)
+	}
+}

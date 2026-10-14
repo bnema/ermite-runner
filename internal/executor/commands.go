@@ -144,6 +144,10 @@ type commandHost interface {
 	AddIssue(issue)
 	// Workspace is github.workspace.
 	Workspace() string
+	// HostPath translates a path printed by a process in the job container
+	// back to the host's (ContainerInfo.TranslateToHostPath); without a
+	// container it is the identity.
+	HostPath(p string) string
 	// AddMask is SecretMasker.AddValue.
 	AddMask(value string)
 	// Matchers is the root of the problem matchers of the job.
@@ -339,6 +343,7 @@ func (m *commandManager) addMask(c *actionCommand) {
 
 // matcherPath roots a path of add-matcher and remove-matcher in the workspace.
 func (m *commandManager) matcherPath(file string) string {
+	file = m.host.HostPath(file) // ActionCommandManager.cs:513-517, :575-580
 	if !filepath.IsAbs(file) {
 		return filepath.Join(m.host.Workspace(), file)
 	}

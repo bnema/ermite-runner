@@ -290,6 +290,11 @@ func (m *commandManager) commandIssue(level AnnotationLevel, name string, c *act
 	}
 	validateLinesAndColumns(props, name, h.Debug)
 	if file := props["file"]; file != "" {
+		// ActionCommandManager.cs:675-681: the path of a container is the host's.
+		if hp := h.HostPath(file); hp != file {
+			file = hp
+			props["file"] = hp
+		}
 		if rel := makeRelative(file, h.Workspace()); rel != file && rel != "" {
 			props["file"] = rel
 		}

@@ -42,6 +42,14 @@ func (j *job) addIssueFor(s *stepRun, is issue) {
 // Workspace is github.workspace.
 func (s *stepRun) Workspace() string { return s.j.githubValue("workspace") }
 
+// HostPath is TranslateToHostPath of the job container.
+func (s *stepRun) HostPath(p string) string {
+	if c := s.j.stepContainer(); c != nil {
+		return c.translateToHost(p)
+	}
+	return p
+}
+
 func (j *job) githubValue(k string) string {
 	j.mu.Lock()
 	defer j.mu.Unlock()

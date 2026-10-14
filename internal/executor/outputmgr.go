@@ -343,9 +343,13 @@ func (o *outputManager) convertToIssue(m *issueMatch) (issue, bool) {
 				file = filepath.Join(dir, file)
 			}
 		}
-		// Root using workspace.
+		// Root using workspace; an absolute path is the container's and is
+		// translated to the host's (OutputManager.cs:281-311).
 		if !filepath.IsAbs(file) {
 			file = filepath.Join(s.Workspace(), file)
+		} else {
+			file = filepath.Clean(file)
+			file = filepath.Clean(s.HostPath(file))
 		}
 		file = filepath.Clean(file)
 		if st, err := os.Stat(file); err == nil && !st.IsDir() {
