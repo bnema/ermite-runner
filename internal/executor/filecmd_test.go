@@ -119,13 +119,15 @@ func TestFileCommandsInit(t *testing.T) {
 	if !strings.HasPrefix(filepath.Base(env["GITHUB_ARTIFACTS"]), "artifacts_") || !strings.HasPrefix(filepath.Base(env["GITHUB_ARTIFACTS_LIST"]), "artifacts_list_") {
 		t.Fatalf("artifact prefixes: %v", env)
 	}
-	// A second Init deletes the previous files and uses new names.
+	// A second Init uses new names and keeps the previous files: the runner
+	// makes a new FileCommandManager for each step, which never deletes an old
+	// file (recorded: sum-env).
 	env2, _ := fc.Init()
 	if env2["GITHUB_ENV"] == env["GITHUB_ENV"] {
 		t.Fatal("same file for two steps")
 	}
-	if _, err := os.Stat(env["GITHUB_ENV"]); !os.IsNotExist(err) {
-		t.Fatalf("old file kept: %v", err)
+	if _, err := os.Stat(env["GITHUB_ENV"]); err != nil {
+		t.Fatalf("old file removed: %v", err)
 	}
 }
 

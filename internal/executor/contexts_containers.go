@@ -2,7 +2,13 @@
 
 package executor
 
-import "bnema.dev/ermite-actions/expr"
+import (
+	"strings"
+
+	"github.com/google/uuid"
+
+	"bnema.dev/ermite-actions/expr"
+)
 
 // The job.container and job.services contexts (JobContext.cs:20-47,
 // ContainerOperationProvider.cs:96, :215-232, :237-240). The runner's
@@ -60,4 +66,19 @@ func (s *State) SetJobService(alias, id, network string, ports []portMapping) {
 
 func replaceKey(d *expr.Dictionary, key string, v expr.Value) *expr.Dictionary {
 	return setKey(d, key, v)
+}
+
+// recordRunnerStep registers a step the runner made itself (Initialize
+// containers, Pull <image>, Build <action>) in the steps context. Its context
+// name is its Guid in "N" format, which does not start with "__": the entry
+// {outcome, conclusion, outputs: {}} is visible to the user's steps
+// (JobExtension.cs:439 CreateChild(stepId, ..., stepId.ToString("N"), ...),
+// ExecutionContext.UpdateGlobalStepsContext:644; recorded in ctr-basic,
+// svc-redis, act-docker-image). It returns res.
+func (j *job) recordRunnerStep(res stepResult) stepResult {
+	id := strings.ReplaceAll(uuid.NewString(), "-", "")
+	j.mu.Lock()
+	j.state.SetStepResult(id, string(res.conclusion()), string(res.conclusion()))
+	j.mu.Unlock()
+	return res
 }

@@ -42,9 +42,9 @@ func TestProblemMatcherEndToEnd(t *testing.T) {
 	}
 	got := rr.results[3].Annotations
 	want := []Annotation{
-		{Level: LevelFailure, Message: "bad thing", File: "src/main.go", StartLine: 12, StartColumn: 5},
-		{Level: LevelWarning, Message: "just a warning", File: "src/main.go", StartLine: 7, StartColumn: 1},
-		{Level: LevelFailure, Message: "no such file", StartLine: 1, StartColumn: 1}, // the file does not exist: dropped
+		{Level: LevelFailure, Message: "bad thing", File: "src/main.go", StartLine: 12, EndLine: 12, StartColumn: 5, EndColumn: 5},
+		{Level: LevelWarning, Message: "just a warning", File: "src/main.go", StartLine: 7, EndLine: 7, StartColumn: 1, EndColumn: 1},
+		{Level: LevelFailure, Message: "no such file", StartLine: 1, EndLine: 1, StartColumn: 1, EndColumn: 1}, // the file does not exist: dropped
 	}
 	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Errorf("annotations\n got %+v\nwant %+v", got, want)

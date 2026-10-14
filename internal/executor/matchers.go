@@ -4,12 +4,16 @@ package executor
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/dlclark/regexp2"
+	"github.com/dlclark/regexp2/syntax"
+
+	"bnema.dev/ermite-actions/expr"
 )
 
 // Problem matchers: a port of Runner.Worker/IssueMatcher.cs (actions/runner,
@@ -85,7 +89,14 @@ func parseMatchersConfig(data []byte) (*matchersConfig, error) {
 	if len(strings.TrimSpace(string(data))) == 0 {
 		return nil, nil // StringUtil.ConvertFromJson of an empty text is null
 	}
-	if err := json.Unmarshal(data, &c); err != nil {
+	// IOUtil.LoadObject reads with Json.NET: its reader decides what is valid
+	// (single quotes, trailing commas...) and words the errors. The value it
+	// accepts is turned back into strict JSON for the structure below.
+	v, err := expr.FromJSON(data)
+	if err != nil {
+		return nil, msgError(err.Error())
+	}
+	if err := json.Unmarshal([]byte(expr.ToJSON(v)), &c); err != nil {
 		return nil, err
 	}
 	return &c, nil
@@ -96,7 +107,34 @@ func parseMatchersConfig(data []byte) (*matchersConfig, error) {
 const regexOptions = regexp2.ECMAScript
 
 func compilePattern(p string) (*regexp2.Regexp, error) {
-	return regexp2.Compile(p, regexOptions)
+	re, err := regexp2.Compile(p, regexOptions)
+	if err != nil {
+		return nil, dotnetRegexError(p, err)
+	}
+	return re, nil
+}
+
+// dotnetRegexError words a pattern that does not compile like .NET's
+// RegexParseException ("Invalid pattern '<p>' at offset <n>. <reason>"), for the
+// failures whose offset is known: those at the end of the pattern. Others keep
+// the text of the engine.
+func dotnetRegexError(p string, err error) error {
+	var se *syntax.Error
+	if !errors.As(err, &se) {
+		return err
+	}
+	var reason string
+	switch se.Code {
+	case syntax.ErrMissingParen:
+		reason = "Not enough )'s."
+	case syntax.ErrUnterminatedBracket:
+		reason = "Unterminated [] set."
+	case syntax.ErrIllegalEndEscape:
+		reason = "Illegal \\ at end of pattern."
+	default:
+		return err
+	}
+	return ghErrorf("Invalid pattern '%s' at offset %d. %s", p, utf16Len(p), reason)
 }
 
 // validate is IssueMatchersConfig.Validate (IssueMatcher.cs:262). The error

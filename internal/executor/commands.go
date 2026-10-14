@@ -163,6 +163,18 @@ type commandManager struct {
 	stopped    bool
 	stopToken  string
 	echo       bool
+	// fatal is the exception that ActionCommandManager.ValidateStopToken throws
+	// outside the try block of TryProcessCommand: it leaves OutputDataReceived,
+	// ProcessInvoker.ExecuteAsync and the step with it, so the step fails with
+	// the message alone and the output that follows is never read. The
+	// official runner leaves the process running (ProcessInvoker is only
+	// disposed; "Complete job" kills it as an orphan); ermite stops it through
+	// the cancellation path (SIGINT, SIGTERM, SIGKILL) so that the step does not
+	// wait for it, and discards what it still writes.
+	fatal error
+	// onFatal, when set, is called once when fatal is set: the process that
+	// writes the output is then stopped (runProc).
+	onFatal func()
 }
 
 func newCommandManager(h commandHost, echo bool) *commandManager {
@@ -178,7 +190,7 @@ func (m *commandManager) isRegistered(name string) bool { return m.registered[st
 // TryProcess handles one line of output. It returns true when the line was a
 // command and must not be logged as plain text (ActionCommandManager.cs:61).
 func (m *commandManager) TryProcess(input string) bool {
-	if input == "" {
+	if input == "" || m.fatal != nil {
 		return false
 	}
 	cmd, ok := parseCommandV2(input, m.isRegistered)
@@ -202,7 +214,10 @@ func (m *commandManager) TryProcess(input string) bool {
 	}
 	if name == "stop-commands" {
 		if err := m.validateStopToken(cmd.Data); err != nil {
-			m.fail(input, false, err)
+			m.fatal = err
+			if m.onFatal != nil {
+				m.onFatal()
+			}
 			return true
 		}
 		m.stopToken, m.stopped = cmd.Data, true
@@ -259,7 +274,8 @@ func (m *commandManager) run(name string, c *actionCommand) error {
 		m.commandIssue(LevelNotice, name, c)
 	case "echo":
 		if c.Data == "" {
-			return ghErrorf("Value cannot be null or empty. (Parameter 'value')")
+			// ArgUtil.NotNullOrEmpty throws ArgumentNullException.
+			return ghErrorf("Value cannot be null. (Parameter 'value')")
 		}
 		switch strings.ToUpper(strings.TrimSpace(c.Data)) {
 		case "ON":
@@ -306,7 +322,7 @@ func (m *commandManager) run(name string, c *actionCommand) error {
 			return ghErrorf(unsupportedCommandMessageDisabled, name)
 		}
 		if c.Data == "" {
-			return ghErrorf("Value cannot be null or empty. (Parameter 'path')")
+			return ghErrorf("Value cannot be null. (Parameter 'path')")
 		}
 		h.AddPath(c.Data)
 	case "add-mask":

@@ -190,7 +190,8 @@ func parseInt(s string) (int, bool) {
 // runner puts the properties in Issue.Data and lets the service build the
 // check annotation; negative or non numeric numbers cannot be sent, and are
 // left out. The title and the file are masked too (the runner masks only the
-// message).
+// message; on GitHub a secret in a title stays visible, recorded in
+// mask-add-mask, which ermite deliberately does not reproduce).
 func (j *job) annotationOf(is issue, msg string) Annotation {
 	a := Annotation{Level: is.Level, Message: msg}
 	p := is.Props
@@ -208,6 +209,14 @@ func (j *job) annotationOf(is issue, msg string) Annotation {
 	a.StartColumn, a.EndColumn = num("col"), num("endcolumn")
 	if a.EndLine != 0 && a.EndLine < a.StartLine {
 		a.EndLine = 0
+	}
+	// GitHub's annotations end where they start when the command gave no end
+	// (recorded: ann-levels, match-basic).
+	if a.StartLine != 0 && a.EndLine == 0 {
+		a.EndLine = a.StartLine
+	}
+	if a.StartColumn != 0 && a.EndColumn == 0 {
+		a.EndColumn = a.StartColumn
 	}
 	return a
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 // execute is ActionRunner.RunAsync plus ScriptHandler for one run step.
@@ -222,14 +223,38 @@ func (j *job) runProc(s *stepRun, shown, dir string, argv []string, exitDebug st
 	num := s.num
 	om := newOutputManager(s, stepCancel)
 	defer om.dispose()
+	// The process is stopped when the step is cancelled or when the output
+	// handler throws (an invalid stop-commands token).
+	procCancel := make(chan struct{})
+	fatal := make(chan struct{})
+	var fatalOnce sync.Once
+	s.cmds.onFatal = func() { fatalOnce.Do(func() { close(fatal) }) }
+	defer func() { s.cmds.onFatal = nil }()
+	watchDone := make(chan struct{})
+	defer func() { close(watchDone) }()
+	go func() {
+		select {
+		case <-stepCancel:
+		case <-fatal:
+		case <-watchDone:
+			return
+		}
+		close(procCancel)
+	}()
 	res, err := runProcess(procSpec{
 		Argv: argv, Dir: dir, Env: s.procEnv(), Credential: j.cfg.Credential,
 		OnLine: om.onData,
-		Cancel: stepCancel, TermAfter: j.cfg.TermAfter, KillAfter: j.cfg.KillAfter,
+		Cancel: procCancel, TermAfter: j.cfg.TermAfter, KillAfter: j.cfg.KillAfter,
 		WaitDelay: j.cfg.WaitDelay, Signal: j.cfg.Signal,
 	})
 	if err != nil {
 		j.errorf(num, "%s", startError(shown, dir, err))
+		return resFailed
+	}
+	if err := s.cmds.fatal; err != nil {
+		// An exception of the output handler (an invalid stop-commands token)
+		// ends ExecuteAsync; StepsRunner logs its message and fails the step.
+		j.errorf(num, "%s", err.Error())
 		return resFailed
 	}
 	if res.Cancelled {

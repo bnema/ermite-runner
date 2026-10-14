@@ -225,6 +225,9 @@ func (o *outputManager) removeMatcher(m *issueMatcher) {
 // onData is OutputManager.OnDataReceived.
 func (o *outputManager) onData(line string) {
 	s := o.s
+	if s.cmds.fatal != nil {
+		return // the handler threw: ExecuteAsync is over, nothing more is read
+	}
 	// ## commands
 	if line != "" && (strings.Contains(line, "##[") || strings.Contains(line, "::")) {
 		if s.cmds.TryProcess(line) {

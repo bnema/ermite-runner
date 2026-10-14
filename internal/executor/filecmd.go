@@ -148,17 +148,16 @@ func (f *FileCommands) path(c fileCommand, suffix string) string {
 	return filepath.Join(f.dir, f.name(c, suffix))
 }
 
-// Init creates fresh, empty files for the next step (after deleting the ones
-// of the previous step) and returns the environment variables that name them
-// (InitializeFiles, FileCommandManager.cs:42).
+// Init creates fresh, empty files for the next step and returns the
+// environment variables that name them (InitializeFiles,
+// FileCommandManager.cs:42). The files of the previous step are kept: the
+// runner makes a new FileCommandManager for every step (ActionRunner.cs:171),
+// whose suffix starts empty, so it never deletes an old file (recorded:
+// sum-env, "previous file still exists: yes").
 func (f *FileCommands) Init() (map[string]string, error) {
-	old := f.suffix
 	f.suffix = uuid.NewString()
 	env := make(map[string]string, len(fileCommands))
 	for _, c := range fileCommands {
-		if old != "" {
-			_ = f.root.Remove(f.name(c, old))
-		}
 		if err := createExcl(f.root, f.name(c, f.suffix), nil, 0o644, f.owner); err != nil {
 			return nil, err
 		}
@@ -414,6 +413,13 @@ func processStepSummary(sink Sink, root *os.Root, name string) error {
 		mask = func(s string) string { return s }
 	}
 	content := summaryContent(text, mask)
+	// The size test of the runner is on the file (above). A file of exactly
+	// 1 MiB without a final line feed gets one from WriteLine and would pass the
+	// limit of the contract by that byte (recorded: sum-too-large, "exactly
+	// 1 MiB" uploads on GitHub): drop that line feed.
+	if len(content) == stepSummaryLimit+1 && st.Size() <= stepSummaryLimit && !strings.HasSuffix(text, "\n") {
+		content = content[:stepSummaryLimit]
+	}
 	if len(content) > stepSummaryLimit {
 		// Masking made it longer than the limit of the contract.
 		tooLarge(int64(len(content)))
