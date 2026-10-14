@@ -156,6 +156,12 @@ func testGitHubContext(job string) string {
 // home. The environment is minimal and fixed.
 func runLocal(t *testing.T, yaml, jobKey string, tweak func(*Config)) (*recorder, Result) {
 	t.Helper()
+	return runLocalC(t, nil, yaml, jobKey, tweak)
+}
+
+// runLocalC is runLocal with a canceller.
+func runLocalC(t *testing.T, cancel *Canceller, yaml, jobKey string, tweak func(*Config)) (*recorder, Result) {
+	t.Helper()
 	home := t.TempDir()
 	layout := NewLayout(home, "hello", filepath.Join(home, "toolcache"))
 	rec := newRecorder()
@@ -169,7 +175,7 @@ func runLocal(t *testing.T, yaml, jobKey string, tweak func(*Config)) (*recorder
 	if tweak != nil {
 		tweak(&cfg)
 	}
-	res := Run(nil, cfg)
+	res := Run(cancel, cfg)
 	return rec, res
 }
 

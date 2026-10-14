@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"strings"
 	"sync/atomic"
@@ -42,6 +43,14 @@ func (j *job) addIssueFor(s *stepRun, is issue) {
 // Workspace is github.workspace.
 func (s *stepRun) Workspace() string { return s.j.githubValue("workspace") }
 
+// HostPath is TranslateToHostPath of the job container.
+func (s *stepRun) HostPath(p string) string {
+	if c := s.j.stepContainer(); c != nil {
+		return c.translateToHost(p)
+	}
+	return p
+}
+
 func (j *job) githubValue(k string) string {
 	j.mu.Lock()
 	defer j.mu.Unlock()
@@ -71,6 +80,12 @@ const maxMatcherFile = 1 << 20
 
 // ReadMatcherFile reads a problem matcher file.
 func (s *stepRun) ReadMatcherFile(path string) ([]byte, error) {
+	// With a job container the path came from a command of the container: it
+	// is read only when it is a file of a directory the container shares with
+	// the host, never the host's own file of the same name.
+	if c := s.j.stepContainer(); c != nil && !c.insideMappings(path) {
+		return nil, &fs.PathError{Op: "open", Path: path, Err: fs.ErrNotExist}
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err

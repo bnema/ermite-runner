@@ -25,6 +25,11 @@ func (j *job) prepareJob() ([]qstep, error) {
 		return nil, j.setupError(err)
 	}
 	queue := j.setupSteps()
+	// JobExtension.cs:317-331: the images of the actions are pulled first, then
+	// the containers start.
+	if j.cs != nil {
+		queue = append(queue, j.initContainersStep())
+	}
 	for _, n := range nodes {
 		if j.actions.pre[n] {
 			queue = append(queue, qstep{n: n, stage: stagePre, cond: n.def.preIf()})

@@ -15,6 +15,9 @@ func (j *job) execute(s *stepRun, stepCancel <-chan struct{}) stepResult {
 		return j.runAction(s, stepCancel)
 	}
 	fail := func(err error) stepResult { j.errorf(num, "%s", err.Error()); return resFailed }
+	if err := j.containerReady(); err != nil {
+		return fail(err)
+	}
 	failTemplate := func(err error) stepResult {
 		j.errorf(num, "%s", templateNotValid(err, true))
 		return resFailed
@@ -33,6 +36,13 @@ func (j *job) execute(s *stepRun, stepCancel <-chan struct{}) stepResult {
 	plan, err := j.printHeader(s, in)
 	if err != nil {
 		return fail(err) // the group stays open, like the original
+	}
+	if c := j.stepContainer(); c != nil {
+		argv, err := j.containerScript(c, plan, in, s)
+		if err != nil {
+			return fail(err)
+		}
+		return j.runProc(s, argv[0], j.state.Layout().WorkRoot, argv, "", stepCancel)
 	}
 	dir, argv, err := j.scriptCommand(plan, in)
 	if err != nil {
@@ -120,7 +130,13 @@ func (j *job) printHeader(s *stepRun, in scriptIn) (ShellPlan, error) {
 	j.mu.Lock()
 	lookup := Lookup{Path: j.lookupPath, Prepend: j.state.Prepend()}
 	j.mu.Unlock()
-	plan, err := PlanShell(in.shell, lookup)
+	var plan ShellPlan
+	var err error
+	if j.stepContainer() != nil {
+		plan, err = PlanShellInContainer(in.shell)
+	} else {
+		plan, err = PlanShell(in.shell, lookup)
+	}
 	if err != nil {
 		return plan, err
 	}

@@ -249,10 +249,10 @@ func (j *job) runGuarded(s *stepRun, q qstep, ok bool) stepResult {
 		j.mu.Lock()
 		defer j.mu.Unlock()
 		switch {
-		case q.setup != nil:
-			return j.evalCondString("success()", s.env, j.statusFuncs())
 		case q.cond != "":
 			return j.evalCondString(q.cond, s.env, s.statusFuncs())
+		case q.setup != nil:
+			return j.evalCondString("success()", s.env, j.statusFuncs())
 		}
 		return st.EvaluateIf(context.Background(), j.evalEnv(s.env), s.statusFuncs())
 	}
