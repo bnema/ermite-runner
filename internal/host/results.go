@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"connectrpc.com/connect"
@@ -160,6 +161,8 @@ func (j *jobRun) stepAnnotations(a *execpb.StepAnnotations) {
 	n := annotationBytes(list)
 	if !j.outbox.ReserveAnnotations(n) {
 		j.log.Warn().Int32("step", a.Step).Int("bytes", n).Msg("too much is waiting to be sent to the server: the annotations of this step are dropped")
+		// Only a count is kept (j.mu is held): the final report tells the user.
+		j.annDropped += len(list)
 		return
 	}
 	j.annLists[a.Step] = list
@@ -253,4 +256,35 @@ func (j *jobRun) allPendingAnnotations() []*ermite.Annotation {
 	}
 	j.mu.Unlock()
 	return flattenAnnotations(m)
+}
+
+// droppedAnnotationsLine is the warning the user gets when annotations were
+// dropped because the backlog of reports to the server was full. The text is
+// ermite's own (the official runner has no such backlog); it carries no
+// annotation content, only the count, which the host coalesces over the whole
+// job. Empty when nothing was dropped.
+func droppedAnnotationsLine(n int) string {
+	switch {
+	case n <= 0:
+		return ""
+	case n == 1:
+		return "##[warning]1 annotation was not reported because the reporting backlog was full."
+	}
+	return fmt.Sprintf("##[warning]%d annotations were not reported because the reporting backlog was full.", n)
+}
+
+// reportDroppedAnnotations appends the one warning line to the job log, after
+// the outbox is closed (the queue is full, or gone: it is not used) and before
+// CompleteJob, with a slice of the report budget of its own so that a server
+// that keeps failing cannot take the time CompleteJob needs.
+func (j *jobRun) reportDroppedAnnotations(ctx context.Context, budget time.Duration) {
+	j.mu.Lock()
+	line := droppedAnnotationsLine(j.annDropped)
+	j.mu.Unlock()
+	if line == "" {
+		return
+	}
+	actx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+	j.appendLogLine(actx, line)
 }

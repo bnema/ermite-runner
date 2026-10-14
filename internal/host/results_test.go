@@ -5,6 +5,7 @@ package host
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"sync/atomic"
@@ -556,4 +557,80 @@ func TestAnnotationBudgetIsGivenBack(t *testing.T) {
 		defer o.mu.Unlock()
 		return o.queued == 0
 	})
+}
+
+// GO-009: annotations dropped for lack of room are told to the user with one
+// warning line in the job log, appended after the outbox is closed, without
+// annotation content.
+func TestDroppedAnnotationsAreReportedInTheLog(t *testing.T) {
+	var list []*execpb.Annotation
+	for _, l := range []execpb.AnnotationLevel{lWarn, lFail, execpb.AnnotationLevel_ANNOTATION_LEVEL_NOTICE} {
+		for range 10 {
+			list = append(list, &execpb.Annotation{Level: l, Message: "SECRET-CONTENT" + strings.Repeat("m", 4080), Title: strings.Repeat("t", 255)})
+		}
+	}
+	const steps = 200 // about 135 KiB each: 27 MB offered, 16 MiB of room
+	sc := func(_ *testing.T, c *execstream.Conn, _ *execpb.Run, _ <-chan *execpb.Cancel) {
+		for n := 1; n <= steps; n++ {
+			stepStart(c, n, "step")
+			annFrame(c, n, list...)
+			stepDone(c, n, "step", cOK)
+		}
+		jobDone(c, cOK, nil, false)
+	}
+	h := newHarness(t, sc)
+	h.runner.Timing.CompleteDeadline = 3 * time.Second
+	// the server is blocked: every UpdateJob fails transiently, for ever
+	h.srv.updateHook = func(int, *ermite.UpdateJobRequest) error { return connect.NewError(connect.CodeUnavailable, nil) }
+	h.srv.jobs = []*ermite.Job{testJob("j1")}
+	stop := h.run(t)
+	eventually(t, "CompleteJob", func() bool { return h.srv.completeCount() == 1 })
+	if err := stop(); err != nil {
+		t.Fatal(err)
+	}
+	h.srv.mu.Lock()
+	defer h.srv.mu.Unlock()
+	var found []string
+	for _, l := range h.srv.lines {
+		if strings.Contains(l, "were not reported because the reporting backlog was full.") {
+			found = append(found, l)
+		}
+		if strings.Contains(l, "SECRET-CONTENT") {
+			t.Error("annotation content reached the job log")
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("%d lines about dropped annotations: %q", len(found), found)
+	}
+	var n int
+	if _, err := fmt.Sscanf(found[0], "##[warning]%d annotations were not reported because the reporting backlog was full.", &n); err != nil || n < 30 || n > steps*30 || n%30 != 0 {
+		t.Errorf("%q (n=%d, %v)", found[0], n, err)
+	}
+	if h.srv.lines[len(h.srv.lines)-1] != found[0] {
+		t.Error("the line is not the last of the log")
+	}
+}
+
+func TestDroppedAnnotationsLine(t *testing.T) {
+	for n, want := range map[int]string{
+		0: "", -1: "",
+		1:  "##[warning]1 annotation was not reported because the reporting backlog was full.",
+		30: "##[warning]30 annotations were not reported because the reporting backlog was full.",
+	} {
+		if got := droppedAnnotationsLine(n); got != want {
+			t.Errorf("%d: %q", n, got)
+		}
+	}
+}
+
+// A job that drops nothing writes no such line.
+func TestNoDroppedAnnotationsNoLine(t *testing.T) {
+	h := runResultsJob(t, resultsScript(nil), nil)
+	h.srv.mu.Lock()
+	defer h.srv.mu.Unlock()
+	for _, l := range h.srv.lines {
+		if strings.Contains(l, "reporting backlog") {
+			t.Errorf("%q", l)
+		}
+	}
 }

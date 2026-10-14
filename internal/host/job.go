@@ -77,6 +77,7 @@ type jobRun struct {
 	// annSeen and sumSeen are the steps that sent their annotations and their
 	// summary: each is sent once.
 	annSeen, sumSeen map[int32]bool
+	annDropped       int // annotations dropped for lack of room, see reportDroppedAnnotations
 	// hard stops the sandbox at once; set before the session starts.
 	hard    func()
 	result  *execpb.JobResult
@@ -582,6 +583,7 @@ func (j *jobRun) report(ctx context.Context, out outcome, shutdown <-chan struct
 	if err := j.abandoned(); err != nil {
 		return
 	}
+	j.reportDroppedAnnotations(rctx, budget/4)
 	j.complete(rctx, out.conclusion, out.outputs, out.shutdown)
 }
 
@@ -835,13 +837,18 @@ func (j *jobRun) sendComplete(ctx context.Context, req *ermite.CompleteJobReques
 
 // errorLog appends a line to the log after the outbox is closed.
 func (j *jobRun) errorLog(ctx context.Context, msg string) {
+	j.appendLogLine(ctx, "##[error]"+msg)
+}
+
+// appendLogLine appends one line, in the last step, after the outbox is closed.
+func (j *jobRun) appendLogLine(ctx context.Context, text string) {
 	j.mu.Lock()
 	var last int32 = 1
 	for n := range j.steps {
 		last = max(last, n)
 	}
 	j.mu.Unlock()
-	j.outbox.AppendNow(ctx, logLine{step: last, unixNano: time.Now().UnixNano(), text: "##[error]" + msg})
+	j.outbox.AppendNow(ctx, logLine{step: last, unixNano: time.Now().UnixNano(), text: text})
 }
 
 // rebuiltSteps returns every known step as a valid, completed snapshot: number
