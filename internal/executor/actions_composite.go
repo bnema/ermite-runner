@@ -59,9 +59,11 @@ func (j *job) prepareLocalComposite(s *stepRun, def *actionDef, cancel <-chan st
 	saved := *j.actions
 	j.actions.pullOrder, j.actions.buildOrder = nil, nil
 	j.actions.pullUsers, j.actions.buildUsers = map[string][]*node{}, map[string][]*node{}
-	// The preparation stops with the step: its context ends when the step is
-	// cancelled (and with the job, whose context it derives from).
-	ctx, stop := context.WithCancel(j.ctx())
+	// The preparation stops with the step, and only with it: its context ends when
+	// the cancel channel of the step closes (job cancellation for a step that does
+	// not run on always(), timeout-minutes). A step that keeps running after the
+	// job was cancelled keeps the means to prepare its composite.
+	ctx, stop := context.WithCancel(context.Background())
 	defer stop()
 	if cancel != nil {
 		go func() {

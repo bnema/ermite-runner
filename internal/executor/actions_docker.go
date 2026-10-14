@@ -136,7 +136,7 @@ func (j *job) runDocker(s *stepRun, def *actionDef, in *inputSet, env *ordered, 
 			j.out(num, "##[endgroup]")
 			if err != nil {
 				if err == errCancelled {
-					return j.cancelledStep(num)
+					return j.cancelledStep(s)
 				}
 				return fail(err)
 			}
@@ -265,10 +265,22 @@ func (j *job) dockerArgs(r *action.Runs, in *inputSet, te template.Env) (line st
 	return raw, splitArgs(raw), nil
 }
 
-// cancelledStep logs the cancellation of a step that was running docker.
-func (j *job) cancelledStep(num int) stepResult {
-	j.errorf(num, "The operation was canceled.")
+// cancelledStep logs the cancellation of a step that was running docker, unless
+// the step timed out: then StepsRunner logs the timeout message instead
+// (stepRun.logCanceled).
+func (j *job) cancelledStep(s *stepRun) stepResult {
+	s.logCanceled()
 	return resCanceled
+}
+
+// done reports whether a cancellation channel is closed (a nil one never is).
+func done(c <-chan struct{}) bool {
+	select {
+	case <-c:
+		return true
+	default:
+		return false
+	}
 }
 
 func shortID() string { return strings.ReplaceAll(newImageTag(""), ":", "")[:6] }

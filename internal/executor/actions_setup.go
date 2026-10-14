@@ -46,7 +46,7 @@ func (j *job) pullImage(s *stepRun, image string, users []*node, cancel <-chan s
 		code, err = j.runDockerCmd(s, c, dirOrCwd(j.state.GitHub("workspace")), nil, cancel)
 		if err == errCancelled {
 			j.out(num, "##[endgroup]")
-			return j.cancelledStep(num)
+			return j.cancelledStep(s)
 		}
 		if err != nil {
 			j.out(num, "##[endgroup]")
@@ -61,7 +61,7 @@ func (j *job) pullImage(s *stepRun, image string, users []*node, cancel <-chan s
 			j.tagged(num, "##[warning]", fmt.Sprintf("Docker pull failed with exit code %d, back off %v seconds before retry.", code, d.Seconds()))
 			if !j.sleepOrCancel(d, cancel) {
 				j.out(num, "##[endgroup]")
-				return j.cancelledStep(num)
+				return j.cancelledStep(s)
 			}
 		}
 	}
@@ -88,7 +88,7 @@ func (j *job) buildActionImage(s *stepRun, info buildInfo, users []*node, cancel
 		code, err = j.runDockerCmd(s, c, dirOrCwd(info.workDir), nil, cancel)
 		if err == errCancelled {
 			j.out(num, "##[endgroup]")
-			return j.cancelledStep(num)
+			return j.cancelledStep(s)
 		}
 		if err != nil {
 			j.out(num, "##[endgroup]")
@@ -103,7 +103,7 @@ func (j *job) buildActionImage(s *stepRun, info buildInfo, users []*node, cancel
 			j.tagged(num, "##[warning]", fmt.Sprintf("Docker build failed with exit code %d, back off %v seconds before retry.", code, d.Seconds()))
 			if !j.sleepOrCancel(d, cancel) {
 				j.out(num, "##[endgroup]")
-				return j.cancelledStep(num)
+				return j.cancelledStep(s)
 			}
 		}
 	}

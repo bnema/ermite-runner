@@ -157,6 +157,14 @@ func (j *job) runAction(s *stepRun, cancel <-chan struct{}) stepResult {
 			if err == errSetupCancelled {
 				return resCanceled // logged by the command that was stopped
 			}
+			// What the cancellation or the timeout of the step broke (a resolution,
+			// a download, an extraction) is not a failure of the action: the step is
+			// cancelled, and StepsRunner turns it into the timeout message when its
+			// own timer fired. A genuine error keeps failing the step.
+			if done(cancel) {
+				s.logCanceled()
+				return resCanceled
+			}
 			return fail(err)
 		}
 	}
