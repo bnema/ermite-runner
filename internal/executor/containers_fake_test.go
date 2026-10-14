@@ -49,7 +49,8 @@ logs) echo "service log of $3" ;;
 rm) echo "$3" ;;
 exec) [ -f $D/exec_env ] && echo "ENV GITHUB_WORKSPACE=$GITHUB_WORKSPACE RUNNER_TEMP=$RUNNER_TEMP HOME=${HOME:-<unset>} GITHUB_OUTPUT=$GITHUB_OUTPUT GITHUB_EVENT_PATH=$GITHUB_EVENT_PATH"
   [ -f $D/hang_exec ] && { trap 'exit 130' INT TERM; while :; do sleep 0.05; done; }
-  [ -f $D/exec_out ] && cat $D/exec_out ;;
+  [ -f $D/exec_out ] && cat $D/exec_out
+  if [ -f $D/exec_exit ]; then n=$(cat $D/exec_exit); [ "$n" != 0 ] && echo 0 > $D/exec_exit && exit $n; fi ;;
 esac
 exit 0
 `
@@ -87,8 +88,13 @@ func (f *fakeCtr) verbs(t *testing.T) []string {
 // ctrRun runs a workflow whose job has the given container/services YAML.
 func ctrRun(t *testing.T, f *fakeCtr, jobYAML, steps string, tweak func(*Config)) (*recorder, Result) {
 	t.Helper()
+	return ctrRunC(t, f, nil, jobYAML, steps, tweak)
+}
+
+func ctrRunC(t *testing.T, f *fakeCtr, cancel *Canceller, jobYAML, steps string, tweak func(*Config)) (*recorder, Result) {
+	t.Helper()
 	needTools(t, "bash")
-	return runLocal(t, wfHead+jobYAML+"    steps:\n"+steps, "j", func(c *Config) {
+	return runLocalC(t, cancel, wfHead+jobYAML+"    steps:\n"+steps, "j", func(c *Config) {
 		c.Actions.DockerPath = f.bin
 		c.Actions.Backoff = func() time.Duration { return time.Millisecond }
 		c.Actions.ExternalsDir = fakeNode(t)
@@ -104,4 +110,16 @@ func joinCalls(cs [][]string) string {
 		b.WriteString(strings.Join(c, " ") + "\n")
 	}
 	return b.String()
+}
+
+// concl is the conclusion of the step called name.
+func (r *recorder) concl(name string) Conclusion {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, s := range r.steps {
+		if s.Name == name {
+			return s.Conclusion
+		}
+	}
+	return ""
 }
