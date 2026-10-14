@@ -3,8 +3,8 @@ module bnema.dev/ermite-runner
 go 1.27.1
 
 require (
-	bnema.dev/ermite-actions v0.1.1-0.20261013141203-3425eb2aa0ab
-	bnema.dev/ermite-api v0.1.1-0.20261013091642-49ac5fd7a78a
+	bnema.dev/ermite-actions v0.2.0
+	bnema.dev/ermite-api v0.2.0
 	connectrpc.com/connect v1.21.0
 	github.com/bnema/zerowrap v1.4.1
 	github.com/containerd/errdefs v1.0.0
