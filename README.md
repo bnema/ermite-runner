@@ -256,6 +256,48 @@ image:
   tzdata, zip/unzip. Full parity with the hosted images (`actions/runner-images`)
   is a later phase.
 
+## Job containers and service containers
+
+`container:` and `services:` work as on GitHub-hosted Linux runners
+(`internal/executor/containers_*.go`, a port of `ContainerOperationProvider`,
+`ContainerInfo`, `DockerCommandManager` and `ContainerStepHost` of
+actions/runner, with their line numbers in the comments). The containers are
+created in the **sandbox's own `dockerd`**, so nothing reaches the host: in `vm`
+mode (the mode of hosts without Docker Engine) the daemon runs inside the
+micro-VM, in `container` mode it is the nested daemon of the job.
+
+- **Initialize containers** (a step after "Set up job"): docker version check
+  (API ≥ 1.35), cleanup of labelled leftovers, network `github_network_<32 hex>`,
+  for each container `docker pull` (3 tries, random 1–10 s back off),
+  `docker create`/`start`, `docker port` and the health checks of the services
+  (exponential back off 2–32 s, "`<alias>` service is healthy."). Registry
+  `credentials:` go to a private `docker --config` directory under RUNNER_TEMP
+  (password through stdin, masked in every log, directory removed after the pull).
+- **Stop containers** (post step, `always()`): service logs, `docker rm --force`,
+  `docker network rm`. It runs after a failure, a cancellation, a step timeout
+  and the job timeout.
+- **Steps in the job container**: `run:` steps and node actions go through
+  `docker exec -i --workdir … -e NAME… <id> …` (values are passed in the
+  environment of the docker process, translated to `/__w`, `/__t`, `/__e`,
+  `/github/home`, `/github/workflow`, never on the command line). The shell is
+  looked up by the container: `sh -e {0}` unless the step says otherwise. Node
+  actions use the externals mounted read-only at `/__e`, `node<N>_alpine` when
+  `/etc/*release` says alpine. Docker actions run as siblings on the job network.
+- Contexts: `job.container.{id,network}`, `job.services.<alias>.{id,network,ports}`
+  (host ports from `docker port`).
+- **Untrusted input.** `options:` is split into arguments like .NET splits a
+  command line and passed to `docker create` as an argument vector, never through
+  a shell, so a workflow cannot inject a second command; it can still pass any
+  `docker create` flag (`--privileged`, `--pid host`, `--device`, …) and bind
+  volumes (`volumes: /:/host`), exactly as on a self-hosted GitHub runner. That
+  is contained by the sandbox (its own daemon, its own disk), not by the runner:
+  **host paths in `volumes:` and `options:` are paths of the sandbox**. A job
+  that mounts `/` exposes the sandbox's filesystem to its own container only.
+  The runner warns, as GitHub does, about a volume that mounts `/`.
+- Not ported: container hooks (`ACTIONS_RUNNER_CONTAINER_HOOKS`), the
+  "already running in a container" refusal (the sandbox's daemon is local to the
+  executor).
+
 ## Job limits
 
 Each job gets its own resources, set for the runner as a whole:
