@@ -379,3 +379,42 @@ func TestCreateExclChownsTheOpenFile(t *testing.T) {
 		}
 	}
 }
+
+// The summary is read from the descriptor that was checked, at most the limit
+// plus one byte: a file that grows after the size check (a background process
+// of the step) cannot make the executor read it whole (GO-005).
+func TestStepSummaryGrowingAfterTheSizeCheckIsBounded(t *testing.T) {
+	fc, _ := NewFileCommands(t.TempDir())
+	env, _ := fc.Init()
+	path := env["GITHUB_STEP_SUMMARY"]
+	if err := os.WriteFile(path, []byte("small\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	afterSummaryStat = func() {
+		f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer func() { _ = f.Close() }()
+		if _, err := f.Write(make([]byte, 8<<20)); err != nil {
+			t.Error(err)
+		}
+	}
+	t.Cleanup(func() { afterSummaryStat = nil })
+	s := &summarySinkFake{fakeSink: newSink()}
+	fc.Process(s)
+	if s.got != "" {
+		t.Errorf("a summary of %d bytes was kept", len(s.got))
+	}
+	if len(s.errors) != 1 || !strings.HasPrefix(s.errors[0], "$GITHUB_STEP_SUMMARY upload aborted, supports content up to a size of 1024k, got 1024k.") {
+		t.Fatalf("%q", s.errors)
+	}
+}
+
+type summarySinkFake struct {
+	*fakeSink
+	got string
+}
+
+func (s *summarySinkFake) Summary(m string) { s.got = m }

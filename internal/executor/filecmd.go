@@ -238,11 +238,17 @@ func readText(root *os.Root, name string) (text string, ok bool, err error) {
 	if err != nil {
 		return "", false, err
 	}
+	return decodeText(b), true, nil
+}
+
+// decodeText is the decoding of File.ReadAllText: a UTF-8 BOM is dropped and
+// invalid bytes become U+FFFD.
+func decodeText(b []byte) string {
 	b = bytes.TrimPrefix(b, []byte("\xef\xbb\xbf"))
 	if !utf8.Valid(b) {
 		b = bytes.ToValidUTF8(b, []byte("\ufffd"))
 	}
-	return string(b), true, nil
+	return string(b)
 }
 
 // createExcl creates name in root with the content, failing if it exists (an
@@ -354,6 +360,10 @@ func readEnvFile(sink Sink, root *os.Root, name string) ([]Pair, error) {
 	return ParseEnvFile(text)
 }
 
+// afterSummaryStat is called between the size check of the summary and its
+// read; tests use it to make the file grow.
+var afterSummaryStat func()
+
 // processStepSummary is CreateStepSummaryCommand.ProcessCommand
 // (FileCommandManager.cs:230-275): a missing or empty file is ignored, a file
 // above 1 MiB is an error; otherwise the lines are masked one by one and the
@@ -366,8 +376,8 @@ func processStepSummary(sink Sink, root *os.Root, name string) error {
 	if err != nil {
 		return err
 	}
+	defer func() { _ = fh.Close() }()
 	st, err := fh.Stat()
-	_ = fh.Close()
 	if err != nil || st.Size() == 0 {
 		return nil
 	}
@@ -382,10 +392,21 @@ func processStepSummary(sink Sink, root *os.Root, name string) error {
 	if !ok {
 		return nil
 	}
-	text, ok, err := readText(root, name)
-	if err != nil || !ok {
+	if afterSummaryStat != nil {
+		afterSummaryStat()
+	}
+	// The file belongs to the user of the step, who can still write to it (a
+	// background process of the step): what is read is bounded by the limit on
+	// the descriptor that was checked, not by the size seen a moment ago.
+	b, err := io.ReadAll(io.LimitReader(fh, stepSummaryLimit+1))
+	if err != nil {
 		return err
 	}
+	if len(b) > stepSummaryLimit {
+		tooLarge(int64(len(b)))
+		return nil
+	}
+	text := decodeText(b)
 	var mask func(string) string
 	if m, has := sink.(interface{ MaskText(string) string }); has {
 		mask = m.MaskText
