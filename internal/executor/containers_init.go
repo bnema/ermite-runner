@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -35,7 +36,20 @@ type containerSet struct {
 
 func (cs *containerSet) tryNetwork(name string) { cs.mu.Lock(); cs.networkTry = name; cs.mu.Unlock() }
 
-func (cs *containerSet) addDir(d string) { cs.mu.Lock(); cs.dirs = append(cs.dirs, d); cs.mu.Unlock() }
+func (cs *containerSet) addDir(d string) {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	if !slices.Contains(cs.dirs, d) {
+		cs.dirs = append(cs.dirs, d)
+	}
+}
+
+// delDir forgets a directory that is gone.
+func (cs *containerSet) delDir(d string) {
+	cs.mu.Lock()
+	cs.dirs = slices.DeleteFunc(cs.dirs, func(x string) bool { return x == d })
+	cs.mu.Unlock()
+}
 
 func (cs *containerSet) all() []*container {
 	var l []*container
@@ -227,6 +241,7 @@ func (j *job) removeConfigDir(dir string) error {
 		j.cs.addDir(dir)
 		return ghErrorf("Failed to remove directory containing Docker client credentials: %v", err)
 	}
+	j.cs.delDir(dir) // unregistered only once it is gone
 	return nil
 }
 
@@ -244,6 +259,9 @@ func (j *job) registryLogin(s *stepRun, c *container, cancel <-chan struct{}) (s
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", ghErrorf("Failed to create directory to store registry client credentials: %v", err)
 	}
+	// Registered with the cleanup of the job before anything can fail or panic:
+	// from here on the fallback removes it whatever happens.
+	j.cs.addDir(dir)
 	j.own(dir)
 	args := []string{j.dockerPath(), "--config", dir, "login"}
 	line := "--config " + dir + " login"

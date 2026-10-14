@@ -35,14 +35,19 @@ hang() { trap 'exit 130' INT TERM; while :; do sleep 0.05; done; }
 if [ -f $D/hang_for ]; then case "$*" in *"$(cat $D/hang_for)"*) hang ;; esac; fi
 case "$1" in
 version) echo "'1.48'" ;;
-ps) case "$*" in *--quiet*) ;; *status=running*) id=$(echo "$*" | sed 's/.*id=\([^ ]*\).*/\1/'); echo "$id Up Less than a second" ;; esac ;;
-network) ;;
+ps) case "$*" in *--quiet*) [ -f $D/created ] && cat $D/created ;; *status=running*) id=$(echo "$*" | sed 's/.*id=\([^ ]*\).*/\1/'); echo "$id Up Less than a second" ;; esac ;;
+network) if [ "$2" = rm ]; then
+    [ -f $D/netrm_fail ] && { echo "Error response from daemon: network is busy"; exit 1; }
+    [ -f $D/netrm_absent ] && { echo "Error response from daemon: network $3 not found"; exit 1; }
+  fi ;;
 login) cat > $D/login_stdin
   if [ -f $D/lock_cfg ]; then mkdir -p $CFG/sub; : > $CFG/sub/f; chmod 500 $CFG/sub; fi ;;
 pull) if [ -f $D/pull_fail ]; then n=$(cat $D/pull_fail); if [ "$n" -gt 0 ]; then echo $((n-1)) > $D/pull_fail; echo "pull denied"; exit 1; fi; fi; echo "pulled $2" ;;
 create) [ -f $D/create_fail ] && { echo "unknown flag"; exit 125; }
   [ -f $D/create_out ] && { cat $D/create_out; exit 0; }
-  n=$(cat $D/seq 2>/dev/null || echo 0); n=$((n+1)); echo $n > $D/seq; printf "%064d\n" $n ;;
+  n=$(cat $D/seq 2>/dev/null || echo 0); n=$((n+1)); echo $n > $D/seq; id=$(printf "%064d" $n); echo $id >> $D/created
+  [ -f $D/hang_create_after ] && hang
+  echo $id ;;
 start) echo "$2" ;;
 inspect) case "$*" in
   *Healthcheck*) if [ -s $D/health ]; then w=$(head -1 $D/health); sed -i 1d $D/health; echo "$w"; fi ;;
@@ -50,7 +55,10 @@ inspect) case "$*" in
   esac ;;
 port) [ -f $D/ports ] && cat $D/ports ;;
 logs) echo "service log of $3" ;;
-rm) echo "$3" ;;
+rm) [ -f $D/rm_fail ] && { echo "Error response from daemon: cannot remove container: boom"; exit 1; }
+  [ -f $D/rm_absent ] && { echo "Error response from daemon: No such container: $3"; exit 1; }
+  [ -f $D/created ] && { grep -v "^$3$" $D/created > $D/created.n; mv $D/created.n $D/created; }
+  echo "$3" ;;
 exec) if [ -f $D/add_path ]; then f=$(echo "$GITHUB_PATH" | sed "s#^/__w#$(cat $D/add_path)#"); echo /added >> "$f"; fi
   [ -f $D/exec_env ] && echo "ENV GITHUB_WORKSPACE=$GITHUB_WORKSPACE RUNNER_TEMP=$RUNNER_TEMP HOME=${HOME:-<unset>} GITHUB_OUTPUT=$GITHUB_OUTPUT GITHUB_EVENT_PATH=$GITHUB_EVENT_PATH"
   [ -f $D/hang_exec ] && { trap 'exit 130' INT TERM; while :; do sleep 0.05; done; }

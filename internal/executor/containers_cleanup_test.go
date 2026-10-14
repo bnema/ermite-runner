@@ -23,11 +23,11 @@ func names(l [][]string) string {
 }
 
 // GO-001: a docker command that stalls is stopped by its own limit, the job
-// does not wait for its timeout, and the cleanup still finds the container by
-// the name chosen before the create.
-func TestStalledCreateIsBoundedAndCleanedByName(t *testing.T) {
+// does not wait for its timeout, and the cleanup still finds the container
+// that the daemon did create, by the label of the job.
+func TestStalledCreateIsBoundedAndCleanedByLabel(t *testing.T) {
 	f := newFakeCtr(t)
-	f.set(t, "hang_create", "1")
+	f.set(t, "hang_create_after", "1") // created in the daemon, the CLI never returns
 	start := time.Now()
 	rec, res := ctrRun(t, f, ctrJob, "      - run: echo never\n", fastTimeouts)
 	if res.Conclusion != ConclusionFailure || time.Since(start) > 20*time.Second {
@@ -37,18 +37,39 @@ func TestStalledCreateIsBoundedAndCleanedByName(t *testing.T) {
 	if !strings.Contains(log, "##[error]The docker command timed out after 400ms: create --name ") {
 		t.Errorf("init:\n%s", log)
 	}
-	var rm []string
-	for _, c := range f.calls(t) {
-		if c[0] == "rm" {
-			rm = c
-		}
-	}
-	if len(rm) < 3 || !strings.Contains(rm[2], "_ubuntu2404_") || strings.Contains(rm[2], strings.Repeat("0", 20)) {
-		t.Errorf("rm by name expected: %v", rm)
+	if b, _ := os.ReadFile(filepath.Join(f.dir, "created")); strings.TrimSpace(string(b)) != "" {
+		t.Errorf("container left in the daemon: %q", b)
 	}
 	if got := logOf(rec.step(t, "Stop containers")); !strings.Contains(got, "Remove container network: github_network_") {
 		t.Errorf("stop:\n%s", got)
 	}
+}
+
+// GO-003-R: options: may carry another --name (the runner passes it on). The
+// container is then not named as recorded; it is found by the label.
+func TestOverridingNameAndTimedOutCreateAreCleanedByLabel(t *testing.T) {
+	f := newFakeCtr(t)
+	f.set(t, "hang_create_after", "1")
+	rec, _ := ctrRun(t, f, "    container:\n      image: ubuntu:24.04\n      options: --name my-own-name\n", "      - run: echo never\n", fastTimeouts)
+	var ps, rm []string
+	for _, c := range f.calls(t) {
+		if c[0] == "ps" && strings.Contains(strings.Join(c, " "), "--quiet") {
+			ps = c
+		}
+		if c[0] == "rm" {
+			rm = c
+		}
+	}
+	if ps == nil || !strings.Contains(strings.Join(ps, "\n"), "label=") {
+		t.Errorf("no listing by label: %v", ps)
+	}
+	if len(rm) < 3 || !containerIDRe.MatchString(rm[2]) {
+		t.Errorf("rm by id expected: %v", rm)
+	}
+	if b, _ := os.ReadFile(filepath.Join(f.dir, "created")); strings.TrimSpace(string(b)) != "" {
+		t.Errorf("container left: %q", b)
+	}
+	_ = rec
 }
 
 // GO-001: the cancellation of the job reaches every docker call of the init.
@@ -199,5 +220,117 @@ func TestRegistryConfigRemovedAfterFailedPullAndRemovalFailureIsReported(t *test
 	}
 	if got := logOf(rec2.step(t, "Initialize containers")); !strings.Contains(got, "##[error]Failed to remove directory containing Docker client credentials:") {
 		t.Errorf("init:\n%s", got)
+	}
+}
+
+// GO-001-R: the health inspection takes the cancellation too.
+func TestCancelDuringHealthInspection(t *testing.T) {
+	f := newFakeCtr(t)
+	f.set(t, "hang_inspect", "1")
+	cancel := NewCanceller()
+	go func() { time.Sleep(500 * time.Millisecond); cancel.Cancel(CancelUser) }()
+	start := time.Now()
+	rec, res := ctrRunC(t, f, cancel, "    services:\n      s:\n        image: redis:7\n", "      - run: echo never\n", func(c *Config) {
+		c.Actions.Containers.Command = time.Minute
+	})
+	if res.Conclusion != ConclusionCancelled || time.Since(start) > 15*time.Second {
+		t.Fatalf("%+v after %s %v", res, time.Since(start), rec.names())
+	}
+	var health bool
+	for _, c := range f.calls(t) {
+		if c[0] == "inspect" && strings.Contains(strings.Join(c, " "), "Healthcheck") {
+			health = true
+		}
+	}
+	if !health {
+		t.Errorf("the health inspection was not reached: %s", names(f.calls(t)))
+	}
+}
+
+// GO-002-R: a failed removal is not a removal. It stays pending and the job's
+// fallback tries again; "No such container" is a removal.
+func TestFailedRemovalStaysPendingAndAbsenceCounts(t *testing.T) {
+	count := func(f *fakeCtr, verb string) int {
+		n := 0
+		for _, c := range f.calls(t) {
+			if c[0] == verb || (verb == "network rm" && c[0] == "network" && len(c) > 1 && c[1] == "rm") {
+				n++
+			}
+		}
+		return n
+	}
+	f := newFakeCtr(t)
+	f.set(t, "rm_fail", "1")
+	f.set(t, "netrm_fail", "1")
+	rec, _ := ctrRun(t, f, ctrJob, "      - run: echo ok\n", fastTimeouts)
+	if count(f, "rm") != 2 || count(f, "network rm") != 2 {
+		t.Errorf("rm=%d network rm=%d, want the fallback to retry both once", count(f, "rm"), count(f, "network rm"))
+	}
+	if got := logOf(rec.step(t, "Stop containers")); !strings.Contains(got, "Docker rm fail with exit code 1") || !strings.Contains(got, "Docker network rm fail with exit code 1") {
+		t.Errorf("warnings:\n%s", got)
+	}
+
+	f2 := newFakeCtr(t)
+	f2.set(t, "rm_absent", "1")
+	f2.set(t, "netrm_absent", "1")
+	rec2, res2 := ctrRun(t, f2, ctrJob, "      - run: echo ok\n", fastTimeouts)
+	if res2.Conclusion != ConclusionSuccess || count(f2, "rm") != 1 || count(f2, "network rm") != 1 {
+		t.Errorf("absent: %+v rm=%d network rm=%d\n%s", res2, count(f2, "rm"), count(f2, "network rm"), logOf(rec2.step(t, "Stop containers")))
+	}
+}
+
+// GO-007-R: the credentials directory is registered before the login; a panic
+// in the login or in the pull leaves nothing behind.
+func TestPanicDuringLoginOrPullLeavesNoCredentials(t *testing.T) {
+	for _, during := range []string{" login ", " pull "} {
+		f := newFakeCtr(t)
+		var temp string
+		func() {
+			defer func() { _ = recover() }()
+			ctrRun(t, f, "    container:\n      image: ghcr.io/o/i:1\n      credentials:\n        username: u\n        password: pw-secret\n", "      - run: echo\n", func(c *Config) {
+				temp = c.Layout.Temp
+				c.Reporter = &panicOnLog{Reporter: c.Reporter, contains: during}
+			})
+		}()
+		if m, _ := filepath.Glob(filepath.Join(temp, ".docker_*")); len(m) != 0 {
+			t.Errorf("panic during%s: credentials left: %v", during, m)
+		}
+	}
+}
+
+type panicOnLog struct {
+	Reporter
+	contains string
+}
+
+func (p *panicOnLog) Log(n int, at time.Time, line string) {
+	if strings.HasPrefix(line, "##[command]") && strings.Contains(line, p.contains) {
+		panic("boom")
+	}
+	p.Reporter.Log(n, at, line)
+}
+
+// GO-004-R3: a variable name that holds "=" or NUL, or is empty, is refused
+// for create and exec, before docker is called.
+func TestInvalidEnvNamesAreRefused(t *testing.T) {
+	if checkEnvNames([]string{"A", "b_c", "A.B", "A-B"}) != nil {
+		t.Error("valid names refused")
+	}
+	for _, k := range []string{"", "A=B", "HTTP_PROXY=http://x/?y", "A\x00B", "="} {
+		if err := checkEnvNames([]string{"OK", k}); err == nil || !strings.Contains(err.Error(), "Invalid environment variable name") {
+			t.Errorf("%q: %v", k, err)
+		}
+	}
+	f := newFakeCtr(t)
+	rec, res := ctrRun(t, f, "    container:\n      image: ubuntu:24.04\n      env:\n        \"HTTP_PROXY=http://x/?y\": v\n", "      - run: echo never\n", nil)
+	if res.Conclusion != ConclusionFailure || !strings.Contains(logOf(rec.step(t, "Set up job")), "##[error]Invalid environment variable name 'HTTP_PROXY=http://x/?y'") {
+		t.Errorf("container env: %+v", res)
+	}
+	rec, res = ctrRun(t, f, ctrJob, "      - name: s\n        env:\n          \"HTTP_PROXY=http://x/?y\": v\n        run: echo never\n", nil)
+	if res.Conclusion != ConclusionFailure || !strings.Contains(logOf(rec.step(t, "s")), "##[error]Invalid environment variable name 'HTTP_PROXY=http://x/?y'") {
+		t.Errorf("step env: %+v\n%s", res, logOf(rec.step(t, "s")))
+	}
+	if n := len(f.execCalls(t)); n != 0 {
+		t.Errorf("docker exec called %d times", n)
 	}
 }

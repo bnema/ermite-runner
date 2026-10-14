@@ -27,7 +27,7 @@ func (j *job) containerHealth(s *stepRun, c *container, cancel <-chan struct{}) 
 	inspect := func() (string, error) {
 		cmd := j.newDockerCmd("inspect",
 			eqOpt("--format", "{{if .Config.Healthcheck}}{{print .State.Health.Status}}{{end}}"), raw(c.id))
-		l, err := j.dockerList(s, cmd, nil)
+		l, err := j.dockerList(s, cmd, cancel)
 		if err != nil || len(l) == 0 {
 			return "", err
 		}
@@ -169,16 +169,64 @@ func (j *job) cleanupContainers(s *stepRun) (errs []error) {
 		_, code, err := j.dockerDo(c, dockerOpts{s: s, cancel: budget, all: true, timeout: t.CleanupCommand})
 		return code, err
 	}
+	// rm runs `docker rm --force target`. It reports whether the target is
+	// gone: removed, or docker says it does not exist. Any other failure leaves
+	// it pending, for the fallback of the job to try again.
+	rm := func(kind string, c dockerCmd) (gone bool) {
+		lines, code, err := j.dockerDoCleanup(c, s, budget, t.CleanupCommand)
+		switch {
+		case err != nil:
+			errs = append(errs, err)
+			return false
+		case code == 0:
+			return true
+		case absent(lines):
+			return true
+		}
+		j.warnTo(s, fmt.Sprintf("Docker %s fail with exit code %d", kind, code))
+		return false
+	}
+	// A container whose create did not finish is not known by its id, and its
+	// name may not be ours (options: can set another --name): it is found by
+	// the label every container of the job carries (DockerCreate adds it).
+	var unresolved []*container
 	for _, c := range cs.all() {
-		if !c.createTried || c.removed {
+		if c.createTried && !c.removed && c.id == "" {
+			unresolved = append(unresolved, c)
+		}
+	}
+	if len(unresolved) > 0 {
+		ok := true
+		ids, code, err := j.dockerDoCleanup(j.newDockerCmd("ps", raw("--all", "--quiet", "--no-trunc"), quotedOpt("--filter", "label="+j.dockerLabel())), nil, budget, t.CleanupCommand)
+		switch {
+		case err != nil:
+			errs, ok = append(errs, err), false
+		case code != 0:
+			j.warnTo(s, fmt.Sprintf("Docker ps fail with exit code %d", code))
+			ok = false
+		}
+		known := map[string]bool{}
+		for _, c := range cs.all() {
+			if c.id != "" {
+				known[c.id] = true // those are removed below, after their logs
+			}
+		}
+		for _, id := range ids {
+			if containerIDRe.MatchString(id) && !known[id] && !rm("rm", j.newDockerCmd("rm", raw("--force", id))) {
+				ok = false
+			}
+		}
+		if ok { // listed, and everything listed is gone: nothing of the job is left
+			for _, c := range unresolved {
+				c.removed = true
+			}
+		}
+	}
+	for _, c := range cs.all() {
+		if !c.createTried || c.removed || c.id == "" {
 			continue
 		}
-		target := c.id
-		if target == "" {
-			// The create is not known to have finished: the name was ours.
-			target = c.name
-		}
-		if c.id != "" && !c.isJob && !c.failedInit {
+		if !c.isJob && !c.failedInit {
 			out("Print service container logs: " + c.name)
 			code, err := run(j.newDockerCmd("logs", raw("--details", c.id)))
 			switch {
@@ -191,16 +239,7 @@ func (j *job) cleanupContainers(s *stepRun) (errs []error) {
 			}
 		}
 		out("Stop and remove container: " + c.name)
-		code, err := run(j.newDockerCmd("rm", raw("--force", target)))
-		switch {
-		case err != nil:
-			errs = append(errs, err)
-		case code != 0:
-			j.warnTo(s, fmt.Sprintf("Docker rm fail with exit code %d", code))
-			if c.id == "" {
-				c.removed = true // a name that docker does not know is nothing to remove
-			}
-		default:
+		if rm("rm", j.newDockerCmd("rm", raw("--force", c.id))) {
 			c.removed = true
 		}
 	}
@@ -209,16 +248,7 @@ func (j *job) cleanupContainers(s *stepRun) (errs []error) {
 	cs.mu.Unlock()
 	if network != "" && !gone {
 		out("Remove container network: " + network)
-		code, err := run(j.newDockerCmd("network", raw("rm", network)))
-		switch {
-		case err != nil:
-			errs = append(errs, err)
-		case code != 0:
-			j.warnTo(s, fmt.Sprintf("Docker network rm failed with exit code %d", code))
-			cs.mu.Lock()
-			cs.netRemoved = true // the runner warns and moves on; docker knows no such network (or refuses)
-			cs.mu.Unlock()
-		default:
+		if rm("network rm", j.newDockerCmd("network", raw("rm", network))) {
 			cs.mu.Lock()
 			cs.netRemoved = true
 			cs.mu.Unlock()
@@ -244,4 +274,23 @@ func (j *job) warnTo(s *stepRun, msg string) {
 		return
 	}
 	j.cfg.Log.Warn().Msg(msg)
+}
+
+// absent reports whether docker's answer to a removal says the object does not
+// exist: that is the state the cleanup wants.
+func absent(lines []string) bool {
+	for _, l := range lines {
+		l = strings.ToLower(l)
+		if strings.Contains(l, "no such container") || strings.Contains(l, "no such network") ||
+			strings.Contains(l, "no such object") || strings.Contains(l, "network") && strings.Contains(l, "not found") {
+			return true
+		}
+	}
+	return false
+}
+
+// dockerDoCleanup runs a command of the cleanup: bounded by its own limit and
+// by the budget, its output (stdout and stderr) returned, logged to s if any.
+func (j *job) dockerDoCleanup(c dockerCmd, s *stepRun, budget <-chan struct{}, limit time.Duration) ([]string, int, error) {
+	return j.dockerDo(c, dockerOpts{s: s, cancel: budget, all: true, timeout: limit, errToOut: true})
 }

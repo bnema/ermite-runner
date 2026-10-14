@@ -100,6 +100,7 @@ func (j *job) startContainer(s *stepRun, c *container, cancel <-chan struct{}) e
 		}
 		return err
 	}
+	defer func() { _ = j.removeConfigDir(cfg) }() // also on a panic; idempotent
 	code, err := j.pullWithRetry(s, c.image, cfg, cancel)
 	// Credentials are removed after the pull, whatever it did (:171-173).
 	if rerr := j.removeConfigDir(cfg); rerr != nil {
@@ -119,6 +120,9 @@ func (j *job) startContainer(s *stepRun, c *container, cancel <-chan struct{}) e
 		if err := j.mountWellKnownDirectories(c); err != nil {
 			return err
 		}
+	}
+	if err := checkEnvNames(c.env.Keys()); err != nil {
+		return err
 	}
 	c.createTried = true // the container may exist from here on, named c.name
 	out, err := j.dockerList(s, j.createCmd(c), cancel)
