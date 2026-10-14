@@ -5,7 +5,6 @@ package executor
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 )
@@ -102,14 +101,6 @@ func ctrRunC(t *testing.T, f *fakeCtr, cancel *Canceller, jobYAML, steps string,
 			tweak(c)
 		}
 	})
-}
-
-func joinCalls(cs [][]string) string {
-	var b strings.Builder
-	for _, c := range cs {
-		b.WriteString(strings.Join(c, " ") + "\n")
-	}
-	return b.String()
 }
 
 // concl is the conclusion of the step called name.

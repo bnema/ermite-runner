@@ -50,10 +50,10 @@ func (j *job) initContainersStep() qstep {
 // (StepsRunner.cs:314-340): a cancellation is logged and cancels the step,
 // anything else is logged with its message and fails it.
 func (j *job) containerResult(s *stepRun, err error) stepResult {
-	switch {
-	case err == nil:
+	if err == nil {
 		return resSucceeded
-	case err == errCancelled:
+	}
+	if err == errCancelled {
 		return j.cancelledStep(s)
 	}
 	j.errorf(s.num, "%s", err.Error())
@@ -210,7 +210,7 @@ func (j *job) registryLogin(s *stepRun, c *container, cancel <-chan struct{}) (s
 	j.addMask(c.credPass)
 	dir := filepath.Join(j.state.Layout().Temp, ".docker_"+strings.ReplaceAll(newImageTag(""), ":", ""))
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", fmt.Errorf("Failed to create directory to store registry client credentials: %v", err)
+		return "", ghErrorf("Failed to create directory to store registry client credentials: %v", err)
 	}
 	j.own(dir)
 	args := []string{j.dockerPath(), "--config", dir, "login"}
