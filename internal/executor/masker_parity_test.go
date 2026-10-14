@@ -105,3 +105,28 @@ func TestMaskerAddAndMerge(t *testing.T) {
 		t.Error(got)
 	}
 }
+
+// SecretMasker.AddValue skips a value only when it was added before as an
+// original, not when it is already one of the forms of another value: the
+// encodings of "one%20two" are masked after "one two" was added, although
+// "one%20two" itself is the URI form of "one two" (GO-001).
+func TestMaskerAddsEncodingsOfAValueThatIsAnEncodingOfAnother(t *testing.T) {
+	m := newMasker()
+	m.add("one two")
+	m.add("one%20two")
+	for _, text := range []string{"one two", "one%20two", "one%2520two"} {
+		if got := m.mask(text); got != "***" {
+			t.Errorf("mask(%q) = %q", text, got)
+		}
+	}
+	// the same original twice is still a no-op
+	m.add("one%20two")
+	if n := len(m.list); n == 0 {
+		t.Fatal("empty")
+	}
+	before := len(m.list)
+	m.add("one%20two")
+	if len(m.list) != before {
+		t.Error("an original added twice grew the list")
+	}
+}

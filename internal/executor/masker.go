@@ -30,9 +30,14 @@ import (
 // determines. actions/runner only registers the full forms; the truncated ones
 // are an addition of ermite.
 type masker struct {
-	mu     sync.RWMutex
-	values map[string]struct{}
-	list   []string
+	mu sync.RWMutex
+	// originals are the values passed to add (SecretMasker.m_originalValueSecrets);
+	// values are the forms to look for: the originals and their encodings. A
+	// value that is the encoding of an earlier one is still a new original: its
+	// own encodings must be registered (AddValue tests the originals only).
+	originals map[string]struct{}
+	values    map[string]struct{}
+	list      []string
 }
 
 const maskedValue = "***"
@@ -43,7 +48,7 @@ const maskedValue = "***"
 const minBase64Tail = 8
 
 func newMasker(secrets ...string) *masker {
-	m := &masker{values: map[string]struct{}{}}
+	m := &masker{originals: map[string]struct{}{}, values: map[string]struct{}{}}
 	for _, s := range secrets {
 		m.add(s)
 	}
@@ -57,7 +62,7 @@ func (m *masker) add(value string) {
 		return
 	}
 	m.mu.RLock()
-	_, known := m.values[value]
+	_, known := m.originals[value]
 	m.mu.RUnlock()
 	if known {
 		return
@@ -65,6 +70,7 @@ func (m *masker) add(value string) {
 	forms := append([]string{value}, secretEncodings(value)...)
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.originals[value] = struct{}{}
 	for _, f := range forms {
 		if f == "" {
 			continue
