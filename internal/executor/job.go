@@ -509,6 +509,7 @@ func (j *job) setUp() ([]qstep, error) {
 	// JobExtension.cs:250-275: the job container and the services are
 	// evaluated after the job environment, before the actions are prepared.
 	j.debug(1, "Evaluating job container")
+	j.debug(1, "Evaluating job service containers")
 	jc, svcs, err := j.evalContainers()
 	if err != nil {
 		return nil, err

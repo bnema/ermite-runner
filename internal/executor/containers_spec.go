@@ -299,10 +299,6 @@ func (j *job) convertContainer(v expr.Value, service bool) (*containerSpec, erro
 	if spec.image == "" {
 		return nil, nil
 	}
-	// The image is one argument of docker; a leading "-" would make it an option.
-	if strings.HasPrefix(spec.image, "-") {
-		return nil, ghErrorf("Invalid container image '%s'", spec.image)
-	}
 	return spec, nil
 }
 

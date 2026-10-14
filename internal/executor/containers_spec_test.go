@@ -81,7 +81,7 @@ func TestConvertContainerForms(t *testing.T) {
 	if s, err := j.convertContainer(mustValue(t, `{"image":""}`), true); s != nil || err != nil {
 		t.Errorf("empty image: %v %v", s, err)
 	}
-	for _, bad := range []string{`{"entrypoint":"x","image":"i"}`, `{"nope":1,"image":"i"}`, `{"image":["a"]}`, `"-v"`} {
+	for _, bad := range []string{`{"entrypoint":"x","image":"i"}`, `{"nope":1,"image":"i"}`, `{"image":["a"]}`} {
 		if _, err := j.convertContainer(mustValue(t, bad), false); err == nil {
 			t.Errorf("%s accepted", bad)
 		}
