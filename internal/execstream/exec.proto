@@ -29,7 +29,19 @@ message Frame {
     StepSummary step_summary = 11;         // executor -> host, before the StepCompleted of the step
     ResolveRequest resolve_request = 12;   // executor -> host
     ResolveResponse resolve_response = 13; // host -> executor, answers a ResolveRequest
+    NamedValue secret = 14; // host -> executor, one per secret, before Run
+    NamedValue var = 15;    // host -> executor, one per variable, before Run
   }
+}
+
+// NamedValue is one secret (Job.secrets) or one variable (Job.vars) of the job.
+// They travel in frames of their own, before Run, rather than in JobSpec: a
+// frame is at most 2 MiB (execstream.MaxFrame) and ermite allows many secrets of
+// 48 KiB, so a map in Run could not carry them. The executor keeps them until
+// Run arrives. Secrets are never logged nor written to disk.
+message NamedValue {
+  string name = 1;
+  string value = 2;
 }
 
 message Hello {
@@ -85,6 +97,16 @@ message JobSpec {
   // job's repository and refs.
   uint32 cache_port = 15;
   string cache_token = 16;
+  // Job.secrets and Job.vars are not here: they come in NamedValue frames
+  // before Run (see NamedValue). The executor takes the vars of those frames
+  // for the "vars" context when contexts has none.
+  reserved 17, 18;
+  reserved "secrets", "vars";
+  // secrets_withheld is set by the host when the server sends Job.trusted and
+  // the job is not trusted (feature ci.secrets): "Set up job" then says that
+  // secrets are not available. Never set for servers without the feature, for
+  // which an absent Job.trusted only means "not sent".
+  bool secrets_withheld = 19;
 }
 
 enum StreamKind {

@@ -190,41 +190,71 @@ func serve(ctx context.Context, rw io.ReadWriteCloser, cfg ExecConfig) (int, err
 	}}}); err != nil {
 		return 1, fmt.Errorf("send hello: %w", err)
 	}
-	run, err := waitForRun(ctx, conn, cfg.RunTimeout)
+	run, vals, err := waitForRun(ctx, conn, cfg.RunTimeout)
 	if err != nil {
 		return 1, err
 	}
 	if run.GetJob() != nil {
-		return sendExit(conn, runJob(ctx, conn, cfg, run.GetJob()), nil)
+		return sendExit(conn, runJob(ctx, conn, cfg, run.GetJob(), vals), nil)
 	}
 	return runStub(ctx, conn, cfg, run)
 }
 
+// jobValues are the secrets and variables of the job that the host sent in
+// NamedValue frames before Run. They stay in memory.
+type jobValues struct{ secrets, vars map[string]string }
+
+// maxJobValues bounds what a host can make the executor keep before Run.
+const maxJobValues = 64 << 20
+
 // waitForRun waits for the Run frame of the host, bounded: a host that never
-// answers must not pin the sandbox.
-func waitForRun(ctx context.Context, conn *execstream.Conn, timeout time.Duration) (*execpb.Run, error) {
+// answers must not pin the sandbox. The NamedValue frames that come before it
+// are collected.
+func waitForRun(ctx context.Context, conn *execstream.Conn, timeout time.Duration) (*execpb.Run, jobValues, error) {
 	type recv struct {
-		f   *execpb.Frame
-		err error
+		run  *execpb.Run
+		vals jobValues
+		err  error
 	}
 	first := make(chan recv, 1)
-	go func() { f, err := conn.Recv(); first <- recv{f, err} }()
+	go func() {
+		vals := jobValues{secrets: map[string]string{}, vars: map[string]string{}}
+		size := 0
+		for {
+			f, err := conn.Recv()
+			if err != nil {
+				first <- recv{err: fmt.Errorf("waiting for run: %w", err)}
+				return
+			}
+			switch b := f.Body.(type) {
+			case *execpb.Frame_Run:
+				first <- recv{run: b.Run, vals: vals}
+				return
+			case *execpb.Frame_Secret:
+				size += len(b.Secret.GetName()) + len(b.Secret.GetValue())
+				vals.secrets[b.Secret.GetName()] = b.Secret.GetValue()
+			case *execpb.Frame_Var:
+				size += len(b.Var.GetName()) + len(b.Var.GetValue())
+				vals.vars[b.Var.GetName()] = b.Var.GetValue()
+			default:
+				first <- recv{err: errors.New("first frame from host is not run")}
+				return
+			}
+			if size > maxJobValues {
+				first <- recv{err: errors.New("the host sent too many secrets and variables before run")}
+				return
+			}
+		}
+	}()
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	select {
 	case r := <-first:
-		if r.err != nil {
-			return nil, fmt.Errorf("waiting for run: %w", r.err)
-		}
-		run := r.f.GetRun()
-		if run == nil {
-			return nil, errors.New("first frame from host is not run")
-		}
-		return run, nil
+		return r.run, r.vals, r.err
 	case <-timer.C:
-		return nil, errors.New("timed out waiting for the host's run frame")
+		return nil, jobValues{}, errors.New("timed out waiting for the host's run frame")
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return nil, jobValues{}, ctx.Err()
 	}
 }
 

@@ -20,6 +20,9 @@ import (
 const (
 	FeatureAnnotations = "ci.annotations"
 	FeatureSummaries   = "ci.summaries"
+	// FeatureSecrets: the server sends Job.secrets, vars, environment,
+	// permissions and trusted. Without it Job.trusted is absent, not false.
+	FeatureSecrets = "ci.secrets"
 )
 
 // Limits of Annotation and UploadSummaryRequest (runner.proto). The executor
@@ -39,7 +42,7 @@ const (
 type ServerFeatures func(ctx context.Context) ([]string, error)
 
 // jobFeatures is what the server accepts for this job.
-type jobFeatures struct{ annotations, summaries bool }
+type jobFeatures struct{ annotations, summaries, secrets bool }
 
 func featuresOf(list []string) jobFeatures {
 	var f jobFeatures
@@ -49,6 +52,8 @@ func featuresOf(list []string) jobFeatures {
 			f.annotations = true
 		case FeatureSummaries:
 			f.summaries = true
+		case FeatureSecrets:
+			f.secrets = true
 		}
 	}
 	return f

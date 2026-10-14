@@ -690,6 +690,12 @@ func (j *jobRun) drive(conn sandbox.Conn, rt *Runner) (*execpb.Exit, error) {
 		DeadlineMs: max(1, time.Until(j.deadline()).Milliseconds()),
 		RunnerName: rt.Cfg.Name, RunnerVersion: rt.Cfg.Version, RunnerEnvironment: rt.Cfg.environment(),
 		SendAnnotations: j.features.annotations, SendSummaries: j.features.summaries,
+		// Job.secrets and Job.vars are not in this frame (it is limited to
+		// 2 MiB): DriveJob sends them in NamedValue frames before it. The host
+		// never logs them nor stores them. An old server leaves trusted false
+		// because it does not send it, so the executor says "not available"
+		// only when the server has ci.secrets.
+		SecretsWithheld: j.features.secrets && !j.job.Trusted,
 	}}
 	run.Job.CachePort, run.Job.CacheToken = j.cacheFor(rt)
 	_, exit, err := execstream.DriveJob(conn, run, j.cancelCh, execstream.JobHandler{
@@ -698,6 +704,7 @@ func (j *jobRun) drive(conn sandbox.Conn, rt *Runner) (*execpb.Exit, error) {
 		JobResult:       func(r *execpb.JobResult) { j.mu.Lock(); j.result = r; j.mu.Unlock() },
 		Resolve:         j.resolveActions,
 		StepAnnotations: j.stepAnnotations, StepSummary: j.stepSummary,
+		Secrets: j.job.Secrets, Vars: j.job.Vars,
 	})
 	return exit, err
 }

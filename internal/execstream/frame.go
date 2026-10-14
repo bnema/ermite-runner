@@ -18,6 +18,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
+	"slices"
 	"sync"
 	"time"
 
@@ -167,6 +169,10 @@ type JobHandler struct {
 	// step.
 	StepAnnotations func(*execpb.StepAnnotations)
 	StepSummary     func(*execpb.StepSummary)
+	// Secrets and Vars (Job.secrets, Job.vars) are sent before the Run frame,
+	// one NamedValue frame each, so that their total size is not bound by the
+	// size of one frame (MaxFrame). A single value must fit in a frame.
+	Secrets, Vars map[string]string
 }
 
 // DriveJob is Drive for a session that carries a job: besides Output frames it
@@ -183,6 +189,9 @@ func DriveJob(rw io.ReadWriter, run *execpb.Run, cancel <-chan *execpb.Cancel, h
 	}
 	if h.Hello != nil {
 		h.Hello(hello)
+	}
+	if err := sendValues(c, h); err != nil {
+		return hello, nil, err
 	}
 	if err := c.Send(&execpb.Frame{Body: &execpb.Frame_Run{Run: run}}); err != nil {
 		return hello, nil, fmt.Errorf("execstream: sending run: %w", err)
@@ -278,4 +287,22 @@ func DriveJob(rw io.ReadWriter, run *execpb.Run, cancel <-chan *execpb.Cancel, h
 			return hello, b.Exit, nil
 		}
 	}
+}
+
+// sendValues sends the secrets, then the variables of the job, in name order,
+// one frame each. The error never holds a value.
+func sendValues(c *Conn, h JobHandler) error {
+	for _, k := range slices.Sorted(maps.Keys(h.Secrets)) {
+		f := &execpb.Frame{Body: &execpb.Frame_Secret{Secret: &execpb.NamedValue{Name: k, Value: h.Secrets[k]}}}
+		if err := c.Send(f); err != nil {
+			return fmt.Errorf("execstream: sending secret %q: %w", k, err)
+		}
+	}
+	for _, k := range slices.Sorted(maps.Keys(h.Vars)) {
+		f := &execpb.Frame{Body: &execpb.Frame_Var{Var: &execpb.NamedValue{Name: k, Value: h.Vars[k]}}}
+		if err := c.Send(f); err != nil {
+			return fmt.Errorf("execstream: sending variable %q: %w", k, err)
+		}
+	}
+	return nil
 }

@@ -5,6 +5,7 @@ package executor
 import (
 	"encoding/base64"
 	"fmt"
+	"maps"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -228,6 +229,23 @@ type State struct {
 	prepend []string
 	// status is job.status: "success", "failure" or "cancelled".
 	status string
+	// jobSecrets are Job.secrets: the secrets context besides GITHUB_TOKEN.
+	// They live in memory only (never in a file, a log or an error).
+	jobSecrets map[string]string
+}
+
+// WithJobData gives the state the secrets and variables of the job message
+// (Job.secrets and Job.vars). The vars context keeps what the server wrote in
+// the contexts JSON; the variables are its fallback when the JSON has none.
+func (s *State) WithJobData(secrets, vars map[string]string) {
+	s.jobSecrets = secrets
+	if d, ok := s.other["vars"].(*expr.Dictionary); (!ok || d.Len() == 0) && len(vars) > 0 {
+		nd := expr.NewDictionary()
+		for _, k := range slices.Sorted(maps.Keys(vars)) {
+			nd.Add(k, expr.String(vars[k]))
+		}
+		s.other["vars"] = nd
+	}
 }
 
 // serverContexts are the keys of the contexts JSON that the runner reads.
@@ -493,38 +511,63 @@ func (s *State) Values(env *ordered) map[string]expr.Value {
 	return m
 }
 
-// secrets is the secrets context. Today it holds one entry, GITHUB_TOKEN, as
-// on GitHub (Variables.ToSecretsContext lists the secret variables but the
-// access token; GitHub's message carries the token as the secret GITHUB_TOKEN,
-// recorded: ctx-inputs-vars, secrets.GITHUB_TOKEN == github.token).
+// secrets is the secrets context: GITHUB_TOKEN and the secrets of the job
+// (Job.secrets), as on GitHub where the message carries the token as the secret
+// GITHUB_TOKEN (recorded: ctx-inputs-vars, secrets.GITHUB_TOKEN == github.token).
+// An unknown secret evaluates to "" like on GitHub.
 //
-// Where the value comes from: the "token" key of the github context that the
+// GITHUB_TOKEN comes from the "token" key of the github context that the
 // server sends in Job.contexts, the same value as github.token. It must be a
 // token of its own, scoped to the job (the permissions "Set up job" prints) and
 // short lived. It must never be the "ermitejob_" job token: that one
 // authenticates the runner's calls to ermite, stays in the runner host process
-// and must not reach the sandbox (runner.proto, "Secrets and trust"). ermite
-// does not send a token yet (planned for CI-3, with the secrets of the
-// repository); until it does, github.token is empty, so is secrets, and
-// a test of secrets.GITHUB_TOKEN against the empty string is false. Without a
-// token nothing is masked.
+// and must not reach the sandbox (runner.proto, "Secrets and trust"). Without a
+// token there is no GITHUB_TOKEN entry, and a test of secrets.GITHUB_TOKEN
+// against the empty string is false. GITHUB_TOKEN is reserved: an entry of
+// that name in Job.secrets is ignored.
 func (s *State) secrets() *expr.Dictionary {
 	d := expr.NewDictionary()
 	if t := s.GitHub("token"); t != "" {
 		d.Add("GITHUB_TOKEN", expr.String(t))
+	}
+	for _, k := range slices.Sorted(maps.Keys(s.jobSecrets)) {
+		if strings.EqualFold(k, "GITHUB_TOKEN") {
+			continue
+		}
+		d.Add(k, expr.String(s.jobSecrets[k]))
 	}
 	return d
 }
 
 // Secrets returns the values that must never leave the job: the token and the
 // base64 of "x-access-token:<token>" (ExecutionContext.cs:1026-1028); newMasker
-// adds their other encodings.
+// adds their other encodings. The secrets of the job are registered with
+// registerSecrets.
 func (s *State) Secrets() []string {
 	t := s.GitHub("token")
 	if t == "" {
 		return nil
 	}
 	return []string{t, base64.StdEncoding.EncodeToString([]byte("x-access-token:" + t))}
+}
+
+// registerSecrets registers every secret of the job as the runner does before
+// the first step (Worker.cs:158-171): the whole value trimmed, which may span
+// several lines because individual trace info can contain line breaks, then
+// each non-empty trimmed line of it, split on CR and LF, because child
+// processes are processed line by line. add ignores empty values and adds the
+// encoded forms. GITHUB_TOKEN is not a job secret (see State.secrets).
+func registerSecrets(m *masker, secrets map[string]string) {
+	for _, k := range slices.Sorted(maps.Keys(secrets)) {
+		if strings.EqualFold(k, "GITHUB_TOKEN") {
+			continue
+		}
+		v := strings.TrimSpace(secrets[k])
+		m.add(v)
+		for _, line := range strings.FieldsFunc(v, func(r rune) bool { return r == '\r' || r == '\n' }) {
+			m.add(strings.TrimSpace(line))
+		}
+	}
 }
 
 // ServerContexts returns the contexts that the server has when it evaluates

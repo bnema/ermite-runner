@@ -259,6 +259,8 @@ type Frame struct {
 	//	*Frame_StepSummary
 	//	*Frame_ResolveRequest
 	//	*Frame_ResolveResponse
+	//	*Frame_Secret
+	//	*Frame_Var
 	Body          isFrame_Body `protobuf_oneof:"body"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -418,6 +420,24 @@ func (x *Frame) GetResolveResponse() *ResolveResponse {
 	return nil
 }
 
+func (x *Frame) GetSecret() *NamedValue {
+	if x != nil {
+		if x, ok := x.Body.(*Frame_Secret); ok {
+			return x.Secret
+		}
+	}
+	return nil
+}
+
+func (x *Frame) GetVar() *NamedValue {
+	if x != nil {
+		if x, ok := x.Body.(*Frame_Var); ok {
+			return x.Var
+		}
+	}
+	return nil
+}
+
 type isFrame_Body interface {
 	isFrame_Body()
 }
@@ -474,6 +494,14 @@ type Frame_ResolveResponse struct {
 	ResolveResponse *ResolveResponse `protobuf:"bytes,13,opt,name=resolve_response,json=resolveResponse,proto3,oneof"` // host -> executor, answers a ResolveRequest
 }
 
+type Frame_Secret struct {
+	Secret *NamedValue `protobuf:"bytes,14,opt,name=secret,proto3,oneof"` // host -> executor, one per secret, before Run
+}
+
+type Frame_Var struct {
+	Var *NamedValue `protobuf:"bytes,15,opt,name=var,proto3,oneof"` // host -> executor, one per variable, before Run
+}
+
 func (*Frame_Hello) isFrame_Body() {}
 
 func (*Frame_Run) isFrame_Body() {}
@@ -500,6 +528,67 @@ func (*Frame_ResolveRequest) isFrame_Body() {}
 
 func (*Frame_ResolveResponse) isFrame_Body() {}
 
+func (*Frame_Secret) isFrame_Body() {}
+
+func (*Frame_Var) isFrame_Body() {}
+
+// NamedValue is one secret (Job.secrets) or one variable (Job.vars) of the job.
+// They travel in frames of their own, before Run, rather than in JobSpec: a
+// frame is at most 2 MiB (execstream.MaxFrame) and ermite allows many secrets of
+// 48 KiB, so a map in Run could not carry them. The executor keeps them until
+// Run arrives. Secrets are never logged nor written to disk.
+type NamedValue struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Value         string                 `protobuf:"bytes,2,opt,name=value,proto3" json:"value,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *NamedValue) Reset() {
+	*x = NamedValue{}
+	mi := &file_exec_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *NamedValue) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*NamedValue) ProtoMessage() {}
+
+func (x *NamedValue) ProtoReflect() protoreflect.Message {
+	mi := &file_exec_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use NamedValue.ProtoReflect.Descriptor instead.
+func (*NamedValue) Descriptor() ([]byte, []int) {
+	return file_exec_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *NamedValue) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *NamedValue) GetValue() string {
+	if x != nil {
+		return x.Value
+	}
+	return ""
+}
+
 type Hello struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Version       string                 `protobuf:"bytes,1,opt,name=version,proto3" json:"version,omitempty"` // runner version of the executor
@@ -511,7 +600,7 @@ type Hello struct {
 
 func (x *Hello) Reset() {
 	*x = Hello{}
-	mi := &file_exec_proto_msgTypes[1]
+	mi := &file_exec_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -523,7 +612,7 @@ func (x *Hello) String() string {
 func (*Hello) ProtoMessage() {}
 
 func (x *Hello) ProtoReflect() protoreflect.Message {
-	mi := &file_exec_proto_msgTypes[1]
+	mi := &file_exec_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -536,7 +625,7 @@ func (x *Hello) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Hello.ProtoReflect.Descriptor instead.
 func (*Hello) Descriptor() ([]byte, []int) {
-	return file_exec_proto_rawDescGZIP(), []int{1}
+	return file_exec_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *Hello) GetVersion() string {
@@ -576,7 +665,7 @@ type Run struct {
 
 func (x *Run) Reset() {
 	*x = Run{}
-	mi := &file_exec_proto_msgTypes[2]
+	mi := &file_exec_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -588,7 +677,7 @@ func (x *Run) String() string {
 func (*Run) ProtoMessage() {}
 
 func (x *Run) ProtoReflect() protoreflect.Message {
-	mi := &file_exec_proto_msgTypes[2]
+	mi := &file_exec_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -601,7 +690,7 @@ func (x *Run) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Run.ProtoReflect.Descriptor instead.
 func (*Run) Descriptor() ([]byte, []int) {
-	return file_exec_proto_rawDescGZIP(), []int{2}
+	return file_exec_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *Run) GetScript() string {
@@ -660,15 +749,20 @@ type JobSpec struct {
 	// runner does, and masks the token. The token is not an ermite credential: it
 	// is an HMAC that only the runner's cache service accepts, scoped to this
 	// job's repository and refs.
-	CachePort     uint32 `protobuf:"varint,15,opt,name=cache_port,json=cachePort,proto3" json:"cache_port,omitempty"`
-	CacheToken    string `protobuf:"bytes,16,opt,name=cache_token,json=cacheToken,proto3" json:"cache_token,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	CachePort  uint32 `protobuf:"varint,15,opt,name=cache_port,json=cachePort,proto3" json:"cache_port,omitempty"`
+	CacheToken string `protobuf:"bytes,16,opt,name=cache_token,json=cacheToken,proto3" json:"cache_token,omitempty"`
+	// secrets_withheld is set by the host when the server sends Job.trusted and
+	// the job is not trusted (feature ci.secrets): "Set up job" then says that
+	// secrets are not available. Never set for servers without the feature, for
+	// which an absent Job.trusted only means "not sent".
+	SecretsWithheld bool `protobuf:"varint,19,opt,name=secrets_withheld,json=secretsWithheld,proto3" json:"secrets_withheld,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *JobSpec) Reset() {
 	*x = JobSpec{}
-	mi := &file_exec_proto_msgTypes[3]
+	mi := &file_exec_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -680,7 +774,7 @@ func (x *JobSpec) String() string {
 func (*JobSpec) ProtoMessage() {}
 
 func (x *JobSpec) ProtoReflect() protoreflect.Message {
-	mi := &file_exec_proto_msgTypes[3]
+	mi := &file_exec_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -693,7 +787,7 @@ func (x *JobSpec) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use JobSpec.ProtoReflect.Descriptor instead.
 func (*JobSpec) Descriptor() ([]byte, []int) {
-	return file_exec_proto_rawDescGZIP(), []int{3}
+	return file_exec_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *JobSpec) GetWorkflowPath() string {
@@ -808,6 +902,13 @@ func (x *JobSpec) GetCacheToken() string {
 	return ""
 }
 
+func (x *JobSpec) GetSecretsWithheld() bool {
+	if x != nil {
+		return x.SecretsWithheld
+	}
+	return false
+}
+
 type Output struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Stream        StreamKind             `protobuf:"varint,1,opt,name=stream,proto3,enum=ermite.runner.exec.v1.StreamKind" json:"stream,omitempty"`
@@ -819,7 +920,7 @@ type Output struct {
 
 func (x *Output) Reset() {
 	*x = Output{}
-	mi := &file_exec_proto_msgTypes[4]
+	mi := &file_exec_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -831,7 +932,7 @@ func (x *Output) String() string {
 func (*Output) ProtoMessage() {}
 
 func (x *Output) ProtoReflect() protoreflect.Message {
-	mi := &file_exec_proto_msgTypes[4]
+	mi := &file_exec_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -844,7 +945,7 @@ func (x *Output) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Output.ProtoReflect.Descriptor instead.
 func (*Output) Descriptor() ([]byte, []int) {
-	return file_exec_proto_rawDescGZIP(), []int{4}
+	return file_exec_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *Output) GetStream() StreamKind {
@@ -878,7 +979,7 @@ type Exit struct {
 
 func (x *Exit) Reset() {
 	*x = Exit{}
-	mi := &file_exec_proto_msgTypes[5]
+	mi := &file_exec_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -890,7 +991,7 @@ func (x *Exit) String() string {
 func (*Exit) ProtoMessage() {}
 
 func (x *Exit) ProtoReflect() protoreflect.Message {
-	mi := &file_exec_proto_msgTypes[5]
+	mi := &file_exec_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -903,7 +1004,7 @@ func (x *Exit) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Exit.ProtoReflect.Descriptor instead.
 func (*Exit) Descriptor() ([]byte, []int) {
-	return file_exec_proto_rawDescGZIP(), []int{5}
+	return file_exec_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *Exit) GetCode() int32 {
@@ -937,7 +1038,7 @@ type Cancel struct {
 
 func (x *Cancel) Reset() {
 	*x = Cancel{}
-	mi := &file_exec_proto_msgTypes[6]
+	mi := &file_exec_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -949,7 +1050,7 @@ func (x *Cancel) String() string {
 func (*Cancel) ProtoMessage() {}
 
 func (x *Cancel) ProtoReflect() protoreflect.Message {
-	mi := &file_exec_proto_msgTypes[6]
+	mi := &file_exec_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -962,7 +1063,7 @@ func (x *Cancel) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Cancel.ProtoReflect.Descriptor instead.
 func (*Cancel) Descriptor() ([]byte, []int) {
-	return file_exec_proto_rawDescGZIP(), []int{6}
+	return file_exec_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *Cancel) GetReason() string {
@@ -992,7 +1093,7 @@ type StepStarted struct {
 
 func (x *StepStarted) Reset() {
 	*x = StepStarted{}
-	mi := &file_exec_proto_msgTypes[7]
+	mi := &file_exec_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1004,7 +1105,7 @@ func (x *StepStarted) String() string {
 func (*StepStarted) ProtoMessage() {}
 
 func (x *StepStarted) ProtoReflect() protoreflect.Message {
-	mi := &file_exec_proto_msgTypes[7]
+	mi := &file_exec_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1017,7 +1118,7 @@ func (x *StepStarted) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StepStarted.ProtoReflect.Descriptor instead.
 func (*StepStarted) Descriptor() ([]byte, []int) {
-	return file_exec_proto_rawDescGZIP(), []int{7}
+	return file_exec_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *StepStarted) GetNumber() int32 {
@@ -1057,7 +1158,7 @@ type StepCompleted struct {
 
 func (x *StepCompleted) Reset() {
 	*x = StepCompleted{}
-	mi := &file_exec_proto_msgTypes[8]
+	mi := &file_exec_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1069,7 +1170,7 @@ func (x *StepCompleted) String() string {
 func (*StepCompleted) ProtoMessage() {}
 
 func (x *StepCompleted) ProtoReflect() protoreflect.Message {
-	mi := &file_exec_proto_msgTypes[8]
+	mi := &file_exec_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1082,7 +1183,7 @@ func (x *StepCompleted) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StepCompleted.ProtoReflect.Descriptor instead.
 func (*StepCompleted) Descriptor() ([]byte, []int) {
-	return file_exec_proto_rawDescGZIP(), []int{8}
+	return file_exec_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *StepCompleted) GetNumber() int32 {
@@ -1138,7 +1239,7 @@ type Annotation struct {
 
 func (x *Annotation) Reset() {
 	*x = Annotation{}
-	mi := &file_exec_proto_msgTypes[9]
+	mi := &file_exec_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1150,7 +1251,7 @@ func (x *Annotation) String() string {
 func (*Annotation) ProtoMessage() {}
 
 func (x *Annotation) ProtoReflect() protoreflect.Message {
-	mi := &file_exec_proto_msgTypes[9]
+	mi := &file_exec_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1163,7 +1264,7 @@ func (x *Annotation) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Annotation.ProtoReflect.Descriptor instead.
 func (*Annotation) Descriptor() ([]byte, []int) {
-	return file_exec_proto_rawDescGZIP(), []int{9}
+	return file_exec_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *Annotation) GetLevel() AnnotationLevel {
@@ -1236,7 +1337,7 @@ type StepAnnotations struct {
 
 func (x *StepAnnotations) Reset() {
 	*x = StepAnnotations{}
-	mi := &file_exec_proto_msgTypes[10]
+	mi := &file_exec_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1248,7 +1349,7 @@ func (x *StepAnnotations) String() string {
 func (*StepAnnotations) ProtoMessage() {}
 
 func (x *StepAnnotations) ProtoReflect() protoreflect.Message {
-	mi := &file_exec_proto_msgTypes[10]
+	mi := &file_exec_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1261,7 +1362,7 @@ func (x *StepAnnotations) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StepAnnotations.ProtoReflect.Descriptor instead.
 func (*StepAnnotations) Descriptor() ([]byte, []int) {
-	return file_exec_proto_rawDescGZIP(), []int{10}
+	return file_exec_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *StepAnnotations) GetStep() int32 {
@@ -1290,7 +1391,7 @@ type StepSummary struct {
 
 func (x *StepSummary) Reset() {
 	*x = StepSummary{}
-	mi := &file_exec_proto_msgTypes[11]
+	mi := &file_exec_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1302,7 +1403,7 @@ func (x *StepSummary) String() string {
 func (*StepSummary) ProtoMessage() {}
 
 func (x *StepSummary) ProtoReflect() protoreflect.Message {
-	mi := &file_exec_proto_msgTypes[11]
+	mi := &file_exec_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1315,7 +1416,7 @@ func (x *StepSummary) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StepSummary.ProtoReflect.Descriptor instead.
 func (*StepSummary) Descriptor() ([]byte, []int) {
-	return file_exec_proto_rawDescGZIP(), []int{11}
+	return file_exec_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *StepSummary) GetStep() int32 {
@@ -1347,7 +1448,7 @@ type Log struct {
 
 func (x *Log) Reset() {
 	*x = Log{}
-	mi := &file_exec_proto_msgTypes[12]
+	mi := &file_exec_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1359,7 +1460,7 @@ func (x *Log) String() string {
 func (*Log) ProtoMessage() {}
 
 func (x *Log) ProtoReflect() protoreflect.Message {
-	mi := &file_exec_proto_msgTypes[12]
+	mi := &file_exec_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1372,7 +1473,7 @@ func (x *Log) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Log.ProtoReflect.Descriptor instead.
 func (*Log) Descriptor() ([]byte, []int) {
-	return file_exec_proto_rawDescGZIP(), []int{12}
+	return file_exec_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *Log) GetStep() int32 {
@@ -1416,7 +1517,7 @@ type JobResult struct {
 
 func (x *JobResult) Reset() {
 	*x = JobResult{}
-	mi := &file_exec_proto_msgTypes[13]
+	mi := &file_exec_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1428,7 +1529,7 @@ func (x *JobResult) String() string {
 func (*JobResult) ProtoMessage() {}
 
 func (x *JobResult) ProtoReflect() protoreflect.Message {
-	mi := &file_exec_proto_msgTypes[13]
+	mi := &file_exec_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1441,7 +1542,7 @@ func (x *JobResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use JobResult.ProtoReflect.Descriptor instead.
 func (*JobResult) Descriptor() ([]byte, []int) {
-	return file_exec_proto_rawDescGZIP(), []int{13}
+	return file_exec_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *JobResult) GetConclusion() StepConclusion {
@@ -1486,7 +1587,7 @@ type ResolveRequest struct {
 
 func (x *ResolveRequest) Reset() {
 	*x = ResolveRequest{}
-	mi := &file_exec_proto_msgTypes[14]
+	mi := &file_exec_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1498,7 +1599,7 @@ func (x *ResolveRequest) String() string {
 func (*ResolveRequest) ProtoMessage() {}
 
 func (x *ResolveRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_exec_proto_msgTypes[14]
+	mi := &file_exec_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1511,7 +1612,7 @@ func (x *ResolveRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResolveRequest.ProtoReflect.Descriptor instead.
 func (*ResolveRequest) Descriptor() ([]byte, []int) {
-	return file_exec_proto_rawDescGZIP(), []int{14}
+	return file_exec_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *ResolveRequest) GetId() int64 {
@@ -1541,7 +1642,7 @@ type ResolveResponse struct {
 
 func (x *ResolveResponse) Reset() {
 	*x = ResolveResponse{}
-	mi := &file_exec_proto_msgTypes[15]
+	mi := &file_exec_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1553,7 +1654,7 @@ func (x *ResolveResponse) String() string {
 func (*ResolveResponse) ProtoMessage() {}
 
 func (x *ResolveResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_exec_proto_msgTypes[15]
+	mi := &file_exec_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1566,7 +1667,7 @@ func (x *ResolveResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResolveResponse.ProtoReflect.Descriptor instead.
 func (*ResolveResponse) Descriptor() ([]byte, []int) {
-	return file_exec_proto_rawDescGZIP(), []int{15}
+	return file_exec_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *ResolveResponse) GetId() int64 {
@@ -1613,7 +1714,7 @@ type ResolvedAction struct {
 
 func (x *ResolvedAction) Reset() {
 	*x = ResolvedAction{}
-	mi := &file_exec_proto_msgTypes[16]
+	mi := &file_exec_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1625,7 +1726,7 @@ func (x *ResolvedAction) String() string {
 func (*ResolvedAction) ProtoMessage() {}
 
 func (x *ResolvedAction) ProtoReflect() protoreflect.Message {
-	mi := &file_exec_proto_msgTypes[16]
+	mi := &file_exec_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1638,7 +1739,7 @@ func (x *ResolvedAction) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResolvedAction.ProtoReflect.Descriptor instead.
 func (*ResolvedAction) Descriptor() ([]byte, []int) {
-	return file_exec_proto_rawDescGZIP(), []int{16}
+	return file_exec_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *ResolvedAction) GetRef() string {
@@ -1709,7 +1810,7 @@ var File_exec_proto protoreflect.FileDescriptor
 const file_exec_proto_rawDesc = "" +
 	"\n" +
 	"\n" +
-	"exec.proto\x12\x15ermite.runner.exec.v1\"\xea\x06\n" +
+	"exec.proto\x12\x15ermite.runner.exec.v1\"\xde\a\n" +
 	"\x05Frame\x124\n" +
 	"\x05hello\x18\x01 \x01(\v2\x1c.ermite.runner.exec.v1.HelloH\x00R\x05hello\x12.\n" +
 	"\x03run\x18\x02 \x01(\v2\x1a.ermite.runner.exec.v1.RunH\x00R\x03run\x127\n" +
@@ -1725,8 +1826,14 @@ const file_exec_proto_rawDesc = "" +
 	" \x01(\v2&.ermite.runner.exec.v1.StepAnnotationsH\x00R\x0fstepAnnotations\x12G\n" +
 	"\fstep_summary\x18\v \x01(\v2\".ermite.runner.exec.v1.StepSummaryH\x00R\vstepSummary\x12P\n" +
 	"\x0fresolve_request\x18\f \x01(\v2%.ermite.runner.exec.v1.ResolveRequestH\x00R\x0eresolveRequest\x12S\n" +
-	"\x10resolve_response\x18\r \x01(\v2&.ermite.runner.exec.v1.ResolveResponseH\x00R\x0fresolveResponseB\x06\n" +
-	"\x04body\"W\n" +
+	"\x10resolve_response\x18\r \x01(\v2&.ermite.runner.exec.v1.ResolveResponseH\x00R\x0fresolveResponse\x12;\n" +
+	"\x06secret\x18\x0e \x01(\v2!.ermite.runner.exec.v1.NamedValueH\x00R\x06secret\x125\n" +
+	"\x03var\x18\x0f \x01(\v2!.ermite.runner.exec.v1.NamedValueH\x00R\x03varB\x06\n" +
+	"\x04body\"6\n" +
+	"\n" +
+	"NamedValue\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value\"W\n" +
 	"\x05Hello\x12\x18\n" +
 	"\aversion\x18\x01 \x01(\tR\aversion\x12\x18\n" +
 	"\asandbox\x18\x02 \x01(\tR\asandbox\x12\x1a\n" +
@@ -1737,7 +1844,7 @@ const file_exec_proto_rawDesc = "" +
 	"\x03job\x18\x03 \x01(\v2\x1e.ermite.runner.exec.v1.JobSpecR\x03job\x1a6\n" +
 	"\bEnvEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x9d\x04\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xe3\x04\n" +
 	"\aJobSpec\x12#\n" +
 	"\rworkflow_path\x18\x01 \x01(\tR\fworkflowPath\x12#\n" +
 	"\rworkflow_yaml\x18\x02 \x01(\tR\fworkflowYaml\x12\x17\n" +
@@ -1759,7 +1866,8 @@ const file_exec_proto_rawDesc = "" +
 	"\n" +
 	"cache_port\x18\x0f \x01(\rR\tcachePort\x12\x1f\n" +
 	"\vcache_token\x18\x10 \x01(\tR\n" +
-	"cacheToken\"t\n" +
+	"cacheToken\x12)\n" +
+	"\x10secrets_withheld\x18\x13 \x01(\bR\x0fsecretsWithheldJ\x04\b\x11\x10\x12J\x04\b\x12\x10\x13R\asecretsR\x04vars\"t\n" +
 	"\x06Output\x129\n" +
 	"\x06stream\x18\x01 \x01(\x0e2!.ermite.runner.exec.v1.StreamKindR\x06stream\x12\x12\n" +
 	"\x04data\x18\x02 \x01(\fR\x04data\x12\x1b\n" +
@@ -1871,62 +1979,65 @@ func file_exec_proto_rawDescGZIP() []byte {
 }
 
 var file_exec_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
-var file_exec_proto_msgTypes = make([]protoimpl.MessageInfo, 19)
+var file_exec_proto_msgTypes = make([]protoimpl.MessageInfo, 20)
 var file_exec_proto_goTypes = []any{
 	(StreamKind)(0),         // 0: ermite.runner.exec.v1.StreamKind
 	(CancelKind)(0),         // 1: ermite.runner.exec.v1.CancelKind
 	(AnnotationLevel)(0),    // 2: ermite.runner.exec.v1.AnnotationLevel
 	(StepConclusion)(0),     // 3: ermite.runner.exec.v1.StepConclusion
 	(*Frame)(nil),           // 4: ermite.runner.exec.v1.Frame
-	(*Hello)(nil),           // 5: ermite.runner.exec.v1.Hello
-	(*Run)(nil),             // 6: ermite.runner.exec.v1.Run
-	(*JobSpec)(nil),         // 7: ermite.runner.exec.v1.JobSpec
-	(*Output)(nil),          // 8: ermite.runner.exec.v1.Output
-	(*Exit)(nil),            // 9: ermite.runner.exec.v1.Exit
-	(*Cancel)(nil),          // 10: ermite.runner.exec.v1.Cancel
-	(*StepStarted)(nil),     // 11: ermite.runner.exec.v1.StepStarted
-	(*StepCompleted)(nil),   // 12: ermite.runner.exec.v1.StepCompleted
-	(*Annotation)(nil),      // 13: ermite.runner.exec.v1.Annotation
-	(*StepAnnotations)(nil), // 14: ermite.runner.exec.v1.StepAnnotations
-	(*StepSummary)(nil),     // 15: ermite.runner.exec.v1.StepSummary
-	(*Log)(nil),             // 16: ermite.runner.exec.v1.Log
-	(*JobResult)(nil),       // 17: ermite.runner.exec.v1.JobResult
-	(*ResolveRequest)(nil),  // 18: ermite.runner.exec.v1.ResolveRequest
-	(*ResolveResponse)(nil), // 19: ermite.runner.exec.v1.ResolveResponse
-	(*ResolvedAction)(nil),  // 20: ermite.runner.exec.v1.ResolvedAction
-	nil,                     // 21: ermite.runner.exec.v1.Run.EnvEntry
-	nil,                     // 22: ermite.runner.exec.v1.JobResult.OutputsEntry
+	(*NamedValue)(nil),      // 5: ermite.runner.exec.v1.NamedValue
+	(*Hello)(nil),           // 6: ermite.runner.exec.v1.Hello
+	(*Run)(nil),             // 7: ermite.runner.exec.v1.Run
+	(*JobSpec)(nil),         // 8: ermite.runner.exec.v1.JobSpec
+	(*Output)(nil),          // 9: ermite.runner.exec.v1.Output
+	(*Exit)(nil),            // 10: ermite.runner.exec.v1.Exit
+	(*Cancel)(nil),          // 11: ermite.runner.exec.v1.Cancel
+	(*StepStarted)(nil),     // 12: ermite.runner.exec.v1.StepStarted
+	(*StepCompleted)(nil),   // 13: ermite.runner.exec.v1.StepCompleted
+	(*Annotation)(nil),      // 14: ermite.runner.exec.v1.Annotation
+	(*StepAnnotations)(nil), // 15: ermite.runner.exec.v1.StepAnnotations
+	(*StepSummary)(nil),     // 16: ermite.runner.exec.v1.StepSummary
+	(*Log)(nil),             // 17: ermite.runner.exec.v1.Log
+	(*JobResult)(nil),       // 18: ermite.runner.exec.v1.JobResult
+	(*ResolveRequest)(nil),  // 19: ermite.runner.exec.v1.ResolveRequest
+	(*ResolveResponse)(nil), // 20: ermite.runner.exec.v1.ResolveResponse
+	(*ResolvedAction)(nil),  // 21: ermite.runner.exec.v1.ResolvedAction
+	nil,                     // 22: ermite.runner.exec.v1.Run.EnvEntry
+	nil,                     // 23: ermite.runner.exec.v1.JobResult.OutputsEntry
 }
 var file_exec_proto_depIdxs = []int32{
-	5,  // 0: ermite.runner.exec.v1.Frame.hello:type_name -> ermite.runner.exec.v1.Hello
-	6,  // 1: ermite.runner.exec.v1.Frame.run:type_name -> ermite.runner.exec.v1.Run
-	8,  // 2: ermite.runner.exec.v1.Frame.output:type_name -> ermite.runner.exec.v1.Output
-	9,  // 3: ermite.runner.exec.v1.Frame.exit:type_name -> ermite.runner.exec.v1.Exit
-	10, // 4: ermite.runner.exec.v1.Frame.cancel:type_name -> ermite.runner.exec.v1.Cancel
-	11, // 5: ermite.runner.exec.v1.Frame.step_started:type_name -> ermite.runner.exec.v1.StepStarted
-	12, // 6: ermite.runner.exec.v1.Frame.step_completed:type_name -> ermite.runner.exec.v1.StepCompleted
-	16, // 7: ermite.runner.exec.v1.Frame.log:type_name -> ermite.runner.exec.v1.Log
-	17, // 8: ermite.runner.exec.v1.Frame.job_result:type_name -> ermite.runner.exec.v1.JobResult
-	14, // 9: ermite.runner.exec.v1.Frame.step_annotations:type_name -> ermite.runner.exec.v1.StepAnnotations
-	15, // 10: ermite.runner.exec.v1.Frame.step_summary:type_name -> ermite.runner.exec.v1.StepSummary
-	18, // 11: ermite.runner.exec.v1.Frame.resolve_request:type_name -> ermite.runner.exec.v1.ResolveRequest
-	19, // 12: ermite.runner.exec.v1.Frame.resolve_response:type_name -> ermite.runner.exec.v1.ResolveResponse
-	21, // 13: ermite.runner.exec.v1.Run.env:type_name -> ermite.runner.exec.v1.Run.EnvEntry
-	7,  // 14: ermite.runner.exec.v1.Run.job:type_name -> ermite.runner.exec.v1.JobSpec
-	0,  // 15: ermite.runner.exec.v1.Output.stream:type_name -> ermite.runner.exec.v1.StreamKind
-	1,  // 16: ermite.runner.exec.v1.Cancel.kind:type_name -> ermite.runner.exec.v1.CancelKind
-	3,  // 17: ermite.runner.exec.v1.StepCompleted.conclusion:type_name -> ermite.runner.exec.v1.StepConclusion
-	3,  // 18: ermite.runner.exec.v1.StepCompleted.outcome:type_name -> ermite.runner.exec.v1.StepConclusion
-	2,  // 19: ermite.runner.exec.v1.Annotation.level:type_name -> ermite.runner.exec.v1.AnnotationLevel
-	13, // 20: ermite.runner.exec.v1.StepAnnotations.annotations:type_name -> ermite.runner.exec.v1.Annotation
-	3,  // 21: ermite.runner.exec.v1.JobResult.conclusion:type_name -> ermite.runner.exec.v1.StepConclusion
-	22, // 22: ermite.runner.exec.v1.JobResult.outputs:type_name -> ermite.runner.exec.v1.JobResult.OutputsEntry
-	20, // 23: ermite.runner.exec.v1.ResolveResponse.actions:type_name -> ermite.runner.exec.v1.ResolvedAction
-	24, // [24:24] is the sub-list for method output_type
-	24, // [24:24] is the sub-list for method input_type
-	24, // [24:24] is the sub-list for extension type_name
-	24, // [24:24] is the sub-list for extension extendee
-	0,  // [0:24] is the sub-list for field type_name
+	6,  // 0: ermite.runner.exec.v1.Frame.hello:type_name -> ermite.runner.exec.v1.Hello
+	7,  // 1: ermite.runner.exec.v1.Frame.run:type_name -> ermite.runner.exec.v1.Run
+	9,  // 2: ermite.runner.exec.v1.Frame.output:type_name -> ermite.runner.exec.v1.Output
+	10, // 3: ermite.runner.exec.v1.Frame.exit:type_name -> ermite.runner.exec.v1.Exit
+	11, // 4: ermite.runner.exec.v1.Frame.cancel:type_name -> ermite.runner.exec.v1.Cancel
+	12, // 5: ermite.runner.exec.v1.Frame.step_started:type_name -> ermite.runner.exec.v1.StepStarted
+	13, // 6: ermite.runner.exec.v1.Frame.step_completed:type_name -> ermite.runner.exec.v1.StepCompleted
+	17, // 7: ermite.runner.exec.v1.Frame.log:type_name -> ermite.runner.exec.v1.Log
+	18, // 8: ermite.runner.exec.v1.Frame.job_result:type_name -> ermite.runner.exec.v1.JobResult
+	15, // 9: ermite.runner.exec.v1.Frame.step_annotations:type_name -> ermite.runner.exec.v1.StepAnnotations
+	16, // 10: ermite.runner.exec.v1.Frame.step_summary:type_name -> ermite.runner.exec.v1.StepSummary
+	19, // 11: ermite.runner.exec.v1.Frame.resolve_request:type_name -> ermite.runner.exec.v1.ResolveRequest
+	20, // 12: ermite.runner.exec.v1.Frame.resolve_response:type_name -> ermite.runner.exec.v1.ResolveResponse
+	5,  // 13: ermite.runner.exec.v1.Frame.secret:type_name -> ermite.runner.exec.v1.NamedValue
+	5,  // 14: ermite.runner.exec.v1.Frame.var:type_name -> ermite.runner.exec.v1.NamedValue
+	22, // 15: ermite.runner.exec.v1.Run.env:type_name -> ermite.runner.exec.v1.Run.EnvEntry
+	8,  // 16: ermite.runner.exec.v1.Run.job:type_name -> ermite.runner.exec.v1.JobSpec
+	0,  // 17: ermite.runner.exec.v1.Output.stream:type_name -> ermite.runner.exec.v1.StreamKind
+	1,  // 18: ermite.runner.exec.v1.Cancel.kind:type_name -> ermite.runner.exec.v1.CancelKind
+	3,  // 19: ermite.runner.exec.v1.StepCompleted.conclusion:type_name -> ermite.runner.exec.v1.StepConclusion
+	3,  // 20: ermite.runner.exec.v1.StepCompleted.outcome:type_name -> ermite.runner.exec.v1.StepConclusion
+	2,  // 21: ermite.runner.exec.v1.Annotation.level:type_name -> ermite.runner.exec.v1.AnnotationLevel
+	14, // 22: ermite.runner.exec.v1.StepAnnotations.annotations:type_name -> ermite.runner.exec.v1.Annotation
+	3,  // 23: ermite.runner.exec.v1.JobResult.conclusion:type_name -> ermite.runner.exec.v1.StepConclusion
+	23, // 24: ermite.runner.exec.v1.JobResult.outputs:type_name -> ermite.runner.exec.v1.JobResult.OutputsEntry
+	21, // 25: ermite.runner.exec.v1.ResolveResponse.actions:type_name -> ermite.runner.exec.v1.ResolvedAction
+	26, // [26:26] is the sub-list for method output_type
+	26, // [26:26] is the sub-list for method input_type
+	26, // [26:26] is the sub-list for extension type_name
+	26, // [26:26] is the sub-list for extension extendee
+	0,  // [0:26] is the sub-list for field type_name
 }
 
 func init() { file_exec_proto_init() }
@@ -1948,6 +2059,8 @@ func file_exec_proto_init() {
 		(*Frame_StepSummary)(nil),
 		(*Frame_ResolveRequest)(nil),
 		(*Frame_ResolveResponse)(nil),
+		(*Frame_Secret)(nil),
+		(*Frame_Var)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -1955,7 +2068,7 @@ func file_exec_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_exec_proto_rawDesc), len(file_exec_proto_rawDesc)),
 			NumEnums:      4,
-			NumMessages:   19,
+			NumMessages:   20,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

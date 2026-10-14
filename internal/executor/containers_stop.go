@@ -121,7 +121,7 @@ func (j *job) fallbackCleanup() {
 		return
 	}
 	for _, e := range j.cleanupContainers(nil) {
-		j.cfg.Log.Warn().Err(e).Msg("fallback cleanup of the job containers")
+		j.diagWarn(e, "fallback cleanup of the job containers")
 	}
 }
 
@@ -273,7 +273,7 @@ func (j *job) warnTo(s *stepRun, msg string) {
 		j.tagged(s.num, "##[warning]", msg)
 		return
 	}
-	j.cfg.Log.Warn().Msg(msg)
+	j.diagWarn(nil, msg)
 }
 
 // absent reports whether docker's answer to a removal says the object does not

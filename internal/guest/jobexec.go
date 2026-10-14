@@ -204,7 +204,7 @@ func cancelKind(k execpb.CancelKind) executor.CancelReason {
 
 // runJob runs the job of a Run frame with the executor and reports on conn.
 // It returns the exit code to report.
-func runJob(ctx context.Context, conn *execstream.Conn, cfg ExecConfig, spec *execpb.JobSpec) int {
+func runJob(ctx context.Context, conn *execstream.Conn, cfg ExecConfig, spec *execpb.JobSpec, vals jobValues) int {
 	su, err := LookupStepUser(cfg.StepUser, cfg.AllowRootSteps)
 	if err != nil {
 		// Reported like any failure of "Set up job": the job fails, with the reason
@@ -259,6 +259,7 @@ func runJob(ctx context.Context, conn *execstream.Conn, cfg ExecConfig, spec *ex
 		Home:          su.Home, ToolCache: os.Getenv("RUNNER_TOOL_CACHE"), BaseEnv: stepEnv(os.Environ(), su), Credential: su.Credential,
 		CacheURL: cacheURL(os.Getenv("ERMITE_GATEWAY"), spec.GetCachePort()), CacheToken: spec.GetCacheToken(),
 		Debug: spec.GetDebug(), Reporter: rep, Actions: executor.DefaultActionsConfig(res.resolve), Log: zerowrap.FromCtx(ctx),
+		Secrets: vals.secrets, Vars: vals.vars, SecretsWithheld: spec.GetSecretsWithheld(),
 		SendAnnotations: spec.GetSendAnnotations(), SendSummaries: spec.GetSendSummaries(),
 		TermAfter: cfg.TermAfter, KillAfter: cfg.KillAfter, WaitDelay: cfg.WaitDelay,
 	})

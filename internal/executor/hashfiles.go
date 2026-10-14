@@ -68,7 +68,7 @@ func (j *job) hashFilesFunc() expr.Func {
 			//nolint:staticcheck // GitHub's text, with its final period
 			return nil, fmt.Errorf("hashFiles('%s') couldn't finish within %d seconds.", desc, int(hashFilesTimeout/time.Second))
 		case err != nil:
-			j.cfg.Log.Debug().Err(err).Msg("hashFiles failed")
+			j.diagDebug(err, "hashFiles failed")
 			return nil, fmt.Errorf("hashFiles('%s') failed. Fail to hash files under directory '%s'", desc, ws)
 		}
 		return expr.String(sum), nil

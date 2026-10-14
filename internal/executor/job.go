@@ -78,6 +78,13 @@ type Config struct {
 	// ACTIONS_RUNTIME_TOKEN of the node and docker actions of the job: the cache
 	// service of the runner. The token is masked in the log.
 	CacheURL, CacheToken string
+	// Secrets and Vars are Job.secrets and Job.vars. Secrets are registered in
+	// the masker before the first step and form the secrets context; they are
+	// never logged. Vars are the fallback of the vars context.
+	Secrets, Vars map[string]string
+	// SecretsWithheld says that the server did not send secrets because the run
+	// is not trusted: "Set up job" says so.
+	SecretsWithheld bool
 	// Debug turns ##[debug] lines on (ACTIONS_STEP_DEBUG).
 	Debug bool
 	// Actions configures the actions of the job (resolution, downloads, Node.js,
@@ -163,8 +170,8 @@ type job struct {
 	baseEnv     []string
 	lookupPath  string
 	before      map[string]bool
-	// masker hides the secrets in everything reported; it is set once the
-	// contexts are built, before any step runs.
+	// masker hides the secrets in everything reported; Run sets it, with the
+	// secrets of the job, before the first report.
 	masker atomic.Pointer[masker]
 	// actions holds what the pre-job phase loaded (see prepareActions).
 	actions *actionState
@@ -188,6 +195,23 @@ type job struct {
 
 func (j *job) mask(s string) string { return j.masker.Load().mask(s) }
 
+// The runner's own diagnostics (Config.Log) bypass the reporter, hence the
+// masker: a path, a docker message or an error can hold a secret. Every
+// diagnostic of the executor goes through these helpers, which mask the
+// rendered error, message and fields (TestDiagnosticsAreMasked checks that no
+// other code calls Config.Log).
+
+// diagWarn logs a warning with an optional error and string fields (key,
+// value, ...).
+func (j *job) diagWarn(err error, msg string, kv ...string) {
+	j.diag(false, err, msg, kv)
+}
+
+// diagDebug is diagWarn at debug level.
+func (j *job) diagDebug(err error, msg string, kv ...string) {
+	j.diag(true, err, msg, kv)
+}
+
 func (j *job) now() time.Time {
 	if j.cfg.Now != nil {
 		return j.cfg.Now()
@@ -202,6 +226,13 @@ func Run(cancel *Canceller, cfg Config) Result {
 		cancel = NewCanceller()
 	}
 	j := &job{cfg: cfg, cancel: cancel, trackID: "github_" + uuid.NewString(), matchers: &matcherRoot{}}
+	// The masker exists before anything is reported, with the secrets of the job
+	// registered (Worker.cs:158-171 does it before the job starts); the token and
+	// the cache token join it once the contexts are built. GitHub's SecretMasker
+	// has no minimum length (SecretMasker.AddValue ignores only null or empty
+	// values), so a one-character secret is masked too.
+	j.masker.Store(newMasker())
+	registerSecrets(j.masker.Load(), cfg.Secrets)
 	j.cfg.Reporter = &maskReporter{j: j, next: cfg.Reporter}
 	defer func() {
 		if j.fc != nil {
@@ -450,8 +481,11 @@ func (j *job) setUp() ([]qstep, error) {
 		layout = NewLayout(home, filepath.Base(layout.Workspace), cfg.ToolCache)
 		state.WithLayout(layout)
 	}
+	state.WithJobData(cfg.Secrets, cfg.Vars)
 	j.state = state
-	j.masker.Store(newMasker(state.Secrets()...))
+	for _, v := range state.Secrets() {
+		j.masker.Load().add(v)
+	}
 	j.masker.Load().add(cfg.CacheToken)
 
 	// Features that arrive in later phases fail the job with a clear message.
@@ -687,6 +721,10 @@ const (
 	defaultCacheMode    = "write"
 )
 
+// SecretsWithheldLine is the line of "Set up job" for a run whose secrets the
+// server withheld (an ermite text: GitHub has none for fork pull requests).
+const SecretsWithheldLine = "Secrets are not available to this job: the run was started by a limited token."
+
 // printTokenInfo prints the GITHUB_TOKEN permissions group, the secret source
 // and the cache mode.
 //
@@ -709,6 +747,9 @@ func (j *job) printTokenInfo() {
 		j.state.SetGitHub("secret_source", src)
 	}
 	j.out(1, "Secret source: "+src)
+	if j.cfg.SecretsWithheld {
+		j.out(1, SecretsWithheldLine)
+	}
 	j.out(1, "Cache mode: "+defaultCacheMode)
 }
 
@@ -723,7 +764,7 @@ func (j *job) printTokenInfo() {
 func (j *job) jobDisplayName() string {
 	ctx := context.Background()
 	fallback := func(why string, err error) string {
-		j.cfg.Log.Warn().Err(err).Str("job_key", j.cfg.JobKey).Msg("job display name: " + why + ", using the job key")
+		j.diagWarn(err, "job display name: "+why+", using the job key", "job_key", j.cfg.JobKey)
 		return j.cfg.JobKey
 	}
 	j.mu.Lock()
@@ -795,4 +836,18 @@ func sameMatrix(a, b *expr.Dictionary) bool {
 		}
 	}
 	return true
+}
+
+func (j *job) diag(debug bool, err error, msg string, kv []string) {
+	ev := j.cfg.Log.Warn()
+	if debug {
+		ev = j.cfg.Log.Debug()
+	}
+	if err != nil {
+		ev = ev.Str("error", j.mask(err.Error()))
+	}
+	for i := 0; i+1 < len(kv); i += 2 {
+		ev = ev.Str(kv[i], j.mask(kv[i+1]))
+	}
+	ev.Msg(j.mask(msg))
 }

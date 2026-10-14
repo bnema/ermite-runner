@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -409,10 +410,26 @@ func (s *fakeSandbox) Start(ctx context.Context, spec sandbox.JobSpec) (sandbox.
 		defer func() { _ = guest.Close() }()
 		c := execstream.NewConn(guest)
 		_ = c.Send(&execpb.Frame{Body: &execpb.Frame_Hello{Hello: &execpb.Hello{Version: "test", Sandbox: "container"}}})
-		f, err := c.Recv()
-		if err != nil || f.GetRun() == nil {
+		// NamedValue frames (secrets, variables) come before Run.
+		vals := &seenValues{secrets: map[string]string{}, vars: map[string]string{}}
+		var f *execpb.Frame
+		for {
+			var err error
+			if f, err = c.Recv(); err != nil {
+				return
+			}
+			if f.GetSecret() != nil {
+				vals.secrets[f.GetSecret().Name] = f.GetSecret().Value
+			} else if f.GetVar() != nil {
+				vals.vars[f.GetVar().Name] = f.GetVar().Value
+			} else {
+				break
+			}
+		}
+		if f.GetRun() == nil {
 			return
 		}
+		lastValues.Store(vals)
 		cancels := make(chan *execpb.Cancel, 4)
 		go func() {
 			for {
@@ -606,3 +623,9 @@ func (s *fakeServer) Result(jobID string) hosttest.Result {
 	defer s.mu.Unlock()
 	return hosttest.Result{Steps: s.steps}
 }
+
+// seenValues are the secrets and variables the scripted executor received
+// before the Run frame.
+type seenValues struct{ secrets, vars map[string]string }
+
+var lastValues atomic.Pointer[seenValues]
