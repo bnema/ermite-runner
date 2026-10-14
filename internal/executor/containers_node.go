@@ -86,7 +86,11 @@ func (j *job) runNodeInContainer(s *stepRun, c *container, script string, env *o
 	j.mu.Lock()
 	wd := j.state.GitHub("workspace")
 	j.mu.Unlock()
-	argv, penv := j.execArgv(c, c.resolvePath(wd), j.handlerEnv(env), file, []string{c.resolvePath(`"` + script + `"`)})
+	henv := j.handlerEnv(env)
+	if err := checkEnvNames(henv.Keys()); err != nil {
+		return fail(err)
+	}
+	argv, penv := j.execArgv(c, c.resolvePath(wd), henv, file, []string{c.resolvePath(`"` + script + `"`)})
 	s.rawEnvList = penv
 	return j.runProc(s, file, j.state.Layout().WorkRoot, argv, "Node Action run completed with exit code %d", cancel)
 }

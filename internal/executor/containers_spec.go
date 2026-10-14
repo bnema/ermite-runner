@@ -276,10 +276,19 @@ func containerStrings(v expr.Value, what string) ([]string, error) {
 // that the text is one argument that cannot be taken for an option (the first
 // character is a letter or a digit) and holds no space or control character.
 var imageRefRe = regexp.MustCompile(
-	`^(?:(?:[A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9-]*[A-Za-z0-9])(?:\.(?:[A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9-]*[A-Za-z0-9]))*(?::[0-9]+)?/)?` +
+	`^(?:(?:` + domainName + `|` + ipv6Address + `)(?::[0-9]+)?/)?` +
 		`[A-Za-z0-9]+(?:(?:[._]|__|-+)[A-Za-z0-9]+)*(?:/[A-Za-z0-9]+(?:(?:[._]|__|-+)[A-Za-z0-9]+)*)*` +
 		`(?::[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?` +
 		`(?:@[A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*:[0-9A-Fa-f]{32,})?$`)
+
+// domainName and ipv6Address are the domain grammar of distribution/reference
+// (reference/regexp.go: domainNameComponent, domainName, ipv6address),
+// copied here instead of importing the module.
+const (
+	domainNameComponent = `(?:[A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9-]*[A-Za-z0-9])`
+	domainName          = domainNameComponent + `(?:\.` + domainNameComponent + `)*`
+	ipv6Address         = `\[(?:[A-Fa-f0-9:]+)\]`
+)
 
 // validImageRef reports whether image can be passed to docker pull and create.
 func validImageRef(image string) bool { return len(image) <= 1024 && imageRefRe.MatchString(image) }
@@ -360,6 +369,9 @@ func containerEnv(v expr.Value) ([]Pair, error) {
 	}
 	var out []Pair
 	for _, p := range d.Pairs() {
+		if err := checkEnvNames([]string{p.Key}); err != nil {
+			return nil, err
+		}
 		s, err := asContainerString(p.Value, "container env "+p.Key)
 		if err != nil {
 			return nil, err

@@ -101,7 +101,11 @@ func (j *job) containerScript(c *container, plan ShellPlan, in scriptIn, s *step
 	if len(sc.Argv) > 1 {
 		rest = sc.Argv[1:]
 	}
-	a, penv := j.execArgv(c, wd, j.handlerEnv(s.env), plan.CommandPath, rest)
+	henv := j.handlerEnv(s.env)
+	if err := checkEnvNames(henv.Keys()); err != nil {
+		return nil, err
+	}
+	a, penv := j.execArgv(c, wd, henv, plan.CommandPath, rest)
 	s.rawEnvList = penv
 	return a, nil
 }

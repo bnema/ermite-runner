@@ -203,6 +203,9 @@ func (j *job) runDocker(s *stepRun, def *actionDef, in *inputSet, env *ordered, 
 		v, _ := runtime.Get(k)
 		env.Set(k, v)
 	}
+	if err := checkEnvNames(env.Keys()); err != nil {
+		return fail(err)
+	}
 	cenv := newOrdered()
 	for _, k := range env.Keys() {
 		v, _ := env.Get(k)

@@ -27,6 +27,14 @@ func eqOpt(flag, value string) dockerPart {
 	return dockerPart{line: flag + `="` + value + `"`, args: []string{flag + "=" + value}}
 }
 
+// Accepted risk (review of the pull request, GO-004-R1/R2): a workflow can set
+// DOCKER_*, proxy, PATH or SSH_AUTH_SOCK variables for its container, and the
+// ones listed here travel as NAME=value on the arguments of the docker command,
+// which the docker CLI reads. The CLI runs in the job's own sandbox, which is
+// the containment boundary: the job can already run docker with any
+// environment and read its own process arguments, and the C# runner has the
+// same exposure. Values still go through the masker in the logs.
+//
 // cliSensitive are the variables the docker CLI itself reads (its daemon, its
 // configuration, its proxy and TLS settings, the loader): handing one of them
 // to the process of docker as the value of a container variable would change
@@ -69,6 +77,20 @@ func envLookup(env []string, key string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// checkEnvNames refuses the names `docker -e NAME` would take for NAME=value:
+// an empty one, or one holding "=" or NUL. Such a key would let a workflow set
+// a variable of the docker CLI itself ("HTTP_PROXY=http://x/?y") past the exact
+// name check of cliSensitive. The runner passes them on and docker decides; a
+// name like that is never valid in the environment of a process.
+func checkEnvNames(keys []string) error {
+	for _, k := range keys {
+		if k == "" || strings.ContainsAny(k, "=\x00") {
+			return ghErrorf("Invalid environment variable name '%s': a name cannot be empty or contain '=' or NUL", strings.ReplaceAll(k, "\x00", `\0`))
+		}
+	}
+	return nil
 }
 
 // envKV is DockerUtil.CreateEscapedOption("-e", key, value), or ("-e", key)

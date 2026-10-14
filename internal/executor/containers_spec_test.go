@@ -100,8 +100,9 @@ func TestConvertContainerForms(t *testing.T) {
 
 func TestImageReferenceGrammar(t *testing.T) {
 	good := []string{"ubuntu", "ubuntu:24.04", "ghcr.io/o/img:1", "localhost:5000/a/b:tag", "a/b_c.d-e", "redis@sha256:" + strings.Repeat("a", 64),
-		"r.io:443/x/y:1@sha256:" + strings.Repeat("0", 64), "Ubuntu:24.04"}
-	bad := []string{"", "--help", "-x", "-", " a", "a b", "a\nb", "a;b", "a$(x)", "a:", "a:-x", "a@sha256:zz", "/a", "a//b", "a:b:c", strings.Repeat("a", 1100)}
+		"r.io:443/x/y:1@sha256:" + strings.Repeat("0", 64), "Ubuntu:24.04",
+		"[::1]:5000/x", "[::1]/x/y:tag", "[2001:db8::1]:443/a/b@sha256:" + strings.Repeat("a", 64)}
+	bad := []string{"", "--help", "-x", "-", " a", "a b", "a\nb", "a;b", "a$(x)", "a:", "a:-x", "a@sha256:zz", "/a", "a//b", "a:b:c", "[::1/x", "[]/x", "[zz]/x", "[::1]x", "[::1]:/x", strings.Repeat("a", 1100)}
 	for _, g := range good {
 		if !validImageRef(g) {
 			t.Errorf("rejected %q", g)
