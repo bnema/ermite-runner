@@ -414,7 +414,7 @@ func (s *containerSandbox) runScratch(ctx context.Context, spec sandbox.JobSpec)
 			return err
 		}
 	}
-	return os.Chmod(filepath.Join(mnt, "tmp"), 0o1777)
+	return os.Chmod(filepath.Join(mnt, "tmp"), sandbox.TmpMode)
 }
 
 // runNetwork creates the job's bridge and installs the firewall policy.

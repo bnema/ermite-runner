@@ -2,6 +2,8 @@
 
 package sandbox
 
+import "os"
+
 // The host/guest contract shared by the drivers and the guest side
 // (internal/guest). Changing a value here changes both sides at once because
 // the host always attaches its own executable to the sandbox.
@@ -37,3 +39,9 @@ const (
 	// CmdlineExternals=1: the externals disk is attached as the fourth drive.
 	CmdlineExternals = "ermite.externals"
 )
+
+// TmpMode is the mode of the job's /tmp, as on GitHub's runners: everyone may
+// write, only the owner may remove or rename (sticky). os.FileMode has its own
+// sticky flag: the octal 0o1777 would give a plain 0777, which programs that
+// check their temp directory refuse as replaceable.
+const TmpMode = 0o777 | os.ModeSticky

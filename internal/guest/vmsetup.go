@@ -140,7 +140,7 @@ func setupVM(log zerowrap.Logger, args map[string]string) error {
 			log.Warn().Err(err).Str("target", m.dst).Msg("init: mount")
 		}
 	}
-	_ = os.Chmod("/tmp", 0o1777)
+	_ = os.Chmod("/tmp", sandbox.TmpMode)
 
 	gw := args[sandbox.CmdlineGateway]
 	if err := writeResolvConf(gw); err != nil {
