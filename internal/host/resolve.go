@@ -77,8 +77,10 @@ func checkUses(u string) error {
 	return nil
 }
 
-// badPathRune: control characters (NUL included) and the backslash.
-func badPathRune(r rune) bool { return r < ' ' || r == 0x7f || r == '\\' || r == utf8.RuneError }
+// badPathRune: control characters (NUL included) and the backslash. Invalid
+// UTF-8 is refused for the whole value by utf8.ValidString; a literal U+FFFD is a
+// valid character.
+func badPathRune(r rune) bool { return r < ' ' || r == 0x7f || r == '\\' }
 
 func cut(s string) string {
 	if len(s) > 80 {

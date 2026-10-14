@@ -10,14 +10,14 @@ import (
 	"io"
 	"math/rand/v2"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
+
+	"bnema.dev/ermite-runner/internal/urlorigin"
 )
 
 // Constants of ActionManager.DownloadRepositoryArchive (ActionManager.cs:1600-1760).
@@ -44,18 +44,17 @@ type errAccessDenied struct{ url string }
 
 func (e errAccessDenied) Error() string { return fmt.Sprintf("Access denied to '%s' ()", e.url) }
 
-// originOf is scheme://host[:port] of an absolute http(s) URL, lower case and
-// without the default port, "" for anything else.
-func originOf(raw string) string {
-	u, err := url.Parse(raw)
-	if err != nil || u.Host == "" || u.User != nil || (u.Scheme != "http" && u.Scheme != "https") {
-		return ""
-	}
-	host, port := strings.ToLower(u.Hostname()), u.Port()
-	if port == "" || (u.Scheme == "http" && port == "80") || (u.Scheme == "https" && port == "443") {
-		return u.Scheme + "://" + host
-	}
-	return u.Scheme + "://" + host + ":" + port
+// originOf is the canonical origin of a URL (urlorigin.Canonical): the one the
+// host and the executor both compare, scheme, host and port with the default
+// port filled in, "" for anything that is not an absolute http(s) URL.
+func originOf(raw string) string { return urlorigin.Canonical(raw) }
+
+// tokenAllowed reports whether the token of ra may be sent to its tarball URL:
+// the URL is on exactly the origin the host named, compared in canonical form
+// (default ports filled in, IPv6 hosts in brackets).
+func tokenAllowed(ra ResolvedAction) bool {
+	o := originOf(ra.AuthOrigin)
+	return ra.Token != "" && o != "" && o == originOf(ra.TarballURL)
 }
 
 // archiveClient returns the client that downloads the archives. It follows
@@ -151,7 +150,7 @@ func (j *job) downloadArchive(ctx context.Context, num int, ra ResolvedAction, f
 func (j *job) fetch(ctx context.Context, ra ResolvedAction, file string) error {
 	url, token := ra.TarballURL, ra.Token
 	// The token goes only to the origin the host named, never by the URL alone.
-	if token != "" && (ra.AuthOrigin == "" || ra.AuthOrigin != originOf(url)) {
+	if !tokenAllowed(ra) {
 		token = ""
 	}
 	ctx, cancel := context.WithTimeout(ctx, downloadTimeout)

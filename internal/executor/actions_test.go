@@ -866,3 +866,34 @@ func TestArchiveRedirectChainNeverReauthorises(t *testing.T) {
 		}
 	}
 }
+
+// GO-012: the token goes to the exact origin, in canonical form.
+func TestTokenAllowedOrigins(t *testing.T) {
+	for _, tc := range []struct {
+		url, origin string
+		ok          bool
+	}{
+		{"https://ermite.example/x", "https://ermite.example", true},
+		{"https://ermite.example:443/x", "https://ermite.example", true}, // default port, either way
+		{"https://ermite.example/x", "https://ermite.example:443", true},
+		{"https://ERMITE.example/x", "https://ermite.example", true},
+		{"https://[::1]:8443/x", "https://[::1]:8443", true},
+		{"https://[::1]:8443/x", "https://[::1:8443]", false}, // the collision of the review
+		{"https://[::1:8443]/x", "https://[::1]:8443", false},
+		{"https://[::1]/x", "https://[::1]:443", true},
+		{"https://[::1]/x", "https://[::1]:8443", false},
+		{"http://ermite.example/x", "https://ermite.example", false},
+		{"https://ermite.example:8443/x", "https://ermite.example", false},
+		{"https://sub.ermite.example/x", "https://ermite.example", false},
+		{"https://ermite.example/x", "", false},
+		{"https://ermite.example/x", "not an origin", false},
+		{"https://u:p@ermite.example/x", "https://ermite.example", false},
+	} {
+		if got := tokenAllowed(ResolvedAction{Token: "t", TarballURL: tc.url, AuthOrigin: tc.origin}); got != tc.ok {
+			t.Errorf("url %q origin %q: %v, want %v", tc.url, tc.origin, got, tc.ok)
+		}
+	}
+	if tokenAllowed(ResolvedAction{TarballURL: "https://a.test/x", AuthOrigin: "https://a.test"}) {
+		t.Error("no token, nothing to allow")
+	}
+}

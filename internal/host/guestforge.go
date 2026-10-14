@@ -8,8 +8,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/url"
 	"strings"
+
+	"bnema.dev/ermite-runner/internal/urlorigin"
 )
 
 // serverURLKeys are the keys of the github context that actions use to reach
@@ -110,23 +111,10 @@ func RewriteServerURLs(contexts, target string) (string, error) {
 }
 
 // originOf returns "scheme://host[:port]" of an http(s) URL, lower-cased and
-// without the default port, or "" for anything else (including URLs with
-// credentials, which are never rewritten).
-func originOf(raw string) string {
-	u, err := url.Parse(raw)
-	if err != nil || u.Host == "" || u.User != nil {
-		return ""
-	}
-	scheme := strings.ToLower(u.Scheme)
-	if scheme != "http" && scheme != "https" {
-		return ""
-	}
-	host, port := strings.ToLower(u.Hostname()), u.Port()
-	if port == "" || (scheme == "http" && port == "80") || (scheme == "https" && port == "443") {
-		return scheme + "://" + host
-	}
-	return scheme + "://" + host + ":" + port
-}
+// without the default port, an IPv6 host in brackets, or "" for anything else
+// (including URLs with credentials, which are never rewritten). It is
+// urlorigin.Prefix, the form the executor compares by urlorigin.Canonical.
+func originOf(raw string) string { return urlorigin.Prefix(raw) }
 
 func marshalNoEscape(v any) (json.RawMessage, error) {
 	var b bytes.Buffer

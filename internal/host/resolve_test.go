@@ -115,10 +115,11 @@ func TestCheckUses(t *testing.T) {
 		"actions/checkout@v4": true, "o/r/sub/dir@refs/heads/feat/x": true, "o/r@" + strings.Repeat("a", 40): true, "o/r.go_x-y@v1.2.3": true,
 		// GO-011: the path of the action is a path, not a repository name.
 		"o/r/action+tools@v1": true, "o/r/déploiement/日本語@v1": true, "o/r/with space/x@v1": true, "o/r/a(b)[c]{d}~e#f%g@v1": true,
+		"o/r/a\ufffdb@v1": true, "o/r/\ufffd@v1": true, // a literal U+FFFD is a valid character
 		"o/r/" + long(255) + "@v1": true, "o/r/.github/actions/x@v1": true, "o/r/.hidden@v1": true, "o/r/a..b@v1": true,
 		"": false, "o/r": false, "o@v1": false, "o/r@": false, "/r@v1": false, "o//r@v1": false, "o/../r@v1": false, "o/r/..@v1": false,
 		"o/r/a/../b@v1": false, "o/r/./a@v1": false, "o/r/a//b@v1": false, "o/r/a/@v1": false,
-		"o/r/a\\b@v1": false, "o/r/a\x00b@v1": false, "o/r/a\nb@v1": false, "o/r/a\x7fb@v1": false, "o/r/\xff@v1": false,
+		"o/r/a\\b@v1": false, "o/r/a\x00b@v1": false, "o/r/a\nb@v1": false, "o/r/a\x7fb@v1": false, "o/r/\xff@v1": false, "o/r/a\xc3(b@v1": false, "o/r/\xed\xa0\x80@v1": false,
 		"o/r/" + long(256) + "@v1": false, long(101) + "/r@v1": false, "o/" + long(101) + "@v1": false,
 		"o/r@" + long(256): false, "o/r/" + strings.Repeat("a/", 600) + "x@v1": false,
 		"o/r@v1 x": false, "o/r@v1\n": false, "o/r@v~1": false, "o/r@v:1": false, "o /r@v1": false, "o/r@v1@v2": false,
@@ -275,5 +276,30 @@ func TestResolveResponseTokenOrigin(t *testing.T) {
 	a := conv(j, ermiteSrc, "https://ermite.example/-/github/api/repos/o/r/tarball/abc", "t")
 	if a.TarballUrl != "http://10.0.2.2:8088/-/github/api/repos/o/r/tarball/abc" || a.AuthOrigin != "http://10.0.2.2:8088" || a.Token != "t" {
 		t.Errorf("%+v", a)
+	}
+}
+
+// GO-012 on the archive tokens: with IPv6 hosts the origin named for the token is
+// exact, and a look-alike is not accepted.
+func TestResolveResponseTokenOriginIPv6(t *testing.T) {
+	j := resolveJob(&resolveStub{})
+	j.setOrigins(`{"github":{"server_url":"https://[::1]:8443"}}`, "https://[fd00::9]", "http://[fd00::2]:8088")
+	ermiteSrc := ermite.ActionSource_ACTION_SOURCE_ERMITE
+	conv := func(url string) *execpb.ResolvedAction {
+		return j.resolveResponse(&ermite.ResolveActionsResponse{Actions: []*ermite.ResolvedAction{{Source: ermiteSrc, TarballUrl: url, Token: "t"}}}, 1).Actions[0]
+	}
+	// The public origin is rewritten to the guest one.
+	if a := conv("https://[::1]:8443/-/github/api/repos/o/r/tarball/abc"); a.Token != "t" || a.AuthOrigin != "http://[fd00::2]:8088" || a.TarballUrl != "http://[fd00::2]:8088/-/github/api/repos/o/r/tarball/abc" {
+		t.Errorf("%+v", a)
+	}
+	// The runner's own origin, default port.
+	if a := conv("https://[fd00::9]:443/x"); a.Token != "t" || a.AuthOrigin != "https://[fd00::9]" {
+		t.Errorf("%+v", a)
+	}
+	// The look-alike host "::1:8443" and other ports are not ermite.
+	for _, u := range []string{"https://[::1:8443]/x", "https://[::1]:8444/x", "http://[::1]:8443/x", "https://[::1]/x"} {
+		if a := conv(u); a.Token != "" || a.AuthOrigin != "" {
+			t.Errorf("%s: token kept: %+v", u, a)
+		}
 	}
 }
