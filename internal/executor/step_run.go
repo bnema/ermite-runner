@@ -24,6 +24,12 @@ type qstep struct {
 	cond string
 	// setup, when set, is the whole step: it runs instead of the node.
 	setup func(s *stepRun, cancel <-chan struct{}) stepResult
+	// ctxID is the context name of a runner step of the job (a Guid in "N"
+	// format), assigned before the step runs: its final result, skipped
+	// included, is registered in the steps context (JobExtension.cs:434-440,
+	// StepsRunner.CompleteStep, ExecutionContext.UpdateGlobalStepsContext:644).
+	// Empty for the setup steps a composite action runs (CompositeActionHandler.cs:121-123).
+	ctxID string
 }
 
 func (j *job) statusFuncs() workflow.StatusFuncs {
@@ -159,6 +165,7 @@ func (j *job) runStep(num int, q qstep) {
 	name := q.name
 	if q.setup != nil {
 		s.name = name
+		s.ctxID = q.ctxID
 		rep.StepStarted(num, name, j.now())
 		r := j.runGuarded(s, q, true)
 		rep.StepCompleted(num, name, r.conclusion(), j.now())
@@ -207,6 +214,9 @@ func (j *job) finishStep(s *stepRun, res stepResult) {
 	// generated ids are hidden: only the main stage and embedded steps count.
 	if s.n != nil && (s.parent != nil || s.stage == stageMain) && st != nil {
 		j.state.SetStepResult(st.ID, string(outcome.conclusion()), string(res.conclusion()))
+	}
+	if s.ctxID != "" {
+		j.state.SetStepResult(s.ctxID, string(outcome.conclusion()), string(res.conclusion()))
 	}
 	if s.parent == nil {
 		j.recordOutcome(s.num, outcome.conclusion())
@@ -333,6 +343,11 @@ func (j *job) runGuarded(s *stepRun, q qstep, ok bool) stepResult {
 		r = resFailed
 	}
 
+	// The step was marked failed before it ran (CompositeActionHandler.cs:302):
+	// nothing resets that when it goes well (RunStepAsync :481-527).
+	if s.envFailed && r == resSucceeded {
+		r = resFailed
+	}
 	// Merge the result of the commands (StepsRunner.cs:347-351).
 	if s.cmdResult != nil {
 		r = merge(&r, *s.cmdResult)

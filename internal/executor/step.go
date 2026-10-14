@@ -30,7 +30,12 @@ type stepRun struct {
 	overrides *ordered // the step env of this step and of its composite parents
 	cmdResult *stepResult
 	outcome   *stepResult
-	cmds      *commandManager
+	// envFailed: the env of an embedded step failed to evaluate, which marked it
+	// failed before it ran (CompositeActionHandler.cs:296-302).
+	envFailed bool
+	// ctxID: see qstep.ctxID.
+	ctxID string
+	cmds  *commandManager
 	// result is ExecutionContext.Result of a step that runs embedded steps: it
 	// gives action_status to them.
 	result *stepResult

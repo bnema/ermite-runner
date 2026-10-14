@@ -5,6 +5,7 @@ package executor
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -250,5 +251,57 @@ func TestDockerfileContextIsTheLexicalParent(t *testing.T) {
 	}
 	if f, c := cs[0][4], cs[0][5]; !strings.HasSuffix(f, "/./act/sub/../Dockerfile") || !strings.HasSuffix(c, "/act") || strings.Contains(c, "..") || strings.Contains(c, "/./") {
 		t.Errorf("-f %q, context %q", f, c)
+	}
+}
+
+// act-docker-image, act-docker-dockerfile: "Pull <image>" and "Build <action>"
+// are runner steps of the job and are in the steps context under a random
+// 32-hex id with their outcome and conclusion (JobExtension.cs:434-440,
+// ExecutionContext.cs:644).
+func TestSetupStepsAreInTheStepsContext(t *testing.T) {
+	needTools(t, "bash")
+	forge := newForge(t, map[string][]byte{"/tarball/o/d/v1": tarOf(t, "o-d-x", files{"Dockerfile": "FROM alpine\n"})})
+	d, _ := fakeDocker(t, 0)
+	rec, res := actionRun(t, files{}, "      - uses: docker://alpine:3.20\n      - uses: o/d@v1\n      - name: dump\n        run: echo \"S=$S\"\n        env:\n          S: ${{ join(steps.*.conclusion, ',') }} ${{ join(steps.*.outcome, ',') }} ${{ toJSON(steps) }}\n", func(c *Config) {
+		c.Actions.DockerPath = d
+		c.Actions.Resolver = forge.resolver("")
+	})
+	if res.Conclusion != ConclusionSuccess {
+		t.Fatalf("%+v %v", res, rec.names())
+	}
+	got := logOf(rec.step(t, "dump"))
+	re := regexp.MustCompile(`(?s)S=success,success success,success \{.*"[0-9a-f]{32}": \{\s*"outputs": \{\},\s*"outcome": "success",\s*"conclusion": "success"\s*\}.*"[0-9a-f]{32}": \{`)
+	if !re.MatchString(got) {
+		t.Errorf("%s", got)
+	}
+}
+
+// A setup step that is skipped (the pull before it failed) is in the steps
+// context too, with outcome and conclusion "skipped": the context names are
+// assigned before anything runs and CompleteStep(Skipped) updates the context
+// (JobExtension.cs:434-440, StepsRunner.cs:231-234, ExecutionContext.cs:644-647).
+func TestSkippedSetupStepIsInTheStepsContext(t *testing.T) {
+	needTools(t, "bash")
+	d, _ := fakeDocker(t, 3) // the three pulls of the first image fail
+	rec, res := actionRun(t, files{}, "      - uses: docker://alpine:3.20\n      - uses: docker://busybox:1\n      - name: dump\n        if: always()\n        run: echo \"S=$S\"\n        env:\n          S: ${{ toJSON(steps) }}\n", func(c *Config) {
+		c.Actions.DockerPath = d
+		c.Actions.Backoff = func() time.Duration { return time.Millisecond }
+	})
+	if res.Conclusion != ConclusionFailure {
+		t.Fatalf("%+v %v", res, rec.names())
+	}
+	if got := strings.Join(rec.names(), "|"); got != "Set up job|Pull alpine:3.20|Pull busybox:1|Run alpine:3.20|Run busybox:1|dump|Complete job" {
+		t.Fatalf("%s", got)
+	}
+	got := logOf(rec.step(t, "dump"))
+	got = got[strings.LastIndex(got, "\nS={"):] // the header echoes the env too
+	for _, want := range []string{"failure", "skipped"} {
+		re := regexp.MustCompile(`(?s)"[0-9a-f]{32}": \{\s*"outputs": \{\},\s*"outcome": "` + want + `",\s*"conclusion": "` + want + `"\s*\}`)
+		if !re.MatchString(got) {
+			t.Errorf("no %s runner step in:\n%s", want, got)
+		}
+	}
+	if n := len(regexp.MustCompile(`"[0-9a-f]{32}": \{`).FindAllString(got, -1)); n != 2 {
+		t.Errorf("%d runner steps in the context, want 2:\n%s", n, got)
 	}
 }

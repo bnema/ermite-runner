@@ -192,6 +192,10 @@ func parseInt(s string) (int, bool) {
 // left out. The title and the file are masked too (the runner masks only the
 // message; on GitHub a secret in a title stays visible, recorded in
 // mask-add-mask, which ermite deliberately does not reproduce).
+//
+// Deliberate divergence: GitHub keeps negative and zero lines (int.TryParse,
+// ActionCommandManager.cs:723-725; ann-levels records start_line -1); ermite's
+// contract is positive lines, 0 = no line, and the host clamps.
 func (j *job) annotationOf(is issue, msg string) Annotation {
 	a := Annotation{Level: is.Level, Message: msg}
 	p := is.Props

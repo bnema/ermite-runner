@@ -25,10 +25,20 @@ func (j *job) prepareJob() ([]qstep, error) {
 		return nil, j.setupError(err)
 	}
 	queue := j.setupSteps()
+	// JobExtension.cs:434-440: every runner step of the job gets a random "N"
+	// context name before anything runs; its final result, skipped included,
+	// is in the steps context. The ones the composite actions run get a "__"
+	// name (CompositeActionHandler.cs:121-123) and are not registered, which is
+	// why only this queue has ids.
+	for i := range queue {
+		queue[i].ctxID = newRunnerStepID()
+	}
 	// JobExtension.cs:317-331: the images of the actions are pulled first, then
 	// the containers start.
 	if j.cs != nil {
-		queue = append(queue, j.initContainersStep())
+		ic := j.initContainersStep()
+		ic.ctxID = newRunnerStepID()
+		queue = append(queue, ic)
 	}
 	for _, n := range nodes {
 		if j.actions.pre[n] {

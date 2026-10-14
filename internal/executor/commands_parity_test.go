@@ -94,7 +94,8 @@ func TestFileCommandsOfAStepSurviveTheNextStep(t *testing.T) {
 func TestRunnerStepsAreInTheStepsContext(t *testing.T) {
 	st := newTestState(t)
 	j := &job{state: st}
-	j.recordRunnerStep(resSucceeded)
+	s := &stepRun{j: j, ctxID: newRunnerStepID()}
+	j.finishStep(s, resSucceeded)
 	v, ok := st.Values(nil)["steps"].(*expr.Dictionary)
 	if !ok || len(v.Pairs()) != 1 {
 		t.Fatalf("%v", v)
@@ -181,5 +182,29 @@ func TestInvalidStopTokenDrainsHighVolumeOutput(t *testing.T) {
 	got := logOf(rec.step(t, "s"))
 	if !strings.Contains(got, "##[error]"+unsupportedStopTokenDisabled) || strings.Contains("\n"+got+"\n", "\n::warning::x\n") || strings.Contains(got, "##[warning]x") {
 		t.Errorf("%.300s", got)
+	}
+}
+
+// svc-redis (unhealthy): the github context of a step that runs before any
+// other step ran has no action_ref, action_repository, event_path nor the file
+// command paths: the runner sets them while it runs a step (ActionRunner.cs:
+// 147-153, FileCommandManager.cs:71, ExecutionContext.cs:1334), after the env
+// of the step was evaluated; the context object is shared by the steps, so a
+// later step has them. The recorded dump step of the unhealthy job of svc-redis
+// is the first step that ran and has none; a step run before it (the harness's
+// ermite-mask) gives it all of them.
+func TestGithubContextOfTheFirstStepThatRunsHasNoStepKeys(t *testing.T) {
+	needTools(t, "bash")
+	rec, _ := runLocal(t, wfHead+`    steps:
+      - name: skipped
+        if: false
+        run: echo no
+      - name: dump
+        run: echo "KEYS=$KEYS"
+        env:
+          KEYS: ${{ join(github.*, ',') != '' && 'x' }}${{ contains(toJSON(github), 'action_ref') }},${{ contains(toJSON(github), 'event_path') }},${{ contains(toJSON(github), 'artifacts') }},${{ contains(toJSON(github), 'step_summary') }}
+`, "j", nil)
+	if got := logOf(rec.step(t, "dump")); !strings.Contains(got, "KEYS=xfalse,false,false,false") {
+		t.Error(got)
 	}
 }

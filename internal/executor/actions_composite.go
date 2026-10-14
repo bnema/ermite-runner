@@ -224,20 +224,26 @@ func (j *job) runEmbedded(parent *stepRun, c *node, scope string) {
 	// the line is masked again when it is written, as every line is.
 	id := scope + "." + c.st.ID
 	if envErr != nil {
-		// The error of the environment is logged and the step marked failed, then
-		// the start marker is printed (CompositeActionHandler.cs:296-302, :308-324).
-		// DIVERGENCE: the runner does not stop there. It falls through to the
-		// condition (:372-390); success() of an embedded main step reads
+		// The error of the environment is logged and the step marked failed
+		// (CompositeActionHandler.cs:296-302, SetStepConclusion :529-533), then the
+		// runner does not stop: it prints the start marker (:308-324), evaluates
+		// the condition (:372-390; success() of an embedded main step reads
 		// github.action_status, set from the composite's result before the env was
-		// evaluated (:246-248, SuccessFunction.cs:28), so the default condition still
-		// holds and the runner RUNS the step, without the env that failed, and ends
-		// with the marker of its failed result and the elapsed time. Here the step
-		// does not run and the end marker says duration_ms=0.
+		// evaluated, :246-248, SuccessFunction.cs:28, so the default condition
+		// still holds) and runs the step (RunStepAsync :481-527) without the env
+		// that failed. Its result stays Failed (nothing resets it), and the end
+		// marker (:431-440) carries it with the elapsed time.
 		j.errorf(s.num, "%s", templateNotValid(envErr, true))
-		j.out(parent.num, startMarker(j.mask(s.name), id))
-		j.finishStep(s, resFailed)
-		j.out(parent.num, endMarker(id, "failure", "failure", 0))
-		return
+		s.envFailed = true
+		// SetStepConclusion publishes Failed to the steps context at once
+		// (:529-533, UpdateGlobalStepsContext), so the condition of the step, and
+		// of the steps after it, see steps.<id>.outcome == 'failure'. Nothing is
+		// merged into the composite's result yet: that is done when the step ends
+		// (:505-512, finishStep), which also replaces this entry with the final
+		// outcome and conclusion.
+		j.mu.Lock()
+		j.state.SetStepResult(c.st.ID, string(resFailed.conclusion()), string(resFailed.conclusion()))
+		j.mu.Unlock()
 	}
 	q := qstep{n: c, stage: parent.stage}
 	switch parent.stage {

@@ -76,7 +76,7 @@ var (
 // (JobExtension.cs:328-331), run if success().
 func (j *job) initContainersStep() qstep {
 	return qstep{name: "Initialize containers", setup: func(s *stepRun, cancel <-chan struct{}) stepResult {
-		return j.recordRunnerStep(j.initContainers(s, cancel))
+		return j.initContainers(s, cancel)
 	}}
 }
 

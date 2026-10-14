@@ -68,17 +68,11 @@ func replaceKey(d *expr.Dictionary, key string, v expr.Value) *expr.Dictionary {
 	return setKey(d, key, v)
 }
 
-// recordRunnerStep registers a step the runner made itself (Initialize
-// containers, Pull <image>, Build <action>) in the steps context. Its context
-// name is its Guid in "N" format, which does not start with "__": the entry
-// {outcome, conclusion, outputs: {}} is visible to the user's steps
-// (JobExtension.cs:439 CreateChild(stepId, ..., stepId.ToString("N"), ...),
-// ExecutionContext.UpdateGlobalStepsContext:644; recorded in ctr-basic,
-// svc-redis, act-docker-image). It returns res.
-func (j *job) recordRunnerStep(res stepResult) stepResult {
-	id := strings.ReplaceAll(uuid.NewString(), "-", "")
-	j.mu.Lock()
-	j.state.SetStepResult(id, string(res.conclusion()), string(res.conclusion()))
-	j.mu.Unlock()
-	return res
-}
+// newRunnerStepID is the context name of a step the runner made itself
+// (Initialize containers, Pull <image>, Build <action>): its Guid in "N" format,
+// which does not start with "__", so the entry {outcome, conclusion, outputs:
+// {}} is visible to the user's steps (JobExtension.cs:439 CreateChild(stepId,
+// ..., stepId.ToString("N"), ...), ExecutionContext.UpdateGlobalStepsContext:644;
+// recorded in ctr-basic, svc-redis, act-docker-image). runStep registers its
+// result under it (qstep.ctxID).
+func newRunnerStepID() string { return strings.ReplaceAll(uuid.NewString(), "-", "") }

@@ -1113,7 +1113,9 @@ runs:
 // An inner step whose env does not evaluate still gets its markers: the error
 // is logged while the environment is set up, the start marker follows, then the
 // end marker with the step failed (CompositeActionHandler.cs:296-302, :308-324).
-// The runner would go on and run the step; this port does not (see runEmbedded).
+// The runner goes on: the condition holds (success() reads action_status) and the
+// step runs without the env that failed; the end marker says failure with the
+// elapsed time (:372-390, :431-440, SuccessFunction.cs:28).
 func TestCompositeEnvErrorKeepsMarkers(t *testing.T) {
 	tree := files{
 		".github/actions/e/action.yml": `name: e
@@ -1138,10 +1140,12 @@ runs:
 			got = append(got, "error")
 		case strings.HasPrefix(l, "##[start-action"), strings.HasPrefix(l, "##[end-action"):
 			got = append(got, l)
+		case l == "never":
+			got = append(got, l)
 		}
 	}
-	want := []string{"error", "##[start-action display=bad env;id=__self.__run]", "##[end-action id=__self.__run;outcome=failure;conclusion=failure;duration_ms=0]"}
-	if strings.Join(got, "\n") != strings.Join(want, "\n") || strings.Contains(logOf(rec.steps[1]), "never") {
+	end := regexp.MustCompile(`^##\[end-action id=__self\.__run;outcome=failure;conclusion=failure;duration_ms=\d+\]$`)
+	if len(got) != 4 || got[0] != "error" || got[1] != "##[start-action display=bad env;id=__self.__run]" || got[2] != "never" || !end.MatchString(got[3]) {
 		t.Errorf("markers:\n%s\n%s", strings.Join(got, "\n"), logOf(rec.steps[1]))
 	}
 }
@@ -1189,5 +1193,51 @@ func TestPathCombine(t *testing.T) {
 		if got := pathCombine(c.in...); got != c.want {
 			t.Errorf("%q: %q, want %q", c.in, got, c.want)
 		}
+	}
+}
+
+// A step of a composite action whose env cannot be evaluated is Failed in the
+// steps context before its condition is evaluated (CompositeActionHandler.cs:
+// 296-302, SetStepConclusion :529-533): its own `if` can read the failure and
+// the step runs. The failed env leaves no partial value: the env is applied
+// only after the whole mapping evaluated (:290-297).
+func TestCompositeEnvErrorIsInTheStepsContextBeforeTheCondition(t *testing.T) {
+	tree := files{
+		".github/actions/e/action.yml": `name: e
+inputs:
+  tok:
+    default: ''
+runs:
+  using: composite
+  steps:
+    - id: bad
+      if: always() && steps.bad.outcome == 'failure'
+      shell: bash
+      env:
+        GOOD: kept-value
+        SECRET_LIKE: ${{ inputs.tok }}
+        X: ${{ fromJSON('{') }}
+      run: echo "ran good=[$GOOD] secret=[$SECRET_LIKE] x=[$X]"
+`,
+	}
+	const tok = "ghs_partialenvtoken"
+	rec, res := actionRun(t, tree, "      - uses: ./.github/actions/e\n        with:\n          tok: ${{ secrets.GITHUB_TOKEN }}\n", func(c *Config) {
+		c.ContextsJSON = strings.Replace(testGitHubContext("j"), `"github":{`, `"github":{"token":"`+tok+`",`, 1)
+	})
+	if res.Conclusion != ConclusionFailure {
+		t.Fatalf("%+v", res)
+	}
+	log := logOf(rec.steps[1])
+	if strings.Contains(log, tok) {
+		t.Errorf("the secret leaked:\n%s", log)
+	}
+	if !strings.Contains(log, "ran good=[] secret=[] x=[]") {
+		t.Errorf("the step must run without any value of the env that failed:\n%s", log)
+	}
+	if strings.Contains(log, "kept-value") && !strings.Contains(log, "good=[]") {
+		t.Errorf("partial env:\n%s", log)
+	}
+	if !strings.Contains(log, "outcome=failure;conclusion=failure") {
+		t.Errorf("end marker:\n%s", log)
 	}
 }
