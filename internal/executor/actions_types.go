@@ -46,6 +46,9 @@ type ActionsConfig struct {
 	// (HandlerFactory.cs, NodeUtil.DetermineActionsNodeVersion): ermite has no
 	// feature flags, so the default is pinned here.
 	Node24ByDefault bool
+	// Containers are the time limits of the docker commands of job containers
+	// and services; the zero value means the defaults.
+	Containers ContainerTimeouts
 	// Backoff, when set, replaces the random 10 to 30 s wait between download
 	// attempts (tests).
 	Backoff func() time.Duration

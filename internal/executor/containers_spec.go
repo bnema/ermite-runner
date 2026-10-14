@@ -65,6 +65,7 @@ type container struct {
 	workDir                               string
 	id, network, runtimePath              string
 	failedInit                            bool
+	createTried, removed                  bool
 	maps                                  []pathMap // path translation, first match wins
 	portMappings                          []portMapping
 }

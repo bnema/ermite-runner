@@ -3,6 +3,7 @@
 package executor
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -94,14 +95,19 @@ func (j *job) startContainer(s *stepRun, c *container, cancel <-chan struct{}) e
 	}
 	cfg, err := j.registryLogin(s, c, cancel)
 	if err != nil {
-		if cfg != "" {
-			_ = os.RemoveAll(cfg)
+		if rerr := j.removeConfigDir(cfg); rerr != nil {
+			j.errorf(num, "%s", rerr.Error())
 		}
 		return err
 	}
 	code, err := j.pullWithRetry(s, c.image, cfg, cancel)
-	if cfg != "" {
-		_ = os.RemoveAll(cfg)
+	// Credentials are removed after the pull, whatever it did (:171-173).
+	if rerr := j.removeConfigDir(cfg); rerr != nil {
+		if err == nil {
+			err = rerr
+		} else {
+			j.errorf(num, "%s", rerr.Error())
+		}
 	}
 	if err != nil {
 		return err
@@ -114,8 +120,13 @@ func (j *job) startContainer(s *stepRun, c *container, cancel <-chan struct{}) e
 			return err
 		}
 	}
-	out, err := j.dockerList(s, j.createCmd(c), nil)
+	c.createTried = true // the container may exist from here on, named c.name
+	out, err := j.dockerList(s, j.createCmd(c), cancel)
 	if err != nil {
+		var ee *exitError
+		if errors.As(err, &ee) {
+			c.createTried = false // docker said no: there is nothing to remove
+		}
 		return err
 	}
 	if len(out) == 0 || out[0] == "" {
@@ -134,9 +145,9 @@ func (j *job) startContainer(s *stepRun, c *container, cancel <-chan struct{}) e
 	if code != 0 {
 		return ghErrorf("Docker start fail with exit code %d", code)
 	}
-	j.checkRunning(s, c)
+	j.checkRunning(s, c, cancel)
 	if !c.isJob {
-		ports, err := j.dockerList(s, j.newDockerCmd("port", raw(c.id)), nil)
+		ports, err := j.dockerList(s, j.newDockerCmd("port", raw(c.id)), cancel)
 		if err != nil {
 			return err
 		}
@@ -145,7 +156,7 @@ func (j *job) startContainer(s *stepRun, c *container, cancel <-chan struct{}) e
 		j.state.SetJobService(c.alias, c.id, c.network, c.portMappings)
 		j.mu.Unlock()
 	} else {
-		env, err := j.dockerList(s, j.newDockerCmd("inspect", quotedOpt("--format", "{{range .Config.Env}}{{println .}}{{end}}"), raw(c.id)), nil)
+		env, err := j.dockerList(s, j.newDockerCmd("inspect", quotedOpt("--format", "{{range .Config.Env}}{{println .}}{{end}}"), raw(c.id)), cancel)
 		if err != nil {
 			return err
 		}
@@ -164,7 +175,7 @@ func (j *job) pullWithRetry(s *stepRun, image, cfg string, cancel <-chan struct{
 	code := 0
 	for try := 1; try <= 3; try++ {
 		var err error
-		code, err = j.dockerCode(s, j.pullCmd(image, cfg), cancel)
+		_, code, err = j.dockerDo(j.pullCmd(image, cfg), dockerOpts{s: s, cancel: cancel, all: true, timeout: j.timeouts().Pull})
 		if err != nil {
 			return code, err
 		}
@@ -183,9 +194,9 @@ func (j *job) pullWithRetry(s *stepRun, image, cfg string, cancel <-chan struct{
 }
 
 // checkRunning is the best-effort check of :193-213.
-func (j *job) checkRunning(s *stepRun, c *container) {
+func (j *job) checkRunning(s *stepRun, c *container, cancel <-chan struct{}) {
 	fmtOpt := quotedOpt("--format", "{{.ID}} {{.Status}}")
-	out, err := j.dockerList(s, j.newDockerCmd("ps", raw("--all"), raw("--filter", "id="+c.id), raw("--filter", "status=running"), raw("--no-trunc"), fmtOpt), nil)
+	out, err := j.dockerList(s, j.newDockerCmd("ps", raw("--all"), raw("--filter", "id="+c.id), raw("--filter", "status=running"), raw("--no-trunc"), fmtOpt), cancel)
 	if err != nil {
 		return
 	}
@@ -197,8 +208,8 @@ func (j *job) checkRunning(s *stepRun, c *container) {
 			break
 		}
 	}
-	_, _ = j.dockerList(s, j.newDockerCmd("ps", raw("--all"), raw("--filter", "id="+c.id), raw("--no-trunc"), fmtOpt), nil)
-	if code, err := j.dockerCode(s, j.newDockerCmd("logs", raw("--details", c.id)), nil); err == nil && code != 0 {
+	_, _ = j.dockerList(s, j.newDockerCmd("ps", raw("--all"), raw("--filter", "id="+c.id), raw("--no-trunc"), fmtOpt), cancel)
+	if code, err := j.dockerCode(s, j.newDockerCmd("logs", raw("--details", c.id)), cancel); err == nil && code != 0 {
 		j.tagged(s.num, "##[warning]", fmt.Sprintf("Docker logs fail with exit code %d", code))
 	}
 	j.tagged(s.num, "##[warning]", fmt.Sprintf("Docker container %s is not in running state.", c.id))

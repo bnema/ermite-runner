@@ -213,6 +213,9 @@ func Run(cancel *Canceller, cfg Config) Result {
 }
 
 func (j *job) run() Result {
+	// Whatever happens below (a panic, a shutdown that skips the post steps),
+	// the containers, the network and the credentials directories are removed.
+	defer j.fallbackCleanup()
 	limit := j.cfg.Deadline
 	if limit <= 0 {
 		limit = time.Duration(j.timeoutMinutes()) * time.Minute

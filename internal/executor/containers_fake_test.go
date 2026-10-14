@@ -29,12 +29,16 @@ func newFakeCtr(t *testing.T) *fakeCtr {
 	script := `#!/bin/sh
 D=` + d + `
 { echo "--"; for a in "$@"; do printf "%s\n" "$a"; done; echo "ENV:CVAR=$CVAR:EMPTYV=${EMPTYV-unset}:PATH=$PATH"; } >> $D/calls
-[ "$1" = "--config" ] && { cat > $D/login_stdin_$$ 2>/dev/null </dev/null; shift 2; }
+[ "$1" = "--config" ] && { CFG=$2; shift 2; }
+hang() { trap 'exit 130' INT TERM; while :; do sleep 0.05; done; }
+[ -f $D/hang_$1 ] && hang
+if [ -f $D/hang_for ]; then case "$*" in *"$(cat $D/hang_for)"*) hang ;; esac; fi
 case "$1" in
 version) echo "'1.48'" ;;
 ps) case "$*" in *--quiet*) ;; *status=running*) id=$(echo "$*" | sed 's/.*id=\([^ ]*\).*/\1/'); echo "$id Up Less than a second" ;; esac ;;
 network) ;;
-login) cat > $D/login_stdin ;;
+login) cat > $D/login_stdin
+  if [ -f $D/lock_cfg ]; then mkdir -p $CFG/sub; : > $CFG/sub/f; chmod 500 $CFG/sub; fi ;;
 pull) if [ -f $D/pull_fail ]; then n=$(cat $D/pull_fail); if [ "$n" -gt 0 ]; then echo $((n-1)) > $D/pull_fail; echo "pull denied"; exit 1; fi; fi; echo "pulled $2" ;;
 create) [ -f $D/create_fail ] && { echo "unknown flag"; exit 125; }
   [ -f $D/create_out ] && { cat $D/create_out; exit 0; }

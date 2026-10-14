@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand/v2"
+	"os"
 	"strings"
 	"time"
 )
@@ -93,46 +94,154 @@ func (j *job) healthchecks(s *stepRun, all []*container, cancel <-chan struct{})
 
 // stopContainers is "Stop containers" (StopContainersAsync, :105-124 and
 // StopContainerAsync, :328-351). It is registered with the condition always(),
-// so it runs after a failure, a cancellation and a timeout alike.
-func (j *job) stopContainers(s *stepRun, cancel <-chan struct{}) stepResult {
-	num := s.num
-	cs := j.cs
-	for _, c := range cs.all() {
-		if c.id == "" {
-			continue
-		}
-		if !c.isJob && !c.failedInit {
-			j.out(num, "Print service container logs: "+c.name)
-			code, err := j.dockerCode(s, j.newDockerCmd("logs", raw("--details", c.id)), cancel)
-			if err != nil {
-				return j.containerResult(s, err)
-			}
-			if code != 0 {
-				j.tagged(num, "##[warning]", fmt.Sprintf("Docker logs fail with exit code %d", code))
-			}
-		}
-		j.out(num, "Stop and remove container: "+c.name)
-		code, err := j.dockerCode(s, j.newDockerCmd("rm", raw("--force", c.id)), cancel)
-		if err != nil {
-			return j.containerResult(s, err)
-		}
-		if code != 0 {
-			j.tagged(num, "##[warning]", fmt.Sprintf("Docker rm fail with exit code %d", code))
-		}
+// so it runs after a failure, a cancellation and a timeout alike; its commands
+// run on a budget of their own (they do not end with the job's cancellation,
+// and a stalled daemon does not hold them forever).
+func (j *job) stopContainers(s *stepRun, _ <-chan struct{}) stepResult {
+	if j.cs == nil {
+		return resSucceeded
 	}
-	// The network of the first container; without one the runner throws
-	// (ArgUtil.NotNull, ContainerOperationProvider.cs:272).
-	if len(cs.all()) > 0 && cs.all()[0].network == "" {
-		return j.containerResult(s, ghErrorf("Value cannot be null. (Parameter 'network')"))
+	errs := j.cleanupContainers(s)
+	for _, e := range errs {
+		j.errorf(s.num, "%s", e.Error())
 	}
-	network := cs.all()[0].network
-	j.out(num, "Remove container network: "+network)
-	code, err := j.dockerCode(s, j.newDockerCmd("network", raw("rm", network)), cancel)
-	if err != nil {
-		return j.containerResult(s, err)
-	}
-	if code != 0 {
-		j.tagged(num, "##[warning]", fmt.Sprintf("Docker network rm failed with exit code %d", code))
+	if len(errs) > 0 {
+		return resFailed
 	}
 	return resSucceeded
+}
+
+// fallbackCleanup is the cleanup of the job when "Stop containers" did not (or
+// not completely) run: a panic, a runner shutdown that skips the queued post
+// steps, a budget that ran out. It does only what is left; with nothing left
+// it runs no docker command. Its messages go to the diagnostics of the runner,
+// the job log being closed.
+func (j *job) fallbackCleanup() {
+	if j.cs == nil || !j.cs.pending() {
+		return
+	}
+	for _, e := range j.cleanupContainers(nil) {
+		j.cfg.Log.Warn().Err(e).Msg("fallback cleanup of the job containers")
+	}
+}
+
+// pending reports whether something created by the job is still to be removed.
+func (cs *containerSet) pending() bool {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	if cs.networkTry != "" && !cs.netRemoved || len(cs.dirs) > 0 {
+		return true
+	}
+	for _, c := range cs.all() {
+		if c.createTried && !c.removed {
+			return true
+		}
+	}
+	return false
+}
+
+// cleanupContainers removes what the job created: every container, then the
+// network, then the credentials directories left behind. It attempts all of
+// them whatever fails, within CleanupBudget, each command within
+// CleanupCommand, and returns the errors. Logs of a service are best effort and
+// never stand in the way of its removal. s, when set, gets the runner's lines.
+// It is idempotent: what is gone is not tried again.
+func (j *job) cleanupContainers(s *stepRun) (errs []error) {
+	cs := j.cs
+	cs.cleanupMu.Lock()
+	defer cs.cleanupMu.Unlock()
+	t := j.timeouts()
+	budget, budgetOut, stop := bound(nil, t.CleanupBudget)
+	defer stop()
+	out := func(line string) {
+		if s != nil {
+			j.out(s.num, line)
+		}
+	}
+	run := func(c dockerCmd) (int, error) {
+		select {
+		case <-budget:
+			if budgetOut() {
+				return 0, ghErrorf("The cleanup of the containers ran out of time (%s)", t.CleanupBudget)
+			}
+		default:
+		}
+		_, code, err := j.dockerDo(c, dockerOpts{s: s, cancel: budget, all: true, timeout: t.CleanupCommand})
+		return code, err
+	}
+	for _, c := range cs.all() {
+		if !c.createTried || c.removed {
+			continue
+		}
+		target := c.id
+		if target == "" {
+			// The create is not known to have finished: the name was ours.
+			target = c.name
+		}
+		if c.id != "" && !c.isJob && !c.failedInit {
+			out("Print service container logs: " + c.name)
+			code, err := run(j.newDockerCmd("logs", raw("--details", c.id)))
+			switch {
+			case err != nil:
+				// Best effort, as the runner's warning for a failed logs: it
+				// neither fails the step nor stops the removal.
+				j.warnTo(s, "Docker logs failed: "+err.Error())
+			case code != 0:
+				j.warnTo(s, fmt.Sprintf("Docker logs fail with exit code %d", code))
+			}
+		}
+		out("Stop and remove container: " + c.name)
+		code, err := run(j.newDockerCmd("rm", raw("--force", target)))
+		switch {
+		case err != nil:
+			errs = append(errs, err)
+		case code != 0:
+			j.warnTo(s, fmt.Sprintf("Docker rm fail with exit code %d", code))
+			if c.id == "" {
+				c.removed = true // a name that docker does not know is nothing to remove
+			}
+		default:
+			c.removed = true
+		}
+	}
+	cs.mu.Lock()
+	network, gone := cs.networkTry, cs.netRemoved
+	cs.mu.Unlock()
+	if network != "" && !gone {
+		out("Remove container network: " + network)
+		code, err := run(j.newDockerCmd("network", raw("rm", network)))
+		switch {
+		case err != nil:
+			errs = append(errs, err)
+		case code != 0:
+			j.warnTo(s, fmt.Sprintf("Docker network rm failed with exit code %d", code))
+			cs.mu.Lock()
+			cs.netRemoved = true // the runner warns and moves on; docker knows no such network (or refuses)
+			cs.mu.Unlock()
+		default:
+			cs.mu.Lock()
+			cs.netRemoved = true
+			cs.mu.Unlock()
+		}
+	}
+	cs.mu.Lock()
+	dirs := cs.dirs
+	cs.dirs = nil
+	cs.mu.Unlock()
+	for _, d := range dirs {
+		if err := os.RemoveAll(d); err != nil {
+			cs.addDir(d)
+			errs = append(errs, ghErrorf("Failed to remove directory containing Docker client credentials: %v", err))
+		}
+	}
+	return errs
+}
+
+// warnTo logs a warning to the step, or to the diagnostics without one.
+func (j *job) warnTo(s *stepRun, msg string) {
+	if s != nil {
+		j.tagged(s.num, "##[warning]", msg)
+		return
+	}
+	j.cfg.Log.Warn().Msg(msg)
 }

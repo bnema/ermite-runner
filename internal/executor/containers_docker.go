@@ -3,7 +3,11 @@
 package executor
 
 import (
+	"fmt"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
 )
 
 // Helpers for the docker commands of the container steps. The runner builds a
@@ -105,41 +109,158 @@ func (j *job) dockerArgString(c dockerCmd) string {
 	return strings.TrimPrefix(c.line, j.dockerPath()+" ")
 }
 
+// exitError is ProcessExitCodeException: docker ran and said no.
+type exitError struct {
+	code int
+	msg  string
+}
+
+func (e *exitError) Error() string { return e.msg }
+
+// Time limits of the docker commands of the container steps. The runner has
+// none (its commands end with the job); a sandbox whose daemon stalls must not
+// hold the job until its timeout, nor the cleanup forever.
+type ContainerTimeouts struct {
+	// Command bounds one docker command (default 2 minutes); Pull bounds a
+	// docker pull (30 minutes).
+	Command, Pull time.Duration
+	// CleanupCommand bounds one command of "Stop containers" (30 seconds) and
+	// CleanupBudget the whole cleanup (3 minutes), whatever happens to the job.
+	CleanupCommand, CleanupBudget time.Duration
+}
+
+func (j *job) timeouts() ContainerTimeouts {
+	t := j.cfg.Actions.Containers
+	def := func(v *time.Duration, d time.Duration) {
+		if *v <= 0 {
+			*v = d
+		}
+	}
+	def(&t.Command, 2*time.Minute)
+	def(&t.Pull, 30*time.Minute)
+	def(&t.CleanupCommand, 30*time.Second)
+	def(&t.CleanupBudget, 3*time.Minute)
+	return t
+}
+
+// cmdTimeoutError is a docker command stopped by its time limit.
+type cmdTimeoutError struct {
+	cmd string
+	d   time.Duration
+}
+
+func (e *cmdTimeoutError) Error() string {
+	return fmt.Sprintf("The docker command timed out after %s: %s", e.d, e.cmd)
+}
+
+// bound returns a channel that closes when cancel does (nil never) or after d,
+// and a function that tells whether it was the time, with the one that
+// releases the timer.
+func bound(cancel <-chan struct{}, d time.Duration) (ch <-chan struct{}, timedOut func() bool, stop func()) {
+	out := make(chan struct{})
+	var once sync.Once
+	var fired atomic.Bool
+	closeOut := func() { once.Do(func() { close(out) }) }
+	t := time.AfterFunc(d, func() { fired.Store(true); closeOut() })
+	done := make(chan struct{})
+	if cancel != nil {
+		go func() {
+			select {
+			case <-cancel:
+				closeOut()
+			case <-done:
+			}
+		}()
+	}
+	return out, fired.Load, func() { t.Stop(); close(done) }
+}
+
+// dockerOpts are the options of dockerDo.
+type dockerOpts struct {
+	// s is the step whose log gets the command and its output; nil runs the
+	// command silently (the fallback cleanup).
+	s *stepRun
+	// cancel stops the command (the escalation of runProcess); always set.
+	cancel <-chan struct{}
+	// timeout bounds the command; 0 means the command limit.
+	timeout time.Duration
+	// quiet keeps the echoed command and the output out of the log.
+	quiet bool
+	// all logs the empty lines too (the overloads that return a code).
+	all bool
+	// errToOut also collects the lines of stderr.
+	errToOut bool
+}
+
+// do runs the command and returns the non-empty lines of its stdout (and
+// stderr with errToOut), its exit code and an error for what is not an exit
+// code: a start failure, a cancellation, a time limit.
+func (j *job) dockerDo(c dockerCmd, o dockerOpts) (lines []string, code int, err error) {
+	log := o.s != nil && !o.quiet
+	if log {
+		j.out(o.s.num, "##[command]"+c.line)
+	}
+	d := o.timeout
+	if d <= 0 {
+		d = j.timeouts().Command
+	}
+	cancel, timedOut, stop := bound(o.cancel, d)
+	defer stop()
+	var mu sync.Mutex
+	res, perr := runProcess(procSpec{
+		Argv: c.argv, Dir: dirOrCwd(j.githubValue("workspace")), Env: append(j.processEnv(newOrdered()), c.env...), Credential: j.cfg.Credential,
+		OnLine: func(l string) {
+			mu.Lock()
+			if l != "" {
+				lines = append(lines, l)
+			}
+			mu.Unlock()
+			if log && (o.all || l != "") {
+				j.write(o.s.num, l)
+			}
+		},
+		OnErrLine: func(l string) {
+			if o.errToOut && l != "" {
+				mu.Lock()
+				lines = append(lines, l)
+				mu.Unlock()
+			}
+			if log && (o.all || l != "") {
+				j.write(o.s.num, l)
+			}
+		},
+		Cancel: cancel, TermAfter: j.cfg.TermAfter, KillAfter: j.cfg.KillAfter, WaitDelay: j.cfg.WaitDelay, Signal: j.cfg.Signal,
+	})
+	mu.Lock()
+	defer mu.Unlock()
+	switch {
+	case perr != nil:
+		return lines, 0, perr
+	case res.Cancelled && timedOut():
+		return lines, res.ExitCode, &cmdTimeoutError{cmd: j.dockerArgString(c), d: d}
+	case res.Cancelled:
+		return lines, res.ExitCode, errCancelled
+	}
+	return lines, res.ExitCode, nil
+}
+
 // dockerList is the overload of ExecuteDockerCommandAsync that returns the
 // output (DockerCommandManager.cs:462-492): non-empty lines of stdout are kept
 // and logged, non-empty lines of stderr are logged, and a non-zero exit is an
 // error.
 func (j *job) dockerList(s *stepRun, c dockerCmd, cancel <-chan struct{}) ([]string, error) {
-	j.out(s.num, "##[command]"+c.line)
-	var lines []string
-	res, err := runProcess(procSpec{
-		Argv: c.argv, Dir: dirOrCwd(j.githubValue("workspace")), Env: append(j.processEnv(newOrdered()), c.env...), Credential: j.cfg.Credential,
-		OnLine: func(l string) {
-			if l != "" {
-				lines = append(lines, l)
-				j.write(s.num, l)
-			}
-		},
-		OnErrLine: func(l string) {
-			if l != "" {
-				j.write(s.num, l)
-			}
-		},
-		Cancel: cancel, TermAfter: j.cfg.TermAfter, KillAfter: j.cfg.KillAfter, WaitDelay: j.cfg.WaitDelay, Signal: j.cfg.Signal,
-	})
+	lines, code, err := j.dockerDo(c, dockerOpts{s: s, cancel: cancel})
 	if err != nil {
-		return nil, err
+		return lines, err
 	}
-	if res.Cancelled {
-		return lines, errCancelled
-	}
-	if res.ExitCode != 0 {
-		return lines, ghErrorf("Exit code %d returned from process: file name '%s', arguments '%s'.", res.ExitCode, j.dockerPath(), j.dockerArgString(c))
+	if code != 0 {
+		return lines, &exitError{code: code, msg: fmt.Sprintf("Exit code %d returned from process: file name '%s', arguments '%s'.", code, j.dockerPath(), j.dockerArgString(c))}
 	}
 	return lines, nil
 }
 
 // dockerCode is the overload that logs every line and returns the exit code.
 func (j *job) dockerCode(s *stepRun, c dockerCmd, cancel <-chan struct{}) (int, error) {
-	return j.runDockerCmd(s, c, dirOrCwd(j.githubValue("workspace")), nil, cancel)
+	_, code, err := j.dockerDo(c, dockerOpts{s: s, cancel: cancel, all: true})
+	return code, err
 }

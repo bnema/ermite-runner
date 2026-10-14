@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -19,7 +20,22 @@ type containerSet struct {
 	job      *container
 	services []*container
 	network  string
+
+	// What the cleanup needs, recorded BEFORE the command that creates it, so
+	// that a command whose outcome is not known (a timeout, a cancellation, a
+	// lost connection) can still be cleaned: the names are chosen here, not by
+	// docker. mu guards them; cleanupMu serialises the cleanups ("Stop
+	// containers" and the fallback of the job).
+	mu         sync.Mutex
+	cleanupMu  sync.Mutex
+	networkTry string   // network name, set before docker network create
+	netRemoved bool     // the network is gone
+	dirs       []string // docker --config directories that could not be removed
 }
+
+func (cs *containerSet) tryNetwork(name string) { cs.mu.Lock(); cs.networkTry = name; cs.mu.Unlock() }
+
+func (cs *containerSet) addDir(d string) { cs.mu.Lock(); cs.dirs = append(cs.dirs, d); cs.mu.Unlock() }
 
 func (cs *containerSet) all() []*container {
 	var l []*container
@@ -83,7 +99,7 @@ func (j *job) startContainers(s *stepRun, cancel <-chan struct{}) error {
 	j.out(num, "##[group]Clean up resources from previous jobs")
 	label := j.dockerLabel()
 	ps := j.newDockerCmd("ps", raw("--all", "--quiet", "--no-trunc"), quotedOpt("--filter", "label="+label))
-	stale, err := j.dockerList(s, ps, nil)
+	stale, err := j.dockerList(s, ps, cancel)
 	if err != nil {
 		return err
 	}
@@ -108,6 +124,7 @@ func (j *job) startContainers(s *stepRun, cancel <-chan struct{}) error {
 
 	j.out(num, "##[group]Create local container network")
 	network := "github_network_" + strings.ReplaceAll(newImageTag(""), ":", "")
+	cs.tryNetwork(network)
 	code, err = j.dockerCode(s, j.newDockerCmd("network", raw("create", "--label", label, network)), cancel)
 	if err != nil {
 		return err
@@ -137,7 +154,7 @@ func (j *job) checkDockerVersion(s *stepRun, cancel <-chan struct{}) error {
 	num := s.num
 	j.out(num, "##[group]Checking docker version")
 	ver := func(which string) (string, error) {
-		l, err := j.dockerList(s, j.newDockerCmd("version", raw("--format", "'{{."+which+".APIVersion}}'")), nil)
+		l, err := j.dockerList(s, j.newDockerCmd("version", raw("--format", "'{{."+which+".APIVersion}}'")), cancel)
 		if err != nil {
 			return "", err
 		}
@@ -199,9 +216,24 @@ func (j *job) pullCmd(image, config string) dockerCmd {
 	return dockerCmd{line: p + " --config " + config + " pull " + image, argv: []string{p, "--config", config, "pull", image}}
 }
 
+// removeConfigDir is ContainerRegistryLogout (:457-470): the credentials
+// directory goes, and a failure is the runner's error. A directory that
+// cannot be removed is kept for the cleanup of the job, which tries again.
+func (j *job) removeConfigDir(dir string) error {
+	if dir == "" {
+		return nil
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		j.cs.addDir(dir)
+		return ghErrorf("Failed to remove directory containing Docker client credentials: %v", err)
+	}
+	return nil
+}
+
 // registryLogin is ContainerRegistryLogin (:394-455): the credentials go to a
 // private docker config directory, the password through stdin. It returns the
-// directory ("" without credentials); the caller removes it.
+// directory ("" without credentials); the caller removes it with
+// removeConfigDir, whatever happens.
 func (j *job) registryLogin(s *stepRun, c *container, cancel <-chan struct{}) (string, error) {
 	if c.credUser == "" || c.credPass == "" {
 		return "", nil
@@ -221,15 +253,20 @@ func (j *job) registryLogin(s *stepRun, c *container, cancel <-chan struct{}) (s
 	args, line = append(args, "-u", c.credUser, "--password-stdin"), line+" -u "+c.credUser+" --password-stdin"
 	for try := 1; ; try++ {
 		j.out(s.num, "##[command]"+j.dockerPath()+" "+line)
+		bc, timedOut, stop := bound(cancel, j.timeouts().Command)
 		res, err := runProcess(procSpec{
 			Argv: args, Dir: dirOrCwd(j.githubValue("workspace")), Env: j.processEnv(newOrdered()), Credential: j.cfg.Credential,
 			OnLine: func(string) {}, Stdin: c.credPass + "\n",
-			Cancel: cancel, TermAfter: j.cfg.TermAfter, KillAfter: j.cfg.KillAfter, WaitDelay: j.cfg.WaitDelay, Signal: j.cfg.Signal,
+			Cancel: bc, TermAfter: j.cfg.TermAfter, KillAfter: j.cfg.KillAfter, WaitDelay: j.cfg.WaitDelay, Signal: j.cfg.Signal,
 		})
+		stop()
 		if err != nil {
 			return dir, err
 		}
 		if res.Cancelled {
+			if timedOut() {
+				return dir, &cmdTimeoutError{cmd: "login", d: j.timeouts().Command}
+			}
 			return dir, errCancelled
 		}
 		if res.ExitCode == 0 {
