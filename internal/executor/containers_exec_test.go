@@ -85,3 +85,34 @@ func TestRunEnvIsTranslatedForTheContainer(t *testing.T) {
 		}
 	}
 }
+
+func TestNodeActionInContainerUsesExternalsAndAlpine(t *testing.T) {
+	for _, tc := range []struct{ release, node string }{{"ID=ubuntu\nVERSION_ID=\"24.04\"\n", "node24"}, {"ID=alpine\nVERSION_ID=3.23.4\n", "node24_alpine"}} {
+		f := newFakeCtr(t)
+		f.set(t, "exec_out", tc.release)
+		tree := files{
+			".github/actions/x/action.yml": "name: x\nruns:\n  using: node24\n  main: index.js\n",
+			".github/actions/x/index.js":   "x\n",
+		}
+		rec, res := ctrRun(t, f, "    container: ubuntu:24.04\n", "      - name: a\n        uses: ./.github/actions/x\n", func(c *Config) {
+			writeFiles(t, c.Layout.Workspace, tree)
+		})
+		if res.Conclusion != ConclusionSuccess {
+			t.Fatalf("%s: %+v\n%s", tc.node, res, logOf(rec.step(t, "a")))
+		}
+		ex := f.execCalls(t)
+		if len(ex) != 2 {
+			t.Fatalf("%s: exec calls %v", tc.node, ex)
+		}
+		if got := strings.Join(ex[0][len(ex[0])-3:], " "); got != "sh -c "+alpineCheck {
+			t.Errorf("probe: %v", ex[0])
+		}
+		run := strings.Join(ex[1], "\n")
+		if !strings.Contains(run, "\n/__e/"+tc.node+"/bin/node\n") || !strings.Contains(run, "\n/__w/hello/hello/.github/actions/x/index.js") {
+			t.Errorf("%s: node call:\n%s", tc.node, run)
+		}
+		if got := logOf(rec.step(t, "a")); !strings.Contains(got, "exec  "+strings.Repeat("0", 63)+"1 sh -c \"cat /etc/*release | grep ^ID\"") {
+			t.Errorf("probe line missing:\n%s", got)
+		}
+	}
+}

@@ -175,6 +175,9 @@ func (j *job) runNode(s *stepRun, def *actionDef, in *inputSet, env *ordered, ca
 	if st, err := os.Stat(script); err != nil || st.IsDir() {
 		return fail(ghErrorf("File not found: '%s'", script))
 	}
+	if c := j.stepContainer(); c != nil {
+		return j.runNodeInContainer(s, c, script, env, cancel)
+	}
 	j.mu.Lock()
 	wd := j.state.GitHub("workspace")
 	j.mu.Unlock()
