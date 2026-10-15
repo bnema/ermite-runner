@@ -57,8 +57,8 @@ func setupCache(ctx context.Context, scfg *sandbox.Config) (*cachesvc.Service, e
 	if err != nil {
 		return nil, err
 	}
-	scfg.Cache, scfg.CachePort = svc, cachesvc.DefaultPort
-	log.Info().Int64("max_bytes", max).Uint16("port", scfg.CachePort).Msg("cache service on")
+	scfg.Cache = svc
+	log.Info().Int64("max_bytes", max).Msg("cache service on (guest loopback only, no host port)")
 	return svc, nil
 }
 
@@ -200,7 +200,7 @@ func runCmd(ctx context.Context) int {
 			return hcfg.Client(url, tok)
 		},
 		Features: hcfg.ServerFeaturesFunc(url),
-		Cache:    cache, CachePort: scfg.CachePort,
+		Cache:    cache,
 	}
 	r.Cfg.URL = url
 	if err := r.Run(ctx); err != nil {

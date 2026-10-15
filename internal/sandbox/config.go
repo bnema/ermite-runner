@@ -121,10 +121,9 @@ type Config struct {
 	// reach, and the name the DNS forwarder answers with the sandbox's gateway.
 	GuestForge *GuestForge
 	// Cache, when not nil, is the runner's cache service (package cachesvc),
-	// served on the gateway of every sandbox on CachePort. The caller makes it
-	// before building the drivers, like GuestForge.
-	Cache     *cachesvc.Service
-	CachePort uint16
+	// served to every sandbox on a channel of its own (ServeCache), never on a
+	// network. The caller makes it before building the drivers, like GuestForge.
+	Cache *cachesvc.Service
 	// Rate limits of micro-VMs; zero disables.
 	DiskBandwidthMiB, DiskIOPS, NetMbit int
 

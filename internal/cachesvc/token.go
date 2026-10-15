@@ -101,17 +101,18 @@ func (s *signer) verify(tok string, now time.Time) (Claims, error) {
 
 // archiveSig signs the download URL of one entry. The archive is fetched by a
 // client without the bearer token (downloadUtils.ts:168 uses a bare HttpClient),
-// so the URL is the credential; it is bound to the entry, its repository and an
-// expiry.
-func (s *signer) archiveSig(id int64, repo string, exp int64) string {
-	return b64.EncodeToString(s.mac("archive", []byte(strconv.FormatInt(id, 10)), []byte(repo), []byte(strconv.FormatInt(exp, 10))))
+// so the URL is the credential; it is bound to the entry, its repository, the
+// job it was issued to and an expiry. The job is what keeps a URL that left its
+// sandbox useless on the channel of any other.
+func (s *signer) archiveSig(id int64, repo, job string, exp int64) string {
+	return b64.EncodeToString(s.mac("archive", []byte(strconv.FormatInt(id, 10)), []byte(repo), []byte(job), []byte(strconv.FormatInt(exp, 10))))
 }
 
-func (s *signer) archiveOK(id int64, repo string, exp int64, sig string, now time.Time) bool {
+func (s *signer) archiveOK(id int64, repo, job string, exp int64, sig string, now time.Time) bool {
 	got, err := b64.DecodeString(sig)
 	if err != nil || now.Unix() >= exp {
 		return false
 	}
-	want, _ := b64.DecodeString(s.archiveSig(id, repo, exp))
+	want, _ := b64.DecodeString(s.archiveSig(id, repo, job, exp))
 	return hmac.Equal(got, want)
 }

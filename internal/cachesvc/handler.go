@@ -37,8 +37,13 @@ const (
 	readDenied  = "cache read denied: "
 )
 
-// Handler returns the HTTP handler of the cache service (API v1).
-func (s *Service) Handler() http.Handler {
+// Handler returns the HTTP handler of the cache service (API v1), for any job.
+func (s *Service) Handler() http.Handler { return s.handler("") }
+
+// handler is Handler for the channel of one job: with a job id, a token made
+// for another job is refused, so a token that left its sandbox is useless on
+// any other sandbox's channel.
+func (s *Service) handler(job string) http.Handler {
 	mux := http.NewServeMux()
 	// The routes are those of the toolkit's v1 client (cacheHttpClient.ts):
 	//   GET   cache?keys=k1,k2&version=v  :89  lookup
@@ -47,13 +52,13 @@ func (s *Service) Handler() http.Handler {
 	//   PATCH caches/{id} Content-Range   :230 chunk upload
 	//   POST  caches/{id} {size}          :330 commit
 	//   GET   <archiveLocation>           downloadUtils.ts:168 (no bearer token)
-	mux.HandleFunc("GET "+APIPath+"cache", s.auth(s.lookup))
-	mux.HandleFunc("GET "+APIPath+"caches", s.auth(s.listCaches))
-	mux.HandleFunc("POST "+APIPath+"caches", s.auth(s.reserve))
-	mux.HandleFunc("PATCH "+APIPath+"caches/{id}", s.auth(s.upload))
-	mux.HandleFunc("POST "+APIPath+"caches/{id}", s.auth(s.commit))
-	mux.HandleFunc("GET "+APIPath+"artifacts/{id}", s.download)
-	mux.HandleFunc("HEAD "+APIPath+"artifacts/{id}", s.download)
+	mux.HandleFunc("GET "+APIPath+"cache", s.auth(job, s.lookup))
+	mux.HandleFunc("GET "+APIPath+"caches", s.auth(job, s.listCaches))
+	mux.HandleFunc("POST "+APIPath+"caches", s.auth(job, s.reserve))
+	mux.HandleFunc("PATCH "+APIPath+"caches/{id}", s.auth(job, s.upload))
+	mux.HandleFunc("POST "+APIPath+"caches/{id}", s.auth(job, s.commit))
+	mux.HandleFunc("GET "+APIPath+"artifacts/{id}", s.download(job))
+	mux.HandleFunc("HEAD "+APIPath+"artifacts/{id}", s.download(job))
 	// net/http resets the write deadline per request only when the server has a
 	// WriteTimeout, which would cut long uploads and downloads: set a fresh
 	// progress deadline for each request here, so that a deadline left by the
@@ -69,9 +74,10 @@ func (s *Service) Handler() http.Handler {
 
 type handlerFunc func(w http.ResponseWriter, r *http.Request, c Claims)
 
-// auth checks the bearer token (ACTIONS_RUNTIME_TOKEN). Every refusal is a bare
-// 403 whatever the reason.
-func (s *Service) auth(h handlerFunc) http.HandlerFunc {
+// auth checks the bearer token (ACTIONS_RUNTIME_TOKEN), and when job is not
+// empty that it was made for that job. Every refusal is a bare 403 whatever the
+// reason.
+func (s *Service) auth(job string, h handlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		const p = "Bearer "
 		a := r.Header.Get("Authorization")
@@ -80,7 +86,7 @@ func (s *Service) auth(h handlerFunc) http.HandlerFunc {
 			return
 		}
 		c, err := s.sign.verify(strings.TrimSpace(a[len(p):]), s.now())
-		if err != nil {
+		if err != nil || (job != "" && c.JobID != job) {
 			reply(w, http.StatusForbidden, "forbidden")
 			return
 		}
@@ -123,7 +129,7 @@ type artifactCacheEntry struct {
 
 func (s *Service) entryJSON(r *http.Request, c Claims, e Entry) artifactCacheEntry {
 	exp := c.Expiry
-	q := url.Values{"exp": {strconv.FormatInt(exp, 10)}, "sig": {s.sign.archiveSig(e.ID, e.Repository, exp)}}
+	q := url.Values{"exp": {strconv.FormatInt(exp, 10)}, "job": {c.JobID}, "sig": {s.sign.archiveSig(e.ID, e.Repository, c.JobID, exp)}}
 	host := r.Host
 	return artifactCacheEntry{
 		CacheKey: e.Key, Scope: e.Ref, CacheVersion: e.Version,
@@ -398,16 +404,26 @@ func (s *Service) storeError(w http.ResponseWriter, err error) {
 
 // download serves an archive at the location given by a lookup. The client
 // fetches it without the bearer token (downloadUtils.ts:168), so the URL
-// carries the proof: an HMAC over the entry, its repository and an expiry.
-func (s *Service) download(w http.ResponseWriter, r *http.Request) {
+// carries the proof: an HMAC over the entry, its repository, the job the URL
+// was issued to and an expiry. On the channel of a job (job not empty) a URL
+// issued to another job is refused, as a token of another job is.
+func (s *Service) download(job string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		s.serveArchive(w, r, job)
+	}
+}
+
+func (s *Service) serveArchive(w http.ResponseWriter, r *http.Request, channelJob string) {
 	id, ok := parseID(r)
-	exp, err := strconv.ParseInt(r.URL.Query().Get("exp"), 10, 64)
-	if !ok || err != nil {
+	q := r.URL.Query()
+	exp, err := strconv.ParseInt(q.Get("exp"), 10, 64)
+	issued := q.Get("job")
+	if !ok || err != nil || issued == "" || (channelJob != "" && issued != channelJob) {
 		reply(w, http.StatusForbidden, "forbidden")
 		return
 	}
 	e, found := s.store.get(id)
-	if !found || !s.sign.archiveOK(id, e.Repository, exp, r.URL.Query().Get("sig"), s.now()) {
+	if !found || !s.sign.archiveOK(id, e.Repository, issued, exp, q.Get("sig"), s.now()) {
 		reply(w, http.StatusForbidden, "forbidden")
 		return
 	}

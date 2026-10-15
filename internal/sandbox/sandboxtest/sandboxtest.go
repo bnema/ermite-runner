@@ -7,12 +7,16 @@ import (
 	"context"
 	"encoding/binary"
 	"io"
+	"net"
+	"net/http"
 	"net/netip"
 	"os"
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
+	"bnema.dev/ermite-runner/internal/cachesvc"
 	"bnema.dev/ermite-runner/internal/cmdrun"
 	"bnema.dev/ermite-runner/internal/netpolicy"
 	"bnema.dev/ermite-runner/internal/sandbox"
@@ -122,6 +126,48 @@ func (e *Externals) Externals() []sandbox.External {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return append([]sandbox.External(nil), e.set...)
+}
+
+// NewCache starts a cache service in a temporary directory and closes it with
+// the test.
+func NewCache(t testing.TB) *cachesvc.Service {
+	t.Helper()
+	svc, err := cachesvc.New(cachesvc.Config{Dir: filepath.Join(t.TempDir(), "cache")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = svc.CloseAll() })
+	return svc
+}
+
+// CacheLookup sends a cache lookup with token over the Unix socket sock, as the
+// guest relay delivers it, and returns the HTTP status; the error is that of
+// the connection (the socket is closed or gone).
+func CacheLookup(sock, token string) (int, error) {
+	cl := &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, "unix", sock)
+		},
+		DisableKeepAlives: true,
+	}}
+	req, err := http.NewRequest("GET", "http://cache"+cachesvc.APIPath+"cache?keys=k&version=v", nil)
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := cl.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	_ = resp.Body.Close()
+	return resp.StatusCode, nil
+}
+
+// CacheToken is a token of the service for a job that may read and write main.
+func CacheToken(svc *cachesvc.Service, job string) string {
+	ref := "refs/heads/main"
+	return svc.Token(job, cachesvc.Scope{Repository: "bnema/app", WriteRef: ref, ReadRefs: []string{ref}}, time.Hour)
 }
 
 // MakeExternal creates a host directory holding bin/node with content and

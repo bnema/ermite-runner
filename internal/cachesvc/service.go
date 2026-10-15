@@ -11,32 +11,35 @@
 // (repository, ref, key, version). A job reaches the service with a bearer token
 // (ACTIONS_RUNTIME_TOKEN) that is an HMAC, made with a key that exists only in
 // the memory of the runner, over its job id, repository, write ref, read refs
-// and expiry. The service listens on the gateway address of each sandbox, on one
-// port that netpolicy opens to that sandbox only.
+// and expiry.
+//
+// The service never listens on a network. Each sandbox has a channel of its own
+// (Serve): a Unix socket, bind-mounted into a container or reached through
+// Firecracker's vsock proxy for a VM, on which the relay in the guest delivers
+// the connections of the actions, which reach it on the guest's loopback
+// (DefaultPort). The host opens no port and its firewall has no rule for it.
 package cachesvc
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
-	"net/netip"
 	"strconv"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/bnema/zerowrap"
-	"golang.org/x/sys/unix"
 )
 
 // Defaults.
 const (
 	// DefaultMax is the size cap, GitHub's limit per repository.
 	DefaultMax = 10 << 30
-	// DefaultPort is the TCP port on the gateway addresses.
-	DefaultPort = 8089
+	// DefaultPort is the TCP port of the cache on the loopback of the guest
+	// (ACTIONS_CACHE_URL=http://127.0.0.1:9089/), and the vsock port of the
+	// cache streams of a VM. It is not a port of the host.
+	DefaultPort = 9089
 	// EnvMax is ERMITE_RUNNER_CACHE_MAX, the size cap (1G, 500M…).
 	EnvMax = "ERMITE_RUNNER_CACHE_MAX"
 	// DefaultReservationTTL is how long an upload may stay uncommitted.
@@ -84,11 +87,11 @@ type Service struct {
 	now   func() time.Time
 	log   zerowrap.Logger
 
-	mu        sync.Mutex
-	listeners map[netip.Addr]*listener
-	stop      chan struct{}
-	wg        sync.WaitGroup
-	closed    bool
+	mu       sync.Mutex
+	channels map[string]*listener
+	stop     chan struct{}
+	wg       sync.WaitGroup
+	closed   bool
 
 	hookChunk   func(id int64)
 	progress    time.Duration
@@ -99,6 +102,7 @@ type Service struct {
 type listener struct {
 	srv  *http.Server
 	done chan struct{}
+	bw   *bandwidth // the channel's limiter; nil when unlimited (read by tests)
 }
 
 // New opens the store and starts the housekeeping goroutine; Close stops it.
@@ -130,7 +134,7 @@ func New(cfg Config) (*Service, error) {
 	if cfg.Conns <= 0 {
 		cfg.Conns = DefaultConns
 	}
-	s := &Service{store: st, sign: sg, now: cfg.Now, log: cfg.Log, listeners: map[netip.Addr]*listener{}, stop: make(chan struct{}),
+	s := &Service{store: st, sign: sg, now: cfg.Now, log: cfg.Log, channels: map[string]*listener{}, stop: make(chan struct{}),
 		hookChunk: cfg.hookChunk, progress: cfg.ProgressTimeout, perListener: cfg.ConnsPerListener, connsGlobal: make(chan struct{}, cfg.Conns)}
 	s.wg.Add(1)
 	go s.housekeeping()
@@ -161,62 +165,72 @@ func (s *Service) Token(jobID string, sc Scope, ttl time.Duration) string {
 	return s.sign.token(Claims{JobID: jobID, Scope: sc, Expiry: s.now().Add(ttl).Unix()})
 }
 
-// Listen serves the cache on addr:port, an address the caller has configured
-// (the gateway of a sandbox). freeBind lets the bind precede the address
-// (podman configures the bridge address late, like dnsfwd.Forwarder.FreeBind).
-func (s *Service) Listen(ctx context.Context, addr netip.Addr, port uint16, freeBind bool) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
-		return errors.New("cache: service closed")
+// start serves HTTP on ln, subject to the connection caps, until the listener
+// is closed. job, when not empty, restricts the tokens accepted to that job's.
+func (s *Service) start(name string, ln net.Listener, job string, bw *bandwidth) *listener {
+	if bw != nil {
+		ln = throttleListener{ln, bw}
 	}
-	if _, ok := s.listeners[addr]; ok {
-		return fmt.Errorf("cache: already listening on %s", addr)
-	}
-	var lc net.ListenConfig
-	if freeBind {
-		lc.Control = func(_, _ string, c syscall.RawConn) error {
-			var serr error
-			if err := c.Control(func(fd uintptr) { serr = unix.SetsockoptInt(int(fd), unix.IPPROTO_IP, unix.IP_FREEBIND, 1) }); err != nil {
-				return err
-			}
-			return serr
-		}
-	}
-	ln, err := lc.Listen(ctx, "tcp", net.JoinHostPort(addr.String(), strconv.Itoa(int(port))))
-	if err != nil {
-		return fmt.Errorf("cache: listen %s: %w", addr, err)
-	}
-	return s.serveLocked(addr, ln)
-}
-
-func (s *Service) serveLocked(addr netip.Addr, ln net.Listener) error {
 	ln = newLimitListener(ln, s.perListener, s.connsGlobal)
 	l := &listener{
 		srv: &http.Server{
-			Handler:           s.Handler(),
+			Handler:           s.handler(job),
 			ReadHeaderTimeout: 30 * time.Second,
 			// Bodies are chunks of up to tens of MiB and archives of GiB: only
 			// idle connections time out.
 			IdleTimeout: 2 * time.Minute,
 		},
 		done: make(chan struct{}),
+		bw:   bw,
 	}
-	s.listeners[addr] = l
 	go func() {
 		defer close(l.done)
 		if err := l.srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			s.log.Error().Err(err).Str("addr", addr.String()).Msg("cache listener")
+			s.log.Error().Err(err).Str("listener", name).Msg("cache listener")
 		}
 	}()
+	return l
+}
+
+// Serve serves the cache on ln, the host end of the channel of one sandbox
+// (id): a listener that is not on the network, such as the Unix socket on which
+// the relay of that sandbox's guest delivers its connections. Each sandbox has
+// its own listener and so its own handler, and nothing but that sandbox's guest
+// can connect to it. job is the id of the job the sandbox runs: only tokens made
+// for it are accepted on this channel, besides the checks of every token. The
+// connection caps apply as on any listener, and so does WithBandwidth when given:
+// one limiter per call, shared by all the connections of the channel, so that
+// the sandbox's cache traffic as a whole stays under its rate. Serve takes
+// ownership of ln: Stop (or CloseAll) closes it, and so does a failed Serve.
+func (s *Service) Serve(id string, ln net.Listener, job string, opts ...ServeOption) error {
+	var sc serveConfig
+	for _, o := range opts {
+		o(&sc)
+	}
+	if job == "" {
+		_ = ln.Close()
+		return errors.New("cache: a channel needs the job it serves")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		_ = ln.Close()
+		return errors.New("cache: service closed")
+	}
+	if _, ok := s.channels[id]; ok {
+		_ = ln.Close()
+		return fmt.Errorf("cache: already serving %s", id)
+	}
+	s.channels[id] = s.start(id, ln, job, newBandwidth(sc.bytesPerSec))
 	return nil
 }
 
-// Close stops listening on addr. Unknown addresses are ignored.
-func (s *Service) Close(addr netip.Addr) {
+// Stop ends the service of the channel of sandbox id, closing its listener and
+// every connection. Unknown ids are ignored.
+func (s *Service) Stop(id string) {
 	s.mu.Lock()
-	l := s.listeners[addr]
-	delete(s.listeners, addr)
+	l := s.channels[id]
+	delete(s.channels, id)
 	s.mu.Unlock()
 	if l != nil {
 		_ = l.srv.Close()
@@ -224,18 +238,18 @@ func (s *Service) Close(addr netip.Addr) {
 	}
 }
 
-// CloseAll stops every listener and the housekeeping, and writes the index.
+// CloseAll stops every channel and the housekeeping, and writes the index.
 func (s *Service) CloseAll() error {
 	s.mu.Lock()
-	var addrs []netip.Addr
-	for a := range s.listeners {
-		addrs = append(addrs, a)
+	var ids []string
+	for id := range s.channels {
+		ids = append(ids, id)
 	}
 	already := s.closed
 	s.closed = true
 	s.mu.Unlock()
-	for _, a := range addrs {
-		s.Close(a)
+	for _, id := range ids {
+		s.Stop(id)
 	}
 	if already {
 		return nil

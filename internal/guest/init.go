@@ -182,11 +182,6 @@ func runPayload(ctx context.Context, cfg InitConfig, mode string, args map[strin
 	}
 
 	execEnv := append(os.Environ(), "ERMITE_CONNECT="+target, "ERMITE_SANDBOX="+mode, "ERMITE_VERSION="+cfg.Version)
-	if gw := args[sandbox.CmdlineGateway]; gw != "" {
-		// A VM learns its gateway from the kernel command line; a container is
-		// given it in its environment (the container driver).
-		execEnv = append(execEnv, "ERMITE_GATEWAY="+gw)
-	}
 	execPid, err := spawn(cfg.ExecArgs, execEnv)
 	if err != nil {
 		log.Error().Err(err).Msg("init: start executor")

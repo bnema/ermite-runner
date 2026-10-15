@@ -359,7 +359,7 @@ func TestOtherRepositoryNeverRestored(t *testing.T) {
 	if code, data := r.fetch(e.Location); code != 200 || string(data) != "secret-a" {
 		t.Fatalf("control: %d %q", code, data)
 	}
-	forged := url.Values{"exp": {u.Query().Get("exp")}, "sig": {r.svc.sign.archiveSig(id, repoB, exp)}}
+	forged := url.Values{"exp": {u.Query().Get("exp")}, "job": {"j3"}, "sig": {r.svc.sign.archiveSig(id, repoB, "j3", exp)}}
 	if code, _ := r.fetch(r.srv.URL + APIPath + "artifacts/" + idStr + "?" + forged.Encode()); code != 403 {
 		t.Fatalf("signature for the other repository: %d", code)
 	}
@@ -399,7 +399,7 @@ func TestBadTokens(t *testing.T) {
 		t.Fatalf("no scheme: %d", resp.StatusCode)
 	}
 	// A token is not an archive signature, nor the other way round.
-	if r.svc.sign.archiveOK(1, repoA, 1<<40, good.token, r.clk.now()) {
+	if r.svc.sign.archiveOK(1, repoA, "j1", 1<<40, good.token, r.clk.now()) {
 		t.Fatal("token accepted as archive signature")
 	}
 	if code, _ := r.fetch(r.srv.URL + APIPath + "artifacts/1?exp=99999999999&sig=x"); code != 403 {

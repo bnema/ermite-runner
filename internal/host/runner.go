@@ -38,11 +38,10 @@ type Runner struct {
 	// "ci.summaries". Nil means neither is sent.
 	Features ServerFeatures
 	// Cache, when not nil, is the cache service of the runner; the sandbox
-	// drivers serve it on CachePort of each sandbox's gateway (see
-	// sandbox.Config.Cache), and each job gets a token scoped to its repository
-	// and refs.
-	Cache     *cachesvc.Service
-	CachePort uint16
+	// drivers serve it on a channel of each sandbox (see sandbox.Config.Cache),
+	// which the guest reaches on its loopback (cachesvc.DefaultPort), and each
+	// job gets a token scoped to its repository and refs.
+	Cache *cachesvc.Service
 
 	// now returns the current time; tests replace it.
 	now func() time.Time

@@ -106,10 +106,10 @@ func githubRepository(contexts string) string {
 	return c.Github.Repository
 }
 
-// cacheFor returns the cache port and the token of a job, or 0 and "" when the
-// runner serves no cache or the job has no scope.
+// cacheFor returns the loopback port the cache has in the guest and the token
+// of a job, or 0 and "" when the runner serves no cache or the job has no scope.
 func (j *jobRun) cacheFor(rt *Runner) (port uint32, token string) {
-	if rt.Cache == nil || rt.CachePort == 0 {
+	if rt.Cache == nil {
 		return 0, ""
 	}
 	sc, ok, err := cacheScope(j.job, j.contexts)
@@ -123,5 +123,5 @@ func (j *jobRun) cacheFor(rt *Runner) (port uint32, token string) {
 		return 0, ""
 	}
 	ttl := time.Duration(j.timeoutMinutes())*time.Minute + cacheTokenMargin
-	return uint32(rt.CachePort), rt.Cache.Token(j.job.JobId, sc, ttl)
+	return cachesvc.DefaultPort, rt.Cache.Token(j.job.JobId, sc, ttl)
 }

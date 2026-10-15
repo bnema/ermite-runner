@@ -742,9 +742,11 @@ type JobSpec struct {
 	SendAnnotations bool `protobuf:"varint,13,opt,name=send_annotations,json=sendAnnotations,proto3" json:"send_annotations,omitempty"`
 	SendSummaries   bool `protobuf:"varint,14,opt,name=send_summaries,json=sendSummaries,proto3" json:"send_summaries,omitempty"`
 	// cache_port and cache_token, when set, are the runner's cache service for
-	// this job: it listens on the sandbox's gateway address (the executor knows
-	// it: ERMITE_GATEWAY) on that TCP port. The executor gives
-	// ACTIONS_CACHE_URL=http://<gateway>:<port>/ and the token as
+	// this job. The service is not on the network: the executor starts a relay
+	// on the sandbox's own loopback, 127.0.0.1:<cache_port>, that carries each
+	// connection over the host channel (a vsock port, or a Unix socket next to
+	// the executor's) to the service. The executor gives
+	// ACTIONS_CACHE_URL=http://127.0.0.1:<port>/ and the token as
 	// ACTIONS_RUNTIME_TOKEN to node and docker actions only, as the official
 	// runner does, and masks the token. The token is not an ermite credential: it
 	// is an HMAC that only the runner's cache service accepts, scoped to this

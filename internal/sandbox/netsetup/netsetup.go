@@ -14,7 +14,6 @@ import (
 	"os"
 	"strings"
 
-	"bnema.dev/ermite-runner/internal/cachesvc"
 	"bnema.dev/ermite-runner/internal/cmdrun"
 	"bnema.dev/ermite-runner/internal/dnsfwd"
 	"bnema.dev/ermite-runner/internal/netpolicy"
@@ -37,14 +36,6 @@ var _ Plumbing = (*Net)(nil)
 type Net struct {
 	Policy *netpolicy.Manager
 	DNS    *dnsfwd.Forwarder
-	// Cache, when not nil, is the runner's cache service: it listens on the
-	// gateway of every guest, on CachePort, and netpolicy opens that port to
-	// that guest only.
-	Cache     *cachesvc.Service
-	CachePort uint16
-	// CacheFreeBind lets the cache listener bind before the gateway address
-	// exists (podman, like dnsfwd.Forwarder.FreeBind).
-	CacheFreeBind bool
 	// ForwardFile is the ip_forward sysctl; overridden in tests.
 	ForwardFile string
 }
@@ -77,20 +68,11 @@ func (n *Net) EnableForwarding() error {
 // gateway address, which must already be configured on the host interface.
 // On error nothing stays installed.
 func (n *Net) Attach(ctx context.Context, g netpolicy.Guest) error {
-	if n.Cache != nil {
-		g.CachePort = n.CachePort
-	}
 	if err := n.Policy.Add(ctx, g); err != nil {
 		return err
 	}
 	if err := n.DNS.Listen(ctx, g.Gateway); err != nil {
 		return errors.Join(err, n.Policy.Remove(context.WithoutCancel(ctx), g.Iface))
-	}
-	if n.Cache != nil {
-		if err := n.Cache.Listen(ctx, g.Gateway, n.CachePort, n.CacheFreeBind); err != nil {
-			n.DNS.Close(g.Gateway)
-			return errors.Join(err, n.Policy.Remove(context.WithoutCancel(ctx), g.Iface))
-		}
 	}
 	return nil
 }
@@ -98,9 +80,6 @@ func (n *Net) Attach(ctx context.Context, g netpolicy.Guest) error {
 // Detach undoes Attach. It is idempotent and keeps going after an error.
 func (n *Net) Detach(ctx context.Context, iface string, gateway netip.Addr) error {
 	n.DNS.Close(gateway)
-	if n.Cache != nil {
-		n.Cache.Close(gateway)
-	}
 	return n.Policy.Remove(ctx, iface)
 }
 
@@ -108,8 +87,7 @@ func (n *Net) Detach(ctx context.Context, iface string, gateway netip.Addr) erro
 // run. Only the table is touched, never other tables.
 func (n *Net) Reset(ctx context.Context) error { return n.Policy.Reset(ctx) }
 
-// Close stops every DNS listener. Cache listeners end with Detach; the cache
-// service itself belongs to whoever made it.
+// Close stops every DNS listener.
 func (n *Net) Close() {
 	n.DNS.CloseAll()
 }

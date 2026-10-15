@@ -8,7 +8,7 @@ import (
 )
 
 const (
-	cacheTestURL   = "http://10.200.0.1:8089/"
+	cacheTestURL   = "http://127.0.0.1:9089/"
 	cacheTestToken = "eyJqIjoiMSJ9.c2lnbmF0dXJl"
 )
 

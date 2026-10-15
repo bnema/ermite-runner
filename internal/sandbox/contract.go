@@ -2,7 +2,11 @@
 
 package sandbox
 
-import "os"
+import (
+	"os"
+
+	"bnema.dev/ermite-runner/internal/cachesvc"
+)
 
 // The host/guest contract shared by the drivers and the guest side
 // (internal/guest). Changing a value here changes both sides at once because
@@ -10,6 +14,15 @@ import "os"
 const (
 	// VsockPort is the vsock port the executor connects to on the host (CID 2).
 	VsockPort = 1024
+	// CacheVsockPort is the vsock port of the cache streams of a VM: each TCP
+	// connection the guest relay accepts on its loopback opens one connection to
+	// the host (CID 2) on this port. It is also the loopback port of the cache in
+	// the guest.
+	CacheVsockPort = cachesvc.DefaultPort
+	// CacheSocket is the cache stream socket of a container, next to the
+	// executor socket in ContainerRunDir; one connection per relayed TCP
+	// connection.
+	CacheSocket = "cache.sock"
 	// GuestExecDir and GuestExecName locate the runner executable inside the
 	// sandbox (read-only), in both modes.
 	GuestExecDir  = "/opt/ermite"

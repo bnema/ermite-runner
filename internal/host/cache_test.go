@@ -134,7 +134,7 @@ func TestCacheForMismatchDisablesCache(t *testing.T) {
 		job:      &ermite.Job{JobId: "j1", Ref: "refs/heads/main", Cache: &ermite.JobCache{Repository: "o/other", WriteRef: "refs/heads/main"}},
 		contexts: scopeCtx, log: zerowrap.New(zerowrap.Config{Output: &logs, Format: "json", Level: "debug"}),
 	}
-	if port, tok := j.cacheFor(&Runner{Cache: svc, CachePort: 8089}); port != 0 || tok != "" {
+	if port, tok := j.cacheFor(&Runner{Cache: svc}); port != 0 || tok != "" {
 		t.Fatalf("cache for a mismatched scope: %d %q", port, tok)
 	}
 	if !strings.Contains(logs.String(), "cache disabled for the job") || !strings.Contains(logs.String(), "o/other") {
@@ -159,10 +159,11 @@ func TestCacheForToken(t *testing.T) {
 	t.Cleanup(func() { _ = svc.CloseAll() })
 	srv := httptest.NewServer(svc.Handler())
 	defer srv.Close()
-	rt := &Runner{Cache: svc, CachePort: 8089}
+	rt := &Runner{Cache: svc}
 	j := &jobRun{job: &ermite.Job{JobId: "j1", Ref: "refs/heads/main", TimeoutMinutes: 5}, contexts: `{"github":{"repository":"o/r"}}`}
 	port, tok := j.cacheFor(rt)
-	if port != 8089 || tok == "" {
+	// The port is the cache's loopback port in the guest, not a host port.
+	if port != 9089 || tok == "" {
 		t.Fatalf("%d %q", port, tok)
 	}
 	do := func(token string) int {

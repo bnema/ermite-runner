@@ -164,7 +164,6 @@ func New(ctx context.Context, cfg sandbox.Config, opt Options) (*Driver, error) 
 	d.net = opt.Net
 	if d.net == nil {
 		n := newNet(opt.Run, cfg.DNSPort, info.Podman, cfg.GuestForge.DNSName())
-		n.Cache, n.CachePort, n.CacheFreeBind = cfg.Cache, cfg.CachePort, info.Podman
 		d.net = n
 	}
 	if err := d.net.EnableForwarding(); err != nil {
@@ -188,6 +187,24 @@ func newNet(run cmdrun.Runner, dnsPort int, podman bool, forgeHost string) *nets
 
 // maxSockPath is the longest Unix socket path Linux accepts (108 with the NUL).
 const maxSockPath = 107
+
+// checkSockPaths verifies that the sockets of a job's socket directory fit in
+// sockaddr_un.sun_path (108 bytes): the executor socket and, when the cache is
+// enabled, the cache socket, which is one byte longer. It says so instead of the
+// "invalid argument" of bind.
+func checkSockPaths(dir string, cache bool) error {
+	socks := []struct{ what, name string }{{"executor", sandbox.ContainerSocket}}
+	if cache {
+		socks = append(socks, struct{ what, name string }{"cache", sandbox.CacheSocket})
+	}
+	for _, s := range socks {
+		p := filepath.Join(dir, s.name)
+		if len(p) > maxSockPath {
+			return fmt.Errorf("%s socket path %q is %d bytes, over the %d-byte limit of a Unix socket: use a shorter %s", s.what, p, len(p), maxSockPath, sandbox.EnvStateDir)
+		}
+	}
+	return nil
+}
 
 // privilegedWarning is logged when the driver starts and again at every job
 // start: a privileged container is host-root equivalent.
@@ -276,6 +293,7 @@ type containerSandbox struct {
 	container string
 	mounted   bool
 	listener  net.Listener
+	cacheOn   bool
 	conn      net.Conn
 	iface     string
 	gateway   netip.Addr
@@ -337,6 +355,9 @@ func (s *containerSandbox) run(ctx context.Context, spec sandbox.JobSpec) (sandb
 	if err != nil {
 		return nil, err
 	}
+	if err := s.runCache(spec); err != nil {
+		return nil, err
+	}
 	if err := s.runScratch(ctx, spec); err != nil {
 		return nil, err
 	}
@@ -371,9 +392,8 @@ func (s *containerSandbox) runSocket() (<-chan acceptResult, error) {
 	}
 	dir := d.sockDir(s.id)
 	sock := filepath.Join(dir, sandbox.ContainerSocket)
-	// sockaddr_un.sun_path holds 108 bytes: say so instead of "invalid argument".
-	if len(sock) > maxSockPath {
-		return nil, fmt.Errorf("executor socket path %q is %d bytes, over the %d-byte limit of a Unix socket: use a shorter %s", sock, len(sock), maxSockPath, sandbox.EnvStateDir)
+	if err := checkSockPaths(dir, d.cfg.Cache != nil); err != nil {
+		return nil, err
 	}
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
@@ -391,6 +411,27 @@ func (s *containerSandbox) runSocket() (<-chan acceptResult, error) {
 		accepted <- acceptResult{c, err}
 	}()
 	return accepted, nil
+}
+
+// runCache serves the cache on a second socket of the job's private
+// directory, next to the executor socket: the guest relay of the container
+// connects to /run/ermite/cache.sock. Only this container has that directory
+// mounted, and the service accepts on it the tokens of this job only.
+func (s *containerSandbox) runCache(spec sandbox.JobSpec) error {
+	d := s.d
+	if d.cfg.Cache == nil {
+		return nil
+	}
+	sock := filepath.Join(d.sockDir(s.id), sandbox.CacheSocket)
+	// The container's root may be a mapped (sysbox) user: it must be able to
+	// connect, as for the executor socket.
+	// No bandwidth limit (0): a container has no per-job network rate limit
+	// (NetMbit is a micro-VM setting), and its cache traffic is a local socket.
+	if err := d.cfg.ServeCache(s.id, sock, spec.JobID, 0, func(p string) error { return os.Chmod(p, 0o666) }); err != nil {
+		return fmt.Errorf("serve the cache socket: %w", err)
+	}
+	s.cacheOn = true
+	return nil
 }
 
 // runScratch creates the sparse ext4 scratch disk (ERMITE_RUNNER_JOB_DISK) and
@@ -449,7 +490,7 @@ func (s *containerSandbox) runContainer(ctx context.Context, spec sandbox.JobSpe
 		Name:       "ermite-" + s.id,
 		Image:      d.image,
 		Entrypoint: []string{entry, "init"},
-		Env:        []string{"ERMITE_CONNECT=unix:" + sandbox.ContainerRunDir + "/" + sandbox.ContainerSocket, "ERMITE_GATEWAY=" + netw.Gateway.String()},
+		Env:        []string{"ERMITE_CONNECT=unix:" + sandbox.ContainerRunDir + "/" + sandbox.ContainerSocket},
 		Labels:     labels,
 		Runtime:    d.runtime,
 		Privileged: d.privileged,
@@ -544,6 +585,10 @@ func (s *containerSandbox) cleanupLocked(ctx context.Context) error {
 	if s.listener != nil {
 		_ = s.listener.Close()
 		s.listener = nil
+	}
+	if s.cacheOn {
+		d.cfg.StopCache(s.id)
+		s.cacheOn = false
 	}
 	if s.container != "" {
 		if err := d.eng.RemoveContainer(ctx, s.container); err != nil {

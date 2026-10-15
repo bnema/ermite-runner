@@ -152,7 +152,6 @@ func New(ctx context.Context, cfg sandbox.Config, opt Options) (*Driver, error) 
 	if d.net == nil {
 		n := netsetup.New(opt.Run, cfg.DNSPort, "")
 		n.DNS.Override = cfg.GuestForge.DNSName()
-		n.Cache, n.CachePort = cfg.Cache, cfg.CachePort
 		d.net = n
 	}
 	if cfg.GuestForge != nil {
@@ -247,6 +246,7 @@ type vmSandbox struct {
 	exited   chan struct{}
 	console  *ring
 	listener net.Listener
+	cacheOn  bool
 	conn     net.Conn
 	tap      string
 	gateway  netip.Addr
@@ -331,6 +331,9 @@ func (s *vmSandbox) boot(ctx context.Context, spec sandbox.JobSpec) (sandbox.Con
 	}
 	accepted, err := s.bootVsock()
 	if err != nil {
+		return nil, err
+	}
+	if err := s.bootCache(spec); err != nil {
 		return nil, err
 	}
 	if err := api.configure(ctx, s.vmConfig(spec, netw, files)); err != nil {
@@ -440,6 +443,33 @@ func (s *vmSandbox) bootVsock() (<-chan acceptResult, error) {
 	return accepted, nil
 }
 
+// cacheSocket is the host side of the cache streams of the VM: Firecracker
+// connects to <uds_path>_<CacheVsockPort> each time the guest relay connects to
+// the host on that vsock port. The path is inside this VM's own directory (its
+// chroot with the jailer), so no other VM reaches it.
+func (s *vmSandbox) cacheSocket() string {
+	return s.lay.host(udsName) + fmt.Sprintf("_%d", sandbox.CacheVsockPort)
+}
+
+// bootCache serves the cache on the VM's cache socket, owned by the jailed uid
+// as the executor's.
+func (s *vmSandbox) bootCache(spec sandbox.JobSpec) error {
+	if s.d.cfg.Cache == nil {
+		return nil
+	}
+	err := s.d.cfg.ServeCache(s.id, s.cacheSocket(), spec.JobID, s.d.cfg.NetMbit, func(p string) error {
+		if s.lay.jailed {
+			return os.Lchown(p, s.lay.uid, s.lay.uid)
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("serve the cache socket: %w", err)
+	}
+	s.cacheOn = true
+	return nil
+}
+
 const udsName = "v.sock"
 
 // maxSockPath is the longest Unix socket path Linux accepts (108 with the NUL).
@@ -454,7 +484,7 @@ func socketPaths(stateDir, execName string, jailed bool) []string {
 	if jailed {
 		api = lay.host("run/firecracker.socket")
 	}
-	return []string{api, lay.host(udsName) + fmt.Sprintf("_%d", sandbox.VsockPort)}
+	return []string{api, lay.host(udsName) + fmt.Sprintf("_%d", sandbox.VsockPort), lay.host(udsName) + fmt.Sprintf("_%d", sandbox.CacheVsockPort)}
 }
 
 // checkSocketPaths refuses a state directory that makes a VM socket path longer
@@ -706,6 +736,10 @@ func (s *vmSandbox) cleanupLocked(ctx context.Context) error {
 	if s.listener != nil {
 		_ = s.listener.Close()
 		s.listener = nil
+	}
+	if s.cacheOn {
+		d.cfg.StopCache(s.id)
+		s.cacheOn = false
 	}
 	dead := true
 	// No kill(-pgid) of the launched command: once it has been waited for, its

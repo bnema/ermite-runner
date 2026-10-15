@@ -214,6 +214,8 @@ func runJob(ctx context.Context, conn *execstream.Conn, cfg ExecConfig, spec *ex
 	canceller := executor.NewCanceller()
 	rep := &frameReporter{conn: conn, failed: make(chan struct{})}
 	res := newResolver(conn)
+	cacheEnv := startCacheRelay(ctx, cfg.Target, spec)
+	defer cacheEnv.close()
 
 	// Frames from the host while the job runs: a Cancel stops the job; a lost
 	// host does too, like a runner shutdown. The reader ends with the stream: the
@@ -257,7 +259,7 @@ func runJob(ctx context.Context, conn *execstream.Conn, cfg ExecConfig, spec *ex
 		Runner:        executor.RunnerInfo{Name: spec.GetRunnerName(), Environment: env},
 		RunnerVersion: spec.GetRunnerVersion(),
 		Home:          su.Home, ToolCache: os.Getenv("RUNNER_TOOL_CACHE"), BaseEnv: stepEnv(os.Environ(), su), Credential: su.Credential,
-		CacheURL: cacheURL(os.Getenv("ERMITE_GATEWAY"), spec.GetCachePort()), CacheToken: spec.GetCacheToken(),
+		CacheURL: cacheEnv.url, CacheToken: cacheEnv.token,
 		Debug: spec.GetDebug(), Reporter: rep, Actions: executor.DefaultActionsConfig(res.resolve), Log: zerowrap.FromCtx(ctx),
 		Secrets: vals.secrets, Vars: vals.vars, SecretsWithheld: spec.GetSecretsWithheld(), TokenPermissions: tokenPermissions(spec),
 		SendAnnotations: spec.GetSendAnnotations(), SendSummaries: spec.GetSendSummaries(),
@@ -269,14 +271,49 @@ func runJob(ctx context.Context, conn *execstream.Conn, cfg ExecConfig, spec *ex
 	return 1
 }
 
-// cacheURL is ACTIONS_CACHE_URL: the cache service of the runner on the gateway
-// of the sandbox. The trailing slash matters: the toolkit appends "_apis/…"
-// to it (cacheHttpClient.ts:47). Empty when the job has no cache service.
-func cacheURL(gateway string, port uint32) string {
-	if gateway == "" || port == 0 || port > 65535 {
+// cacheURL is ACTIONS_CACHE_URL: the cache service of the runner on the
+// loopback of the sandbox, where the relay listens. The trailing slash matters:
+// the toolkit appends "_apis/…" to it (cacheHttpClient.ts:47). Empty when the
+// job has no cache service.
+func cacheURL(port uint32) string {
+	if port == 0 || port > 65535 {
 		return ""
 	}
-	return "http://" + net.JoinHostPort(gateway, strconv.FormatUint(uint64(port), 10)) + "/"
+	return "http://" + net.JoinHostPort(CacheListenHost, strconv.FormatUint(uint64(port), 10)) + "/"
+}
+
+// cacheRelay is the cache of a job in the sandbox: the relay, the URL of the
+// loopback it listens on and the token of the job. All are empty without a cache
+// service.
+type cacheRelay struct {
+	relay      *Relay
+	url, token string
+}
+
+func (c cacheRelay) close() {
+	if c.relay != nil {
+		_ = c.relay.Close()
+	}
+}
+
+// startCacheRelay starts the relay of the cache for a job that has a cache
+// service: it listens on the loopback port the host says and pipes every
+// connection to a new stream on the cache channel of the host (a sibling of
+// the executor's target). A relay that cannot start leaves the job without a
+// cache, like a scope the host refuses: the job runs.
+func startCacheRelay(ctx context.Context, target Target, spec *execpb.JobSpec) cacheRelay {
+	url := cacheURL(spec.GetCachePort())
+	if url == "" || spec.GetCacheToken() == "" {
+		return cacheRelay{}
+	}
+	addr := net.JoinHostPort(CacheListenHost, strconv.FormatUint(uint64(spec.GetCachePort()), 10))
+	r, err := StartRelay(ctx, addr, target.CacheTarget().DialStream, DefaultRelayMax)
+	if err != nil {
+		log := zerowrap.FromCtx(ctx)
+		log.Warn().Err(err).Msg("job runs without the cache")
+		return cacheRelay{}
+	}
+	return cacheRelay{relay: r, url: url, token: spec.GetCacheToken()}
 }
 
 // failSetup ends a job that cannot start, like a failed "Set up job": step 1
