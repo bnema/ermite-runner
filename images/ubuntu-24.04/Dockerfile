@@ -12,7 +12,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       bash build-essential ca-certificates curl e2fsprogs git gnupg iproute2 \
-      iptables jq kmod procps python-is-python3 python3 sudo tzdata unzip xz-utils zip \
+      iptables jq kmod procps python-is-python3 python3 ruby sudo tzdata unzip xz-utils zip \
  && rm -rf /var/lib/apt/lists/*
 
 # The command-line tools of GitHub's ubuntu-24.04 image that workflows call
