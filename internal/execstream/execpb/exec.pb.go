@@ -758,6 +758,17 @@ type JobSpec struct {
 	// secrets are not available. Never set for servers without the feature, for
 	// which an absent Job.trusted only means "not sent".
 	SecretsWithheld bool `protobuf:"varint,19,opt,name=secrets_withheld,json=secretsWithheld,proto3" json:"secrets_withheld,omitempty"`
+	// id_token_url and id_token_request_token are Job.id_token_url and
+	// Job.id_token_request_token: the OIDC token endpoint of the server, its
+	// origin rewritten as for github.server_url, and the bearer for it. The
+	// executor gives them as ACTIONS_ID_TOKEN_REQUEST_URL and
+	// ACTIONS_ID_TOKEN_REQUEST_TOKEN to run steps, node actions and docker
+	// actions (ScriptHandler.cs:315-319, NodeScriptActionHandler.cs:66-70,
+	// ContainerActionHandler.cs:232-236), and masks the token before anything
+	// runs. Both are set or neither. (21 and 22 are taken by the artifacts
+	// branch.)
+	IdTokenUrl          string `protobuf:"bytes,23,opt,name=id_token_url,json=idTokenUrl,proto3" json:"id_token_url,omitempty"`
+	IdTokenRequestToken string `protobuf:"bytes,24,opt,name=id_token_request_token,json=idTokenRequestToken,proto3" json:"id_token_request_token,omitempty"`
 	// token_permissions are the effective permissions of the job's GITHUB_TOKEN
 	// as the server sent them (Job.permissions, feature ci.secrets): "Set up job"
 	// prints them instead of working them out from the workflow. Unset when the
@@ -928,6 +939,20 @@ func (x *JobSpec) GetSecretsWithheld() bool {
 		return x.SecretsWithheld
 	}
 	return false
+}
+
+func (x *JobSpec) GetIdTokenUrl() string {
+	if x != nil {
+		return x.IdTokenUrl
+	}
+	return ""
+}
+
+func (x *JobSpec) GetIdTokenRequestToken() string {
+	if x != nil {
+		return x.IdTokenRequestToken
+	}
+	return ""
 }
 
 func (x *JobSpec) GetTokenPermissions() *TokenPermissions {
@@ -1932,7 +1957,7 @@ const file_exec_proto_rawDesc = "" +
 	"\x03job\x18\x03 \x01(\v2\x1e.ermite.runner.exec.v1.JobSpecR\x03job\x1a6\n" +
 	"\bEnvEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xf2\x05\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xc9\x06\n" +
 	"\aJobSpec\x12#\n" +
 	"\rworkflow_path\x18\x01 \x01(\tR\fworkflowPath\x12#\n" +
 	"\rworkflow_yaml\x18\x02 \x01(\tR\fworkflowYaml\x12\x17\n" +
@@ -1955,7 +1980,10 @@ const file_exec_proto_rawDesc = "" +
 	"cache_port\x18\x0f \x01(\rR\tcachePort\x12\x1f\n" +
 	"\vcache_token\x18\x10 \x01(\tR\n" +
 	"cacheToken\x12)\n" +
-	"\x10secrets_withheld\x18\x13 \x01(\bR\x0fsecretsWithheld\x12T\n" +
+	"\x10secrets_withheld\x18\x13 \x01(\bR\x0fsecretsWithheld\x12 \n" +
+	"\fid_token_url\x18\x17 \x01(\tR\n" +
+	"idTokenUrl\x123\n" +
+	"\x16id_token_request_token\x18\x18 \x01(\tR\x13idTokenRequestToken\x12T\n" +
 	"\x11token_permissions\x18\x14 \x01(\v2'.ermite.runner.exec.v1.TokenPermissionsR\x10tokenPermissions\x12\x1d\n" +
 	"\n" +
 	"cache_mode\x18\x15 \x01(\tR\tcacheMode\x12\x18\n" +

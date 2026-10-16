@@ -101,7 +101,7 @@ func (j *job) containerScript(c *container, plan ShellPlan, in scriptIn, s *step
 	if len(sc.Argv) > 1 {
 		rest = sc.Argv[1:]
 	}
-	henv := j.handlerEnv(s.env)
+	henv := j.handlerEnv(s.actEnv)
 	if err := checkEnvNames(henv.Keys()); err != nil {
 		return nil, err
 	}

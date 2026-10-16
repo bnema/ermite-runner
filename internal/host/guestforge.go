@@ -81,16 +81,14 @@ func RewriteServerURLs(contexts, target string) (string, error) {
 			continue
 		}
 		s, ok := str(m.val)
-		if !ok || originOf(s) != public {
+		if !ok {
 			continue
 		}
-		rest := s[strings.Index(s, "://")+3:]
-		if k := strings.IndexAny(rest, "/?#"); k >= 0 {
-			rest = rest[k:]
-		} else {
-			rest = ""
+		u, ok := rewriteOrigin(s, public, target)
+		if !ok {
+			continue
 		}
-		nv, err := marshalNoEscape(target + rest)
+		nv, err := marshalNoEscape(u)
 		if err != nil {
 			return "", err
 		}
@@ -108,6 +106,22 @@ func RewriteServerURLs(contexts, target string) (string, error) {
 		return "", err
 	}
 	return string(out), nil
+}
+
+// rewriteOrigin returns raw with its origin replaced by target and true when
+// the origin of raw is public (as originOf spells it); the path, the query and
+// the fragment are kept. Anything else is returned as it is, with false.
+func rewriteOrigin(raw, public, target string) (string, bool) {
+	if public == "" || target == "" || originOf(raw) != public {
+		return raw, false
+	}
+	rest := raw[strings.Index(raw, "://")+3:]
+	if k := strings.IndexAny(rest, "/?#"); k >= 0 {
+		rest = rest[k:]
+	} else {
+		rest = ""
+	}
+	return target + rest, true
 }
 
 // originOf returns "scheme://host[:port]" of an http(s) URL, lower-cased and

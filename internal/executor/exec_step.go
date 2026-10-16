@@ -38,6 +38,8 @@ func (j *job) execute(s *stepRun, stepCancel <-chan struct{}) stepResult {
 	if err != nil {
 		return fail(err) // the group stays open, like the original
 	}
+	// What the handler adds goes to the process only, after the header.
+	s.actEnv = j.scriptEnv(s)
 	if c := j.stepContainer(); c != nil {
 		argv, err := j.containerScript(c, plan, in, s)
 		if err != nil {

@@ -265,6 +265,7 @@ func runJob(ctx context.Context, conn *execstream.Conn, cfg ExecConfig, spec *ex
 		Secrets: vals.secrets, Vars: vals.vars, SecretsWithheld: spec.GetSecretsWithheld(), TokenPermissions: tokenPermissions(spec),
 		SendAnnotations: spec.GetSendAnnotations(), SendSummaries: spec.GetSendSummaries(),
 		TermAfter: cfg.TermAfter, KillAfter: cfg.KillAfter, WaitDelay: cfg.WaitDelay,
+		IDTokenURL: spec.GetIdTokenUrl(), IDTokenRequestToken: spec.GetIdTokenRequestToken(),
 	})
 	if result.Conclusion == executor.ConclusionSuccess {
 		return 0

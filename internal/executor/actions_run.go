@@ -206,6 +206,9 @@ func (j *job) runAction(s *stepRun, cancel <-chan struct{}) stepResult {
 		return fail(err)
 	}
 	j.printDetails(s, in, env)
+	if def.kind == kindNode || def.kind == kindDocker {
+		j.addIDTokenEnv(env)
+	}
 	switch def.kind {
 	case kindNode:
 		return j.runNode(s, def, in, env, cancel)

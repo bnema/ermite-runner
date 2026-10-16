@@ -107,6 +107,12 @@ type Config struct {
 	// job" prints as they are. Nil means the server sent none: they are then
 	// worked out from the workflow. An empty, non-nil map is "none at all".
 	TokenPermissions map[string]string
+	// IDTokenURL and IDTokenRequestToken are Job.id_token_url (its origin
+	// already rewritten for the sandbox) and Job.id_token_request_token:
+	// ACTIONS_ID_TOKEN_REQUEST_URL and ACTIONS_ID_TOKEN_REQUEST_TOKEN of the run
+	// steps, node actions and docker actions (see addIDTokenEnv). Nothing is set
+	// unless both are. The token is masked before anything is reported.
+	IDTokenURL, IDTokenRequestToken string
 	// Debug turns ##[debug] lines on (ACTIONS_STEP_DEBUG).
 	Debug bool
 	// Actions configures the actions of the job (resolution, downloads, Node.js,
@@ -258,6 +264,7 @@ func Run(cancel *Canceller, cfg Config) Result {
 	// values), so a one-character secret is masked too.
 	j.masker.Store(newMasker())
 	registerSecrets(j.masker.Load(), cfg.Secrets)
+	j.masker.Load().add(cfg.IDTokenRequestToken)
 	j.cfg.Reporter = &maskReporter{j: j, next: cfg.Reporter}
 	defer func() {
 		if j.fc != nil {

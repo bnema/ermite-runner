@@ -414,3 +414,26 @@ func TestTokenPermissionsNilVersusEmpty(t *testing.T) {
 		}
 	}
 }
+
+// JobSpec.id_token_url and id_token_request_token reach the run steps as
+// ACTIONS_ID_TOKEN_REQUEST_URL and ACTIONS_ID_TOKEN_REQUEST_TOKEN, the token
+// masked in every log line.
+func TestExecJobGetsIDTokenRequest(t *testing.T) {
+	requireBash(t)
+	const url, token = "http://ermite.example:8088/-/oidc/token?api-version=2.0", "ermiteoidc_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+	yaml := "on: push\njobs:\n  j:\n    runs-on: x\n    steps:\n      - run: echo \"oidc [$ACTIONS_ID_TOKEN_REQUEST_URL] [$ACTIONS_ID_TOKEN_REQUEST_TOKEN]\"\n"
+	_, logs, res, _ := runJobSessionSpec(t, yaml, "", nil, func(s *execpb.JobSpec) { s.IdTokenUrl, s.IdTokenRequestToken = url, token })
+	if res == nil || res.Conclusion != execpb.StepConclusion_STEP_CONCLUSION_SUCCESS {
+		t.Fatalf("%+v", res)
+	}
+	found := false
+	for _, l := range logs {
+		if strings.Contains(l.Text, token) {
+			t.Errorf("the token is in the log: %q", l.Text)
+		}
+		found = found || l.Text == "oidc ["+url+"] [***]"
+	}
+	if !found {
+		t.Error("the step did not print the variables")
+	}
+}

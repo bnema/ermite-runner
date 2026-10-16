@@ -700,6 +700,7 @@ func (j *jobRun) drive(conn sandbox.Conn, rt *Runner) (*execpb.Exit, error) {
 		// only when the server has ci.secrets.
 		SecretsWithheld: j.features.secrets && !j.job.Trusted,
 	}}
+	run.Job.IdTokenUrl, run.Job.IdTokenRequestToken = j.idTokenRequest()
 	if p := j.job.Permissions; p != nil && j.features.secrets {
 		run.Job.TokenPermissions = &execpb.TokenPermissions{Levels: p.GetLevels()}
 	}
@@ -713,6 +714,22 @@ func (j *jobRun) drive(conn sandbox.Conn, rt *Runner) (*execpb.Exit, error) {
 		Secrets: j.job.Secrets, Vars: j.job.Vars,
 	})
 	return exit, err
+}
+
+// idTokenRequest returns Job.id_token_url, its origin rewritten to the guest
+// forge as for github.server_url (RewriteServerURLs), and
+// Job.id_token_request_token: the ACTIONS_ID_TOKEN_REQUEST_URL and
+// ACTIONS_ID_TOKEN_REQUEST_TOKEN of the steps. Both are empty unless the
+// server sent both. The token is never logged.
+func (j *jobRun) idTokenRequest() (url, token string) {
+	url, token = j.job.GetIdTokenUrl(), j.job.GetIdTokenRequestToken()
+	if url == "" || token == "" {
+		return "", ""
+	}
+	if j.guestForge != "" {
+		url, _ = rewriteOrigin(url, j.publicOrigin, j.guestForge)
+	}
+	return url, token
 }
 
 // outcomeOf decides how the job ended from what the executor reported and what

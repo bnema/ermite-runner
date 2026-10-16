@@ -109,6 +109,17 @@ message JobSpec {
   // secrets are not available. Never set for servers without the feature, for
   // which an absent Job.trusted only means "not sent".
   bool secrets_withheld = 19;
+  // id_token_url and id_token_request_token are Job.id_token_url and
+  // Job.id_token_request_token: the OIDC token endpoint of the server, its
+  // origin rewritten as for github.server_url, and the bearer for it. The
+  // executor gives them as ACTIONS_ID_TOKEN_REQUEST_URL and
+  // ACTIONS_ID_TOKEN_REQUEST_TOKEN to run steps, node actions and docker
+  // actions (ScriptHandler.cs:315-319, NodeScriptActionHandler.cs:66-70,
+  // ContainerActionHandler.cs:232-236), and masks the token before anything
+  // runs. Both are set or neither. (21 and 22 are taken by the artifacts
+  // branch.)
+  string id_token_url = 23;
+  string id_token_request_token = 24;
   // token_permissions are the effective permissions of the job's GITHUB_TOKEN
   // as the server sent them (Job.permissions, feature ci.secrets): "Set up job"
   // prints them instead of working them out from the workflow. Unset when the
