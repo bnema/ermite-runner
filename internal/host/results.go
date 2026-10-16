@@ -32,7 +32,7 @@ const (
 const (
 	maxAnnotationsPerLevel = 10
 	maxAnnotationMessage   = 4096
-	maxAnnotationTitle     = 255
+	maxAnnotationTitle     = 4096
 	maxAnnotationFile      = 1024
 	maxSummaryBytes        = 1 << 20
 )

@@ -154,18 +154,18 @@ func TestFeaturesUnreachableMeansNothingIsSent(t *testing.T) {
 }
 
 // The host enforces the limits of the contract on what the guest sends: ten
-// per level, 4096 characters, titles of 255, valid numbers.
+// per level, 4096 characters, titles of 4096, valid numbers.
 func TestGuestAnnotationsAreBoundedByTheHost(t *testing.T) {
 	var many []*execpb.Annotation
 	for range 12 {
 		many = append(many, &execpb.Annotation{Level: lWarn, Message: "w"})
 	}
 	many = append(many,
-		&execpb.Annotation{Level: lFail, Message: strings.Repeat("é", 4097)},                                  // too long: dropped
-		&execpb.Annotation{Level: lFail, Message: strings.Repeat("é", 4096), Title: strings.Repeat("t", 300)}, // kept, title cut
-		&execpb.Annotation{Level: lFail, Message: ""},                                                         // empty: dropped
-		&execpb.Annotation{Level: execpb.AnnotationLevel_ANNOTATION_LEVEL_UNSPECIFIED, Message: "no level"},   // dropped
-		&execpb.Annotation{Level: lFail, Message: "bad numbers", StartLine: -4, EndLine: -1, StartColumn: 5},  // numbers made valid
+		&execpb.Annotation{Level: lFail, Message: strings.Repeat("é", 4097)},                                   // too long: dropped
+		&execpb.Annotation{Level: lFail, Message: strings.Repeat("é", 4096), Title: strings.Repeat("t", 4100)}, // kept, title cut
+		&execpb.Annotation{Level: lFail, Message: ""},                                                          // empty: dropped
+		&execpb.Annotation{Level: execpb.AnnotationLevel_ANNOTATION_LEVEL_UNSPECIFIED, Message: "no level"},    // dropped
+		&execpb.Annotation{Level: lFail, Message: "bad numbers", StartLine: -4, EndLine: -1, StartColumn: 5},   // numbers made valid
 		&execpb.Annotation{Level: lFail, Message: "end before", StartLine: 9, EndLine: 3},
 	)
 	sc := func(_ *testing.T, c *execstream.Conn, _ *execpb.Run, _ <-chan *execpb.Cancel) {
@@ -196,7 +196,7 @@ func TestGuestAnnotationsAreBoundedByTheHost(t *testing.T) {
 			end = a
 		}
 	}
-	if cut == nil || len([]rune(cut.Title)) != 255 {
+	if cut == nil || len([]rune(cut.Title)) != 4096 {
 		t.Errorf("title: %v", cut)
 	}
 	if neg == nil || neg.StartLine != 0 || neg.EndLine != 0 || neg.StartColumn != 5 {
@@ -401,7 +401,7 @@ func TestCutStringsDoNotRetainTheGuestAllocation(t *testing.T) {
 	// within 4096 characters, a frame cannot make it retain more than that
 	// through a substring because the host does not slice it.
 	a := annotationsFrom(1, []*execpb.Annotation{{Level: lWarn, Message: "m", Title: big, File: strings.Repeat("f", 2000)}})
-	if len(a) != 1 || len(a[0].Title) != 255 || unsafe.StringData(a[0].Title) == unsafe.StringData(big) {
+	if len(a) != 1 || len(a[0].Title) != 4096 || unsafe.StringData(a[0].Title) == unsafe.StringData(big) {
 		t.Errorf("title %d", len(a[0].Title))
 	}
 	if a[0].File != "" {

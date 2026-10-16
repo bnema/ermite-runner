@@ -20,7 +20,7 @@ const (
 	maxCountPerIssueType = 10
 	// Limits of the contract (runner.proto, Annotation): the server refuses a
 	// whole call that exceeds them, so the executor keeps within them.
-	maxAnnotationTitle = 255
+	maxAnnotationTitle = 4096
 	maxAnnotationFile  = 1024
 )
 

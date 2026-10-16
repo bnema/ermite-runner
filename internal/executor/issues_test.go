@@ -354,3 +354,26 @@ func TestMatcherAnnotationsWithoutFileHaveTheirLogLine(t *testing.T) {
 		t.Errorf("next step: %v\nwant %v\n%s", got, want4, logOf(rr.step(t, "the matcher stays removed in the next step")))
 	}
 }
+
+// A title is bounded like the message, at 4096 characters (GitHub has no cap;
+// ann-limits records a 600 character title): a 600 one is sent intact.
+func TestAnnotationTitleIsSentIntactUpTo4096(t *testing.T) {
+	needTools(t, "bash")
+	rr, _ := runResults(t, wfHead+`    steps:
+      - run: |
+          t600=$(printf 't%.0s' $(seq 600))
+          t4100=$(printf 'u%.0s' $(seq 4100))
+          echo "::warning title=$t600::m600"
+          echo "::warning title=$t4100::m4100"
+`, nil)
+	got := map[string]string{}
+	for _, a := range rr.results[2].Annotations {
+		got[a.Message] = a.Title
+	}
+	if got["m600"] != strings.Repeat("t", 600) {
+		t.Errorf("600 character title: %d characters", len([]rune(got["m600"])))
+	}
+	if got["m4100"] != strings.Repeat("u", 4096) {
+		t.Errorf("4100 character title: %d characters", len([]rune(got["m4100"])))
+	}
+}
