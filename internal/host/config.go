@@ -77,6 +77,11 @@ func (c Config) Client(url, token string) ermiteconnect.RunnerServiceClient {
 	return NewClient(url, token, http.DefaultTransport)
 }
 
+// ArtifactClient is the JobArtifactService client of a job token.
+func (c Config) ArtifactClient(url, token string) ermiteconnect.JobArtifactServiceClient {
+	return NewArtifactClient(url, token, http.DefaultTransport, c.InsecureHTTP)
+}
+
 // environment is Environment, the default when a Config was built without
 // LoadConfig.
 func (c Config) environment() string {

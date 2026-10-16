@@ -5,12 +5,14 @@ package host
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
 	ermite "bnema.dev/ermite-api/gen/ermite"
 
 	"bnema.dev/ermite-runner/internal/cachesvc"
+	"bnema.dev/ermite-runner/internal/resultssvc"
 )
 
 // cacheTokenMargin is added to the job timeout for the life of the cache token:
@@ -106,26 +108,56 @@ func githubRepository(contexts string) string {
 	return c.Github.Repository
 }
 
-// cacheFor returns the loopback port the cache has in the guest and the token
-// of a job, or 0 and "" when the runner serves no cache or the job has no scope.
-func (j *jobRun) cacheFor(rt *Runner) (port uint32, token, mode string) {
+// runtimeFor returns what the executor needs of the job's runtime channel: the
+// port it has in the guest, the job's ACTIONS_RUNTIME_TOKEN, the cache mode and
+// whether the channel serves the results service. The channel exists when the
+// runner serves a cache and the job has a cache scope or the results service;
+// without it, 0, "", "" and false. A job with the results service and no cache
+// scope gets an empty mode (the executor then sets no ACTIONS_CACHE_URL) and a
+// token that the cache refuses.
+func (j *jobRun) runtimeFor(rt *Runner) (port uint32, token, mode string, results bool) {
 	if rt.Cache == nil {
-		return 0, "", ""
+		return 0, "", "", false
 	}
 	sc, ok, err := cacheScope(j.job, j.contexts)
 	if err != nil {
 		// A bad scope from the server is not the job's failure: it runs without a
 		// cache.
 		j.log.Warn().Err(err).Msg("cache disabled for the job")
-		return 0, "", ""
+		ok = false
 	}
 	if !ok {
-		return 0, "", ""
+		sc = cachesvc.Scope{}
+	} else {
+		mode = "read"
+		if sc.WriteRef != "" {
+			mode = "write"
+		}
+	}
+	if !ok && !j.results {
+		return 0, "", "", false
+	}
+	var scopes []string
+	if j.results {
+		scopes = append(scopes, resultssvc.Scope(j.job.RunId, j.job.JobId, j.job.Attempt))
 	}
 	ttl := time.Duration(j.timeoutMinutes())*time.Minute + cacheTokenMargin
-	mode = "read"
-	if sc.WriteRef != "" {
-		mode = "write"
+	return cachesvc.DefaultPort, rt.Cache.Token(j.job.JobId, sc, ttl, scopes...), mode, j.results
+}
+
+// resultsOn says whether the job gets the results service: the runner has one
+// (ERMITE_RUNNER_ARTIFACTS is not 0) with a cache channel to serve it on, and
+// the server has the feature ci.artifacts. Without it artifact actions fail as
+// on a GitHub Enterprise Server without artifacts v4.
+func (j *jobRun) resultsOn(rt *Runner) bool {
+	return rt.Results != nil && rt.Cache != nil && rt.Artifacts != nil && j.features.artifacts
+}
+
+// resultsHandler is the results service of the job's channel, nil without one.
+// It calls ermite with the job token.
+func (j *jobRun) resultsHandler(rt *Runner) http.Handler {
+	if !j.results {
+		return nil
 	}
-	return cachesvc.DefaultPort, rt.Cache.Token(j.job.JobId, sc, ttl), mode
+	return rt.Results.Handler(resultssvc.Job{ID: j.job.JobId, RunID: j.job.RunId, Attempt: j.job.Attempt, Client: rt.Artifacts(j.job.JobToken)})
 }

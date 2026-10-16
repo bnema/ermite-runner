@@ -81,6 +81,20 @@ type Config struct {
 	// CacheMode is ACTIONS_CACHE_MODE ("read" or "write") next to the cache URL;
 	// empty sets nothing.
 	CacheMode string
+	// ContainerCacheURL is CacheURL for the steps that run in a container (a
+	// step in the job container, a docker action): the same relay on an address
+	// of the sandbox their network reaches. Empty: those steps get no runtime
+	// variables.
+	ContainerCacheURL string
+	// Results says that the service behind CacheURL also serves the results
+	// service (artifacts) and that CacheToken carries its scope: node and docker
+	// actions get ACTIONS_RESULTS_URL, and the node steps of the artifact actions
+	// get a GITHUB_SERVER_URL @actions/artifact takes for GitHub (see
+	// setArtifactsServerURL).
+	Results bool
+	// CacheOff says that the service behind CacheURL serves no cache (results
+	// only): ACTIONS_CACHE_URL and ACTIONS_CACHE_MODE are not set.
+	CacheOff bool
 	// Secrets and Vars are Job.secrets and Job.vars. Secrets are registered in
 	// the masker before the first step and form the secrets context; they are
 	// never logged. Vars are the fallback of the vars context.
@@ -199,6 +213,9 @@ type job struct {
 	summaries  map[int]string
 	logLines   map[int]int            // lines written to the log of each step, under mu
 	states     map[string]*intraState // intra-action state, see saveState
+	// ghesSniff is, by script path, whether a node action's script bundles
+	// @actions/artifact v2 (see bundlesArtifactClient); under mu.
+	ghesSniff map[string]bool
 }
 
 func (j *job) mask(s string) string { return j.masker.Load().mask(s) }

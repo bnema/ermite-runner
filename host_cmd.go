@@ -21,6 +21,7 @@ import (
 	"bnema.dev/ermite-runner/internal/cachesvc"
 	"bnema.dev/ermite-runner/internal/externals"
 	"bnema.dev/ermite-runner/internal/host"
+	"bnema.dev/ermite-runner/internal/resultssvc"
 	"bnema.dev/ermite-runner/internal/sandbox"
 	"bnema.dev/ermite-runner/internal/sandbox/drivers"
 )
@@ -90,6 +91,31 @@ func setupArchives(ctx context.Context, stateDir string) (*actionscache.Cache, e
 
 // envCache=0 turns the cache service off.
 const envCache = "ERMITE_RUNNER_CACHE"
+
+// envArtifacts=0 turns the results service (artifacts v4) off.
+const envArtifacts = "ERMITE_RUNNER_ARTIFACTS"
+
+// setupResults makes the results service of the runner (README, "Artifacts"):
+// on by default, off with ERMITE_RUNNER_ARTIFACTS=0. It is served on the cache
+// channel of each sandbox and checks the cache's runtime tokens, so it needs
+// the cache service; a job gets it only when the server has ci.artifacts.
+func setupResults(ctx context.Context, cache *cachesvc.Service) (*resultssvc.Service, error) {
+	log := zerowrap.FromCtx(ctx)
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(envArtifacts))) {
+	case "", "1", "true", "yes":
+	case "0", "false", "no":
+		log.Info().Msg("the results service is off (" + envArtifacts + "=0): artifact actions fail")
+		return nil, nil
+	default:
+		return nil, fmt.Errorf("%s: %q is not 0 or 1", envArtifacts, os.Getenv(envArtifacts))
+	}
+	if cache == nil {
+		log.Warn().Msg("the results service needs the cache service (" + envCache + "=0): artifact actions fail")
+		return nil, nil
+	}
+	log.Info().Msg("results service on (artifacts v4, on the cache channel; stored by ermite)")
+	return resultssvc.New(resultssvc.Config{Auth: cache, Log: log}), nil
+}
 
 // externalsWait is how long the start of the runner waits for the Node.js
 // downloads. A runner with a working network is then ready for its first job; one
@@ -210,6 +236,11 @@ func runCmd(ctx context.Context) int {
 	if cache != nil {
 		defer func() { _ = cache.CloseAll() }()
 	}
+	results, err := setupResults(ctx, cache)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "ermite-runner:", err)
+		return 2
+	}
 	drv, err := buildDriver(ctx, scfg)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ermite-runner:", err)
@@ -228,6 +259,10 @@ func runCmd(ctx context.Context) int {
 		Features: hcfg.ServerFeaturesFunc(url),
 		Cache:    cache,
 		Archives: archives,
+		Results:  results,
+		Artifacts: func(tok string) ermiteconnect.JobArtifactServiceClient {
+			return hcfg.ArtifactClient(url, tok)
+		},
 	}
 	r.Cfg.URL = url
 	if err := r.Run(ctx); err != nil {

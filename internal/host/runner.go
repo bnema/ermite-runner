@@ -23,6 +23,7 @@ import (
 	"bnema.dev/ermite-runner/internal/actionscache"
 	"bnema.dev/ermite-runner/internal/cachesvc"
 	"bnema.dev/ermite-runner/internal/execstream/execpb"
+	"bnema.dev/ermite-runner/internal/resultssvc"
 	"bnema.dev/ermite-runner/internal/sandbox"
 )
 
@@ -50,6 +51,14 @@ type Runner struct {
 	// means the default transport.
 	Archives    *actionscache.Cache
 	ArchiveHTTP *http.Client
+	// Results, when not nil, is the results service of the runner (artifacts
+	// v4). A job gets it when Cache is set too (it is served on the cache
+	// channel and checks the cache's runtime tokens), Artifacts is set and the
+	// server has the feature ci.artifacts.
+	Results *resultssvc.Service
+	// Artifacts builds the JobArtifactService client of a job from its job
+	// token.
+	Artifacts func(jobToken string) ermiteconnect.JobArtifactServiceClient
 
 	// now returns the current time; tests replace it.
 	now func() time.Time
@@ -70,8 +79,10 @@ func (r *Runner) clock() time.Time {
 // (sandbox.Config.Resolve in Start), that is from ERMITE_RUNNER_JOB_CPUS,
 // _JOB_MEMORY and _JOB_DISK, so that the limits are one setting of the runner
 // and not something a job or this package can change.
-func (r *Runner) spec(j *ermite.Job) sandbox.JobSpec {
-	return sandbox.JobSpec{JobID: j.JobId}
+//
+// results is the job's results service, nil without one.
+func (r *Runner) spec(j *ermite.Job, results http.Handler) sandbox.JobSpec {
+	return sandbox.JobSpec{JobID: j.JobId, Results: results}
 }
 
 // markLeaked records that a sandbox could not be cleaned up: no new job is

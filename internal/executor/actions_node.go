@@ -152,26 +152,44 @@ func (j *job) externalsDir() string {
 }
 
 // addRuntimeEnv is the "Add Actions Runtime server info" part of the handlers
-// (NodeScriptActionHandler.cs:55-72, ContainerActionHandler.cs:219-236): the
-// variables @actions/cache reads. ermite has no Actions runtime service, only
-// the cache of the runner, so only ACTIONS_CACHE_URL (the base of
-// "_apis/artifactcache/…": the toolkit appends to it, cacheHttpClient.ts:47, so
-// it ends with a slash), ACTIONS_RUNTIME_URL (same value, for clients that
-// require the variable) and ACTIONS_RUNTIME_TOKEN are set. ACTIONS_CACHE_SERVICE_V2
-// is never set: the toolkit would then ignore ACTIONS_CACHE_URL (config.ts:42-58)
-// and, on a server URL that is not github.com, uses v1 anyway (config.ts:22-27).
-// Without a cache service in the job nothing is set.
-func (j *job) addRuntimeEnv(env *ordered) {
-	if j.cfg.CacheURL == "" || j.cfg.CacheToken == "" {
+// (NodeScriptActionHandler.cs:55-84, ContainerActionHandler.cs:219-245): the
+// variables @actions/cache and @actions/artifact read. ermite's runtime service
+// is the channel of the runner behind one URL, which serves the cache, the
+// results service (artifacts) or both: ACTIONS_RUNTIME_URL and
+// ACTIONS_RUNTIME_TOKEN, then, when the channel serves the cache,
+// ACTIONS_CACHE_URL (the base of "_apis/artifactcache/…": the toolkit appends
+// to it, cacheHttpClient.ts:47, so it ends with a slash) and ACTIONS_CACHE_MODE,
+// and, when it serves results, ACTIONS_RESULTS_URL (the handlers set it from
+// ResultsServiceUrl, NodeScriptActionHandler.cs:71-84, ContainerActionHandler.cs:
+// 237-245; the toolkit keeps only its origin, artifact shared/config.ts).
+// ACTIONS_CACHE_SERVICE_V2 is never set: the toolkit would then ignore
+// ACTIONS_CACHE_URL (config.ts:42-58) and, on a server URL that is not
+// github.com, uses v1 anyway (config.ts:22-27).
+//
+// inContainer says the process runs in a container (a step in the job
+// container, a docker action): it has its own network namespace and reaches
+// the relay at ContainerCacheURL, not on the loopback. Without a URL for where
+// the step runs, or without a token, nothing is set.
+func (j *job) addRuntimeEnv(env *ordered, inContainer bool) {
+	url := j.cfg.CacheURL
+	if inContainer {
+		url = j.cfg.ContainerCacheURL
+	}
+	if url == "" || j.cfg.CacheToken == "" {
 		return
 	}
-	env.Set("ACTIONS_RUNTIME_URL", j.cfg.CacheURL)
+	env.Set("ACTIONS_RUNTIME_URL", url)
 	env.Set("ACTIONS_RUNTIME_TOKEN", j.cfg.CacheToken)
-	env.Set("ACTIONS_CACHE_URL", j.cfg.CacheURL)
-	// ACTIONS_CACHE_MODE: NodeScriptActionHandler.cs:71-84, ContainerActionHandler.cs:
-	// 237-245; the toolkit skips uploads in "read" mode (cache config.ts:27-40).
-	if j.cfg.CacheMode != "" {
-		env.Set("ACTIONS_CACHE_MODE", j.cfg.CacheMode)
+	if !j.cfg.CacheOff {
+		env.Set("ACTIONS_CACHE_URL", url)
+		// ACTIONS_CACHE_MODE: NodeScriptActionHandler.cs:71-84, ContainerActionHandler.cs:
+		// 237-245; the toolkit skips uploads in "read" mode (cache config.ts:27-40).
+		if j.cfg.CacheMode != "" {
+			env.Set("ACTIONS_CACHE_MODE", j.cfg.CacheMode)
+		}
+	}
+	if j.cfg.Results {
+		env.Set("ACTIONS_RESULTS_URL", url)
 	}
 }
 
@@ -185,7 +203,7 @@ func (j *job) runNode(s *stepRun, def *actionDef, in *inputSet, env *ordered, ca
 		v, _ := in.Get(k)
 		env.Set(inputEnvName(k), v)
 	}
-	j.addRuntimeEnv(env)
+	j.addRuntimeEnv(env, j.stepContainer() != nil)
 	// The PATH of the previous steps is added by procEnv.
 	env.Remove("NODE_ICU_DATA") // https://github.com/actions/runner/issues/795
 	r := def.runs()
@@ -206,6 +224,7 @@ func (j *job) runNode(s *stepRun, def *actionDef, in *inputSet, env *ordered, ca
 	if st, err := os.Stat(script); err != nil || st.IsDir() {
 		return fail(ghErrorf("File not found: '%s'", script))
 	}
+	j.setArtifactsServerURL(s, script)
 	if c := j.stepContainer(); c != nil {
 		return j.runNodeInContainer(s, c, script, env, cancel)
 	}

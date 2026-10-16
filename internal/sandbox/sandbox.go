@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net/http"
 )
 
 // Mode is an isolation mode.
@@ -59,6 +60,10 @@ type JobSpec struct {
 	CPUs      int
 	MemoryMiB int
 	DiskMiB   int
+	// Results, when not nil, is the results service of the job (artifacts,
+	// package resultssvc), served on the sandbox's cache channel beside the
+	// cache (Config.ServeCache).
+	Results http.Handler
 }
 
 // Conn is the executor stream: bytes in both directions, framed by execstream.

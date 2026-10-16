@@ -370,15 +370,19 @@ func TestBadTokens(t *testing.T) {
 	good := r.job("j1", repoA, main_, main_)
 	other := newRig(t, 1<<20) // another runner: another key
 	expired := r.svc.sign.token(Claims{JobID: "j", Scope: Scope{Repository: repoA, WriteRef: main_, ReadRefs: []string{main_}}, Expiry: r.clk.now().Add(-time.Second).Unix()})
+	seg := strings.Split(good.token, ".")
 	tampered := func() string {
-		p, m, _ := strings.Cut(good.token, ".")
-		payload, _ := b64.DecodeString(p)
+		payload, _ := b64.DecodeString(seg[1])
 		payload = bytes.Replace(payload, []byte(repoA), []byte(repoB), 1)
-		return b64.EncodeToString(payload) + "." + m
+		return seg[0] + "." + b64.EncodeToString(payload) + "." + seg[2]
 	}()
+	algNone := b64.EncodeToString([]byte(`{"alg":"none","typ":"JWT"}`)) + "." + seg[1] + "."
+	// A token for the results service only has no cache scope.
+	resultsOnly := r.svc.Token("j1", Scope{}, time.Hour, "Actions.Results:1:x")
 	for name, tok := range map[string]string{
 		"none": "", "garbage": "abc", "dots": "a.b", "other key": other.job("j1", repoA, main_, main_).token,
-		"expired": expired, "tampered claims": tampered, "no mac": strings.Split(good.token, ".")[0] + ".",
+		"expired": expired, "tampered claims": tampered, "no mac": seg[0] + "." + seg[1] + ".",
+		"two segments": seg[1] + "." + seg[2], "alg none": algNone, "results only": resultsOnly,
 	} {
 		j := &job{r: r, token: tok}
 		for _, req := range []struct{ m, p string }{{"GET", "cache?keys=k&version=v"}, {"POST", "caches"}, {"PATCH", "caches/1"}, {"POST", "caches/1"}, {"GET", "caches?key=k"}} {

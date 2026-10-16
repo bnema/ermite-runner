@@ -427,7 +427,7 @@ func (s *containerSandbox) runCache(spec sandbox.JobSpec) error {
 	// connect, as for the executor socket.
 	// No bandwidth limit (0): a container has no per-job network rate limit
 	// (NetMbit is a micro-VM setting), and its cache traffic is a local socket.
-	if err := d.cfg.ServeCache(s.id, sock, spec.JobID, 0, func(p string) error { return os.Chmod(p, 0o666) }); err != nil {
+	if err := d.cfg.ServeCache(s.id, sock, spec, 0, func(p string) error { return os.Chmod(p, 0o666) }); err != nil {
 		return fmt.Errorf("serve the cache socket: %w", err)
 	}
 	s.cacheOn = true

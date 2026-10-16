@@ -457,7 +457,7 @@ func (s *vmSandbox) bootCache(spec sandbox.JobSpec) error {
 	if s.d.cfg.Cache == nil {
 		return nil
 	}
-	err := s.d.cfg.ServeCache(s.id, s.cacheSocket(), spec.JobID, s.d.cfg.NetMbit, func(p string) error {
+	err := s.d.cfg.ServeCache(s.id, s.cacheSocket(), spec, s.d.cfg.NetMbit, func(p string) error {
 		if s.lay.jailed {
 			return os.Lchown(p, s.lay.uid, s.lay.uid)
 		}

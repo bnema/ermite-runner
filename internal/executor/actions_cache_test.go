@@ -12,7 +12,13 @@ const (
 	cacheTestToken = "eyJqIjoiMSJ9.c2lnbmF0dXJl"
 )
 
-func withCache(c *Config) { c.CacheURL, c.CacheToken = cacheTestURL, cacheTestToken }
+// cacheTestContainerURL is the relay on the docker bridge, for the steps that
+// run in a container.
+const cacheTestContainerURL = "http://172.17.0.1:9089/"
+
+func withCache(c *Config) {
+	c.CacheURL, c.CacheToken, c.ContainerCacheURL = cacheTestURL, cacheTestToken, cacheTestContainerURL
+}
 
 const envAction = `name: e
 description: d

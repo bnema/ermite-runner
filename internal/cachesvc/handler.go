@@ -73,6 +73,29 @@ func (s *Service) handler(job string) http.Handler {
 	})
 }
 
+// channelHandler is the handler of a sandbox's channel: the cache API and the
+// action archives, and when results is not nil everything else goes to it (the results service of the
+// job: Twirp and blob paths). The results service gets the same progress
+// deadlines as the cache: its bodies and replies must keep moving.
+func (s *Service) channelHandler(job string, results http.Handler) http.Handler {
+	cache := s.handler(job)
+	if results == nil {
+		return cache
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, APIPath) || strings.HasPrefix(r.URL.Path, ArchivePath) {
+			cache.ServeHTTP(w, r)
+			return
+		}
+		rc := http.NewResponseController(w)
+		pr := newProgressReader(r.Body, rc, s.progress, nil)
+		defer pr.done()
+		pr.set()
+		r.Body = readCloser{pr, r.Body}
+		results.ServeHTTP(&progressWriter{ResponseWriter: w, rc: rc, idle: s.progress}, r)
+	})
+}
+
 type handlerFunc func(w http.ResponseWriter, r *http.Request, c Claims)
 
 // auth checks the bearer token (ACTIONS_RUNTIME_TOKEN), and when job is not

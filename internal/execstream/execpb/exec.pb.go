@@ -749,8 +749,8 @@ type JobSpec struct {
 	// ACTIONS_CACHE_URL=http://127.0.0.1:<port>/ and the token as
 	// ACTIONS_RUNTIME_TOKEN to node and docker actions only, as the official
 	// runner does, and masks the token. The token is not an ermite credential: it
-	// is an HMAC that only the runner's cache service accepts, scoped to this
-	// job's repository and refs.
+	// is a JWT (HS256) that only the runner's runtime services accept, scoped to
+	// this job's repository and refs (and its run, see results).
 	CachePort  uint32 `protobuf:"varint,15,opt,name=cache_port,json=cachePort,proto3" json:"cache_port,omitempty"`
 	CacheToken string `protobuf:"bytes,16,opt,name=cache_token,json=cacheToken,proto3" json:"cache_token,omitempty"`
 	// secrets_withheld is set by the host when the server sends Job.trusted and
@@ -766,8 +766,17 @@ type JobSpec struct {
 	TokenPermissions *TokenPermissions `protobuf:"bytes,20,opt,name=token_permissions,json=tokenPermissions,proto3" json:"token_permissions,omitempty"`
 	// cache_mode is ACTIONS_CACHE_MODE of the node and docker actions: "write"
 	// when the job's cache scope has a write ref, "read" when it has none. Unset
-	// without a cache service.
-	CacheMode     string `protobuf:"bytes,21,opt,name=cache_mode,json=cacheMode,proto3" json:"cache_mode,omitempty"`
+	// without a cache service, and unset when the channel serves the results
+	// service only (results set, no cache scope): no ACTIONS_CACHE_URL then.
+	CacheMode string `protobuf:"bytes,21,opt,name=cache_mode,json=cacheMode,proto3" json:"cache_mode,omitempty"`
+	// results says that the service behind cache_port also serves artifacts
+	// (Twirp github.actions.results.api.v1.ArtifactService and its blobs) and
+	// that cache_token carries the job's Actions.Results scope. The executor
+	// then gives node and docker actions ACTIONS_RESULTS_URL (the same origin as
+	// ACTIONS_CACHE_URL) and sets GITHUB_SERVER_URL to a *.ghe.localhost host in
+	// the process of the node steps of the artifact actions only (README,
+	// "Artifacts"). Set only when the server has the feature ci.artifacts.
+	Results       bool `protobuf:"varint,22,opt,name=results,proto3" json:"results,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -933,6 +942,13 @@ func (x *JobSpec) GetCacheMode() string {
 		return x.CacheMode
 	}
 	return ""
+}
+
+func (x *JobSpec) GetResults() bool {
+	if x != nil {
+		return x.Results
+	}
+	return false
 }
 
 // TokenPermissions maps a permission key ("contents", "pull-requests", ...) to
@@ -1916,7 +1932,7 @@ const file_exec_proto_rawDesc = "" +
 	"\x03job\x18\x03 \x01(\v2\x1e.ermite.runner.exec.v1.JobSpecR\x03job\x1a6\n" +
 	"\bEnvEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xd8\x05\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xf2\x05\n" +
 	"\aJobSpec\x12#\n" +
 	"\rworkflow_path\x18\x01 \x01(\tR\fworkflowPath\x12#\n" +
 	"\rworkflow_yaml\x18\x02 \x01(\tR\fworkflowYaml\x12\x17\n" +
@@ -1942,7 +1958,8 @@ const file_exec_proto_rawDesc = "" +
 	"\x10secrets_withheld\x18\x13 \x01(\bR\x0fsecretsWithheld\x12T\n" +
 	"\x11token_permissions\x18\x14 \x01(\v2'.ermite.runner.exec.v1.TokenPermissionsR\x10tokenPermissions\x12\x1d\n" +
 	"\n" +
-	"cache_mode\x18\x15 \x01(\tR\tcacheModeJ\x04\b\x11\x10\x12J\x04\b\x12\x10\x13R\asecretsR\x04vars\"\x9a\x01\n" +
+	"cache_mode\x18\x15 \x01(\tR\tcacheMode\x12\x18\n" +
+	"\aresults\x18\x16 \x01(\bR\aresultsJ\x04\b\x11\x10\x12J\x04\b\x12\x10\x13R\asecretsR\x04vars\"\x9a\x01\n" +
 	"\x10TokenPermissions\x12K\n" +
 	"\x06levels\x18\x01 \x03(\v23.ermite.runner.exec.v1.TokenPermissions.LevelsEntryR\x06levels\x1a9\n" +
 	"\vLevelsEntry\x12\x10\n" +

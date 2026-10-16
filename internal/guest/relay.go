@@ -14,10 +14,12 @@ import (
 
 // The cache service of the runner never listens on a network. In the sandbox it
 // is reached on the guest's own loopback (CacheListenHost, on the port the
-// host gives in JobSpec.cache_port), where a Relay accepts the TCP connections
-// of the actions and pipes each of them to a new stream on the host↔guest
-// channel (a vsock port for a VM, a Unix socket for a container); the host
-// serves HTTP on the other end of that stream.
+// host gives in JobSpec.cache_port), and on the same port at the address of
+// the docker bridge for the steps that run in a container (BridgeInterface),
+// where a Relay accepts the TCP connections of the actions and pipes each of
+// them to a new stream on the host↔guest channel (a vsock port for a VM, a
+// Unix socket for a container); the host serves HTTP on the other end of that
+// stream.
 const (
 	// CacheListenHost is the loopback address of the relay.
 	CacheListenHost = "127.0.0.1"
@@ -40,7 +42,7 @@ const (
 // DialFunc opens one new stream to the host.
 type DialFunc func(ctx context.Context) (io.ReadWriteCloser, error)
 
-// Relay accepts TCP connections on a loopback address and pipes each one to a
+// Relay accepts TCP connections on a local address and pipes each one to a
 // new stream from its DialFunc, in both directions, until Close.
 type Relay struct {
 	ln    net.Listener

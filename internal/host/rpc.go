@@ -106,6 +106,17 @@ func newClient(baseURL, token string, base http.RoundTripper, insecure bool) erm
 	return ermiteconnect.NewRunnerServiceClient(hc, strings.TrimRight(baseURL, "/")+APIPath)
 }
 
+// NewArtifactClient returns a JobArtifactService client that authenticates
+// with a job token, with the transport rules of NewClient. The results service
+// of the job's channel (resultssvc) calls it.
+func NewArtifactClient(baseURL, token string, base http.RoundTripper, insecure bool) ermiteconnect.JobArtifactServiceClient {
+	hc := &http.Client{
+		Transport:     bearer{token: token, base: base, allowInsecure: insecure},
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+	return ermiteconnect.NewJobArtifactServiceClient(hc, strings.TrimRight(baseURL, "/")+APIPath)
+}
+
 // ServerFeaturesFunc returns the function that reads the features of the
 // server with GetVersion, which needs no authentication. It is called once
 // per job.

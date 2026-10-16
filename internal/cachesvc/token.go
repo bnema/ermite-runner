@@ -28,13 +28,26 @@ type Scope struct {
 	ReadRefs   []string `json:"rd,omitempty"`
 }
 
-// Claims are what a cache token vouches for.
+// Claims are what a runtime token (ACTIONS_RUNTIME_TOKEN) vouches for: the
+// job, its cache scope and its other scopes. The token is shared by the cache
+// and the results service of the job's channel.
 type Claims struct {
 	JobID string `json:"j"`
 	Scope
 	// Expiry is a Unix time in seconds.
 	Expiry int64 `json:"x"`
+	// ExpiresAt and IssuedAt are the JWT's exp and iat; exp is Expiry.
+	ExpiresAt int64 `json:"exp"`
+	IssuedAt  int64 `json:"iat"`
+	// Scopes is the scp claim: space-separated scopes, as GitHub's runtime
+	// token has them. @actions/artifact decodes the token (without checking
+	// it) and takes the run and job ids from its Actions.Results scope
+	// (toolkit packages/artifact/src/internal/shared/util.ts:21-75).
+	Scopes string `json:"scp"`
 }
+
+// genericReadScope is the first scope of GitHub's runtime tokens.
+const genericReadScope = "Actions.GenericRead:00000000-0000-0000-0000-000000000000"
 
 // errForbidden is every authentication failure: the caller learns nothing about
 // why a token was refused.
@@ -71,29 +84,58 @@ var b64 = base64.RawURLEncoding
 // maxTokenLen bounds what verify parses.
 const maxTokenLen = 16 << 10
 
-// token is base64url(JSON claims) "." base64url(HMAC-SHA256 of the JSON bytes).
+// jwtHeader is the header of every runtime token, as base64url.
+var jwtHeader = b64.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
+
+// jwtKey is the HS256 key of the tokens: derived from the signer's key under
+// the "token" domain, so that no other signature of the signer (archive or
+// blob URLs) can ever pass for a token, and the other way round.
+func (s *signer) jwtKey() []byte { return s.mac("token") }
+
+// token is a three-segment JWT (header, claims, HS256 signature), which is what
+// @actions/artifact requires of ACTIONS_RUNTIME_TOKEN; @actions/cache sends it
+// as an opaque bearer token.
 func (s *signer) token(c Claims) string {
 	payload, _ := json.Marshal(c) // plain strings and ints: cannot fail
-	return b64.EncodeToString(payload) + "." + b64.EncodeToString(s.mac("token", payload))
+	signed := jwtHeader + "." + b64.EncodeToString(payload)
+	h := hmac.New(sha256.New, s.jwtKey())
+	h.Write([]byte(signed))
+	return signed + "." + b64.EncodeToString(h.Sum(nil))
 }
 
-// verify returns the claims of a token that this runner made and that has not
-// expired. The comparison is constant time.
-func (s *signer) verify(tok string, now time.Time) (Claims, error) {
+// verifyAny returns the claims of a token that this runner made and that has
+// not expired, whatever its scopes. The comparison is constant time.
+func (s *signer) verifyAny(tok string, now time.Time) (Claims, error) {
 	var c Claims
 	if len(tok) > maxTokenLen {
 		return c, errForbidden
 	}
-	p, m, ok := strings.Cut(tok, ".")
-	if !ok {
+	head, rest, ok1 := strings.Cut(tok, ".")
+	p, m, ok2 := strings.Cut(rest, ".")
+	if !ok1 || !ok2 || head != jwtHeader {
 		return c, errForbidden
 	}
-	payload, err1 := b64.DecodeString(p)
-	sum, err2 := b64.DecodeString(m)
-	if err1 != nil || err2 != nil || !hmac.Equal(sum, s.mac("token", payload)) {
+	sum, err := b64.DecodeString(m)
+	if err != nil {
 		return c, errForbidden
 	}
-	if err := json.Unmarshal(payload, &c); err != nil || c.Repository == "" || now.Unix() >= c.Expiry {
+	h := hmac.New(sha256.New, s.jwtKey())
+	h.Write([]byte(head + "." + p))
+	if !hmac.Equal(sum, h.Sum(nil)) {
+		return c, errForbidden
+	}
+	payload, err := b64.DecodeString(p)
+	if err != nil || json.Unmarshal(payload, &c) != nil || c.JobID == "" || now.Unix() >= c.Expiry {
+		return Claims{}, errForbidden
+	}
+	return c, nil
+}
+
+// verify is verifyAny for the cache: the token must carry a cache scope (a
+// token made for the results service only has none).
+func (s *signer) verify(tok string, now time.Time) (Claims, error) {
+	c, err := s.verifyAny(tok, now)
+	if err != nil || c.Repository == "" {
 		return Claims{}, errForbidden
 	}
 	return c, nil

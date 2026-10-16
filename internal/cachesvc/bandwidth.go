@@ -4,6 +4,7 @@ package cachesvc
 
 import (
 	"net"
+	"net/http"
 	"sync"
 	"time"
 )
@@ -151,6 +152,7 @@ type ServeOption func(*serveConfig)
 
 type serveConfig struct {
 	bytesPerSec int64
+	results     http.Handler
 }
 
 // WithBandwidth limits the channel to mbit Mbit/s, summed over all its
@@ -166,4 +168,11 @@ func WithBandwidth(mbit int) ServeOption {
 // withRate is WithBandwidth in bytes per second (tests use small rates).
 func withRate(bytesPerSec int64) ServeOption {
 	return func(c *serveConfig) { c.bytesPerSec = bytesPerSec }
+}
+
+// WithResults serves h, the results service of the channel's job
+// (resultssvc), beside the cache: every request outside the cache API goes to
+// it, under the same connection caps, bandwidth limit and progress deadlines.
+func WithResults(h http.Handler) ServeOption {
+	return func(c *serveConfig) { c.results = h }
 }

@@ -214,7 +214,7 @@ func runJob(ctx context.Context, conn *execstream.Conn, cfg ExecConfig, spec *ex
 	canceller := executor.NewCanceller()
 	rep := &frameReporter{conn: conn, failed: make(chan struct{})}
 	res := newResolver(conn)
-	cacheEnv := startCacheRelay(ctx, cfg.Target, spec)
+	cacheEnv := startCacheRelay(ctx, cfg.Target, spec, docker0IPv4)
 	defer cacheEnv.close()
 
 	// Frames from the host while the job runs: a Cancel stops the job; a lost
@@ -260,6 +260,7 @@ func runJob(ctx context.Context, conn *execstream.Conn, cfg ExecConfig, spec *ex
 		RunnerVersion: spec.GetRunnerVersion(),
 		Home:          su.Home, ToolCache: os.Getenv("RUNNER_TOOL_CACHE"), BaseEnv: stepEnv(os.Environ(), su), Credential: su.Credential,
 		CacheURL: cacheEnv.url, CacheToken: cacheEnv.token, CacheMode: cacheEnv.mode,
+		ContainerCacheURL: cacheEnv.containerURL, Results: cacheEnv.results, CacheOff: cacheEnv.cacheOff,
 		Debug: spec.GetDebug(), Reporter: rep, Actions: executor.DefaultActionsConfig(res.resolve), Log: zerowrap.FromCtx(ctx),
 		Secrets: vals.secrets, Vars: vals.vars, SecretsWithheld: spec.GetSecretsWithheld(), TokenPermissions: tokenPermissions(spec),
 		SendAnnotations: spec.GetSendAnnotations(), SendSummaries: spec.GetSendSummaries(),
@@ -276,44 +277,111 @@ func runJob(ctx context.Context, conn *execstream.Conn, cfg ExecConfig, spec *ex
 // the toolkit appends "_apis/…" to it (cacheHttpClient.ts:47). Empty when the
 // job has no cache service.
 func cacheURL(port uint32) string {
+	return relayURL(CacheListenHost, port)
+}
+
+// relayURL is the URL of the relay on host and port, "" for a port that is
+// not one.
+func relayURL(host string, port uint32) string {
 	if port == 0 || port > 65535 {
 		return ""
 	}
-	return "http://" + net.JoinHostPort(CacheListenHost, strconv.FormatUint(uint64(port), 10)) + "/"
+	return "http://" + net.JoinHostPort(host, strconv.FormatUint(uint64(port), 10)) + "/"
 }
 
-// cacheRelay is the cache of a job in the sandbox: the relay, the URL of the
-// loopback it listens on and the token of the job. All are empty without a cache
-// service.
+// BridgeInterface is the default bridge of the sandbox's docker daemon. Its
+// address is a local address of the sandbox that every container of that
+// daemon reaches, whatever its bridge network: the traffic to it goes through
+// INPUT, which Docker does not filter (what host-gateway relies on).
+const BridgeInterface = "docker0"
+
+// bridgeLookup returns the IPv4 address the relay listens on for the steps
+// that run in a container; an error means there is none.
+type bridgeLookup func() (net.IP, error)
+
+// docker0IPv4 is the first IPv4 address of BridgeInterface, read when the job
+// starts: the nested daemon picks it, and init starts the executor once the
+// daemon answers (init.go), so the bridge exists by then when there is one.
+func docker0IPv4() (net.IP, error) {
+	ifi, err := net.InterfaceByName(BridgeInterface)
+	if err != nil {
+		return nil, err
+	}
+	addrs, err := ifi.Addrs()
+	if err != nil {
+		return nil, err
+	}
+	for _, a := range addrs {
+		if n, ok := a.(*net.IPNet); ok {
+			if ip4 := n.IP.To4(); ip4 != nil {
+				return ip4, nil
+			}
+		}
+	}
+	return nil, fmt.Errorf("%s has no IPv4 address", BridgeInterface)
+}
+
+// cacheRelay is the runtime service of a job in the sandbox (the cache, the
+// results service or both, on one channel): the relays, the URLs they listen
+// on and the token of the job. All are empty without a service; containerURL
+// and bridge are empty when the steps that run in a container cannot reach it.
 type cacheRelay struct {
-	relay            *Relay
-	url, token, mode string
+	relay, bridge     *Relay
+	url, containerURL string
+	token, mode       string
+	results, cacheOff bool
 }
 
 func (c cacheRelay) close() {
 	if c.relay != nil {
 		_ = c.relay.Close()
 	}
+	if c.bridge != nil {
+		_ = c.bridge.Close()
+	}
 }
 
-// startCacheRelay starts the relay of the cache for a job that has a cache
-// service: it listens on the loopback port the host says and pipes every
+// startCacheRelay starts the relay of the runtime service for a job that has
+// one: it listens on the loopback port the host says and pipes every
 // connection to a new stream on the cache channel of the host (a sibling of
-// the executor's target). A relay that cannot start leaves the job without a
-// cache, like a scope the host refuses: the job runs.
-func startCacheRelay(ctx context.Context, target Target, spec *execpb.JobSpec) cacheRelay {
-	url := cacheURL(spec.GetCachePort())
+// the executor's target). A relay that cannot start leaves the job without the
+// service, like a scope the host refuses: the job runs. A second relay listens
+// on the same port at the address bridge returns, for the job container and
+// the docker actions, whose loopback is their own; without it those steps get
+// no runtime variables.
+func startCacheRelay(ctx context.Context, target Target, spec *execpb.JobSpec, bridge bridgeLookup) cacheRelay {
+	port := spec.GetCachePort()
+	url := cacheURL(port)
 	if url == "" || spec.GetCacheToken() == "" {
 		return cacheRelay{}
 	}
-	addr := net.JoinHostPort(CacheListenHost, strconv.FormatUint(uint64(spec.GetCachePort()), 10))
-	r, err := StartRelay(ctx, addr, target.CacheTarget().DialStream, DefaultRelayMax)
+	log := zerowrap.FromCtx(ctx)
+	dial := target.CacheTarget().DialStream
+	addr := net.JoinHostPort(CacheListenHost, strconv.FormatUint(uint64(port), 10))
+	r, err := StartRelay(ctx, addr, dial, DefaultRelayMax)
 	if err != nil {
-		log := zerowrap.FromCtx(ctx)
 		log.Warn().Err(err).Msg("job runs without the cache")
 		return cacheRelay{}
 	}
-	return cacheRelay{relay: r, url: url, token: spec.GetCacheToken(), mode: spec.GetCacheMode()}
+	results := spec.GetResults()
+	c := cacheRelay{relay: r, url: url, token: spec.GetCacheToken(), mode: spec.GetCacheMode(),
+		results: results, cacheOff: results && spec.GetCacheMode() == ""}
+	if bridge == nil {
+		return c
+	}
+	ip, err := bridge()
+	if err != nil {
+		log.Debug().Err(err).Msg("no docker bridge: steps in containers run without the runtime service")
+		return c
+	}
+	host := ip.String()
+	br, err := StartRelay(ctx, net.JoinHostPort(host, strconv.FormatUint(uint64(port), 10)), dial, DefaultRelayMax)
+	if err != nil {
+		log.Warn().Err(err).Msg("steps in containers run without the runtime service")
+		return c
+	}
+	c.bridge, c.containerURL = br, relayURL(host, port)
+	return c
 }
 
 // failSetup ends a job that cannot start, like a failed "Set up job": step 1

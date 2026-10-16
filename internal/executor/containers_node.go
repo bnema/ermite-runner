@@ -87,6 +87,10 @@ func (j *job) runNodeInContainer(s *stepRun, c *container, script string, env *o
 	wd := j.state.GitHub("workspace")
 	j.mu.Unlock()
 	henv := j.handlerEnv(env)
+	// After the runtime variables of the contexts, which hold GITHUB_SERVER_URL.
+	if s.serverURL != "" {
+		henv.Set("GITHUB_SERVER_URL", s.serverURL)
+	}
 	if err := checkEnvNames(henv.Keys()); err != nil {
 		return fail(err)
 	}

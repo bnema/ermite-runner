@@ -50,6 +50,9 @@ type stepRun struct {
 	// def is the action the step runs.
 	def         *actionDef
 	nodeVersion string
+	// serverURL, when set, replaces GITHUB_SERVER_URL in the environment of the
+	// process only (see setArtifactsServerURL); the github context keeps its value.
+	serverURL string
 	// scope is what the step shares with the step that contains it, see
 	// stepScope. name is the display name of the step in the log; timedOut is set when the step
 	// reached its timeout-minutes.
@@ -76,10 +79,29 @@ func (s *stepRun) procEnv() []string {
 	if s.rawEnvList != nil {
 		return s.rawEnvList
 	}
+	env := s.env
 	if s.actEnv != nil {
-		return s.j.processEnv(s.actEnv)
+		env = s.actEnv
 	}
-	return s.j.processEnv(s.env)
+	list := s.j.processEnv(env)
+	if s.serverURL != "" {
+		// processEnv sets the runtime variables of the contexts last: the
+		// replacement comes after them.
+		list = setEnvList(list, "GITHUB_SERVER_URL", s.serverURL)
+	}
+	return list
+}
+
+// setEnvList sets name=value in a NAME=value list, in place of an existing
+// entry or at the end.
+func setEnvList(list []string, name, value string) []string {
+	for i, kv := range list {
+		if k, _, _ := strings.Cut(kv, "="); k == name {
+			list[i] = name + "=" + value
+			return list
+		}
+	}
+	return append(list, name+"="+value)
 }
 
 func (s *stepRun) Out(text string)        { s.j.out(s.num, text) }

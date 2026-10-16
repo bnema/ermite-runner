@@ -88,3 +88,16 @@ func TestActionArchiveURLNeedsACache(t *testing.T) {
 		t.Errorf("url without a cache: %q", u)
 	}
 }
+
+// A channel that also serves the results service still sends the action archive
+// route to the cache: the results handler takes only the paths of neither.
+func TestActionArchiveRouteWithResults(t *testing.T) {
+	r, _, key := archiveRig(t)
+	results := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "results", http.StatusNotFound)
+	})
+	a := channel(t, r.svc, "er0000000a", "job-a", WithResults(results))
+	if code, body := archiveStatus(t, a, "GET", r.svc.ArchiveURL("job-a", key, time.Hour)); code != http.StatusOK || body != "tarball" {
+		t.Fatalf("archive with results: %d %q", code, body)
+	}
+}

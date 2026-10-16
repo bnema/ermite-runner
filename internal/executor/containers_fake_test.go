@@ -17,6 +17,7 @@ import (
 //	health           words, one per inspect: starting, healthy, unhealthy
 //	create_fail      docker create exits 125
 //	exec_out         what docker exec prints
+//	exec_vars        names of variables docker exec prints ("VAR NAME=value")
 //	hang_exec        docker exec waits until it gets a signal
 type fakeCtr struct {
 	dir, bin, log string
@@ -61,6 +62,7 @@ rm) [ -f $D/rm_fail ] && { echo "Error response from daemon: cannot remove conta
   echo "$3" ;;
 exec) if [ -f $D/add_path ]; then f=$(echo "$GITHUB_PATH" | sed "s#^/__w#$(cat $D/add_path)#"); echo /added >> "$f"; fi
   [ -f $D/exec_env ] && echo "ENV GITHUB_WORKSPACE=$GITHUB_WORKSPACE RUNNER_TEMP=$RUNNER_TEMP HOME=${HOME:-<unset>} GITHUB_OUTPUT=$GITHUB_OUTPUT GITHUB_EVENT_PATH=$GITHUB_EVENT_PATH"
+  [ -f $D/exec_vars ] && for v in $(cat $D/exec_vars); do eval "echo \"VAR $v=\${$v-unset}\""; done
   [ -f $D/hang_exec ] && { trap 'exit 130' INT TERM; while :; do sleep 0.05; done; }
   [ -f $D/exec_out ] && cat $D/exec_out
   if [ -f $D/exec_exit ]; then n=$(cat $D/exec_exit); [ "$n" != 0 ] && echo 0 > $D/exec_exit && exit $n; fi ;;

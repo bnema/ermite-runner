@@ -95,8 +95,8 @@ message JobSpec {
   // ACTIONS_CACHE_URL=http://127.0.0.1:<port>/ and the token as
   // ACTIONS_RUNTIME_TOKEN to node and docker actions only, as the official
   // runner does, and masks the token. The token is not an ermite credential: it
-  // is an HMAC that only the runner's cache service accepts, scoped to this
-  // job's repository and refs.
+  // is a JWT (HS256) that only the runner's runtime services accept, scoped to
+  // this job's repository and refs (and its run, see results).
   uint32 cache_port = 15;
   string cache_token = 16;
   // Job.secrets and Job.vars are not here: they come in NamedValue frames
@@ -117,8 +117,17 @@ message JobSpec {
   TokenPermissions token_permissions = 20;
   // cache_mode is ACTIONS_CACHE_MODE of the node and docker actions: "write"
   // when the job's cache scope has a write ref, "read" when it has none. Unset
-  // without a cache service.
+  // without a cache service, and unset when the channel serves the results
+  // service only (results set, no cache scope): no ACTIONS_CACHE_URL then.
   string cache_mode = 21;
+  // results says that the service behind cache_port also serves artifacts
+  // (Twirp github.actions.results.api.v1.ArtifactService and its blobs) and
+  // that cache_token carries the job's Actions.Results scope. The executor
+  // then gives node and docker actions ACTIONS_RESULTS_URL (the same origin as
+  // ACTIONS_CACHE_URL) and sets GITHUB_SERVER_URL to a *.ghe.localhost host in
+  // the process of the node steps of the artifact actions only (README,
+  // "Artifacts"). Set only when the server has the feature ci.artifacts.
+  bool results = 22;
 }
 
 // TokenPermissions maps a permission key ("contents", "pull-requests", ...) to

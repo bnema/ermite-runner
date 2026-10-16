@@ -9,9 +9,11 @@
 // One Service per runner host. Entries live under <state>/cache/ (files plus a
 // JSON index, atomic finalisation, LRU eviction by total size) and are scoped by
 // (repository, ref, key, version). A job reaches the service with a bearer token
-// (ACTIONS_RUNTIME_TOKEN) that is an HMAC, made with a key that exists only in
-// the memory of the runner, over its job id, repository, write ref, read refs
-// and expiry.
+// (ACTIONS_RUNTIME_TOKEN): a JWT signed with HS256 under a key that exists only
+// in the memory of the runner, over its job id, repository, write ref, read
+// refs, expiry and scopes. The same token serves the results service of the
+// job (package resultssvc), which the channel of a sandbox carries beside the
+// cache (WithResults).
 //
 // The service never listens on a network. Each sandbox has a channel of its own
 // (Serve): a Unix socket, bind-mounted into a container or reached through
@@ -26,6 +28,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -51,9 +54,10 @@ const (
 	// progress before its connection is cut.
 	DefaultProgressTimeout = 60 * time.Second
 	// DefaultConnsPerListener and DefaultConns bound the open connections of one
-	// sandbox's listener and of the whole service.
-	DefaultConnsPerListener = 16
-	DefaultConns            = 64
+	// sandbox's listener and of the whole service. upload-artifact sends 5
+	// blocks at once by default, besides downloads and the cache.
+	DefaultConnsPerListener = 32
+	DefaultConns            = 128
 )
 
 // Config configures a Service.
@@ -166,21 +170,44 @@ func (s *Service) housekeeping() {
 }
 
 // Token returns the ACTIONS_RUNTIME_TOKEN of a job. It is valid for ttl, which
-// should be the job timeout plus a margin.
-func (s *Service) Token(jobID string, sc Scope, ttl time.Duration) string {
-	return s.sign.token(Claims{JobID: jobID, Scope: sc, Expiry: s.now().Add(ttl).Unix()})
+// should be the job timeout plus a margin. sc is the job's cache scope (the
+// zero Scope for a job without a cache: the cache then refuses the token);
+// scopes are added to its scp claim (resultssvc.Scope for a job with the
+// results service).
+func (s *Service) Token(jobID string, sc Scope, ttl time.Duration, scopes ...string) string {
+	now := s.now()
+	exp := now.Add(ttl).Unix()
+	return s.sign.token(Claims{JobID: jobID, Scope: sc, Expiry: exp, ExpiresAt: exp, IssuedAt: now.Unix(),
+		Scopes: strings.Join(append([]string{genericReadScope}, scopes...), " ")})
+}
+
+// RuntimeToken checks a runtime token for the results service (resultssvc.Auth):
+// made by this runner and not expired, whatever its cache scope. It returns
+// the job, the scp claim and the expiry.
+func (s *Service) RuntimeToken(tok string) (jobID, scopes string, expiry time.Time, err error) {
+	c, err := s.sign.verifyAny(tok, s.now())
+	if err != nil {
+		return "", "", time.Time{}, err
+	}
+	return c.JobID, c.Scopes, time.Unix(c.Expiry, 0), nil
+}
+
+// BlobMAC signs the blob URLs of the results service (resultssvc.Auth), under
+// a key domain of their own.
+func (s *Service) BlobMAC(parts ...[]byte) []byte {
+	return s.sign.mac("blob", parts...)
 }
 
 // start serves HTTP on ln, subject to the connection caps, until the listener
 // is closed. job, when not empty, restricts the tokens accepted to that job's.
-func (s *Service) start(name string, ln net.Listener, job string, bw *bandwidth) *listener {
+func (s *Service) start(name string, ln net.Listener, job string, bw *bandwidth, results http.Handler) *listener {
 	if bw != nil {
 		ln = throttleListener{ln, bw}
 	}
 	ln = newLimitListener(ln, s.perListener, s.connsGlobal)
 	l := &listener{
 		srv: &http.Server{
-			Handler:           s.handler(job),
+			Handler:           s.channelHandler(job, results),
 			ReadHeaderTimeout: 30 * time.Second,
 			// Bodies are chunks of up to tens of MiB and archives of GiB: only
 			// idle connections time out.
@@ -227,7 +254,7 @@ func (s *Service) Serve(id string, ln net.Listener, job string, opts ...ServeOpt
 		_ = ln.Close()
 		return fmt.Errorf("cache: already serving %s", id)
 	}
-	s.channels[id] = s.start(id, ln, job, newBandwidth(sc.bytesPerSec))
+	s.channels[id] = s.start(id, ln, job, newBandwidth(sc.bytesPerSec), sc.results)
 	return nil
 }
 

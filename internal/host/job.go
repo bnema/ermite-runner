@@ -79,6 +79,8 @@ type jobRun struct {
 	// features is what the server accepts; annLists are the annotations the
 	// executor sent for steps that have not completed yet (see results.go).
 	features jobFeatures
+	// results says the job gets the results service (see resultsOn).
+	results  bool
 	annLists map[int32][]*ermite.Annotation
 	// annSeen and sumSeen are the steps that sent their annotations and their
 	// summary: each is sent once.
@@ -623,6 +625,7 @@ func (j *jobRun) execute(ctx context.Context, rt *Runner, stopHard <-chan struct
 	// Stop runs to completion even when the job context is done.
 	defer j.stopSandbox(ctx, rt, sb)
 	j.features = j.loadFeatures(ctx, rt)
+	j.results = j.resultsOn(rt)
 
 	conn, err := j.startSandbox(ctx, rt, sb, stopHard)
 	if err != nil {
@@ -679,7 +682,7 @@ func (j *jobRun) startSandbox(ctx context.Context, rt *Runner, sb sandbox.Sandbo
 		case <-stopWatch:
 		}
 	}()
-	return sb.Start(startCtx, rt.spec(j.job))
+	return sb.Start(startCtx, rt.spec(j.job, j.resultsHandler(rt)))
 }
 
 // drive sends the job to the executor and handles its frames until it exits.
@@ -700,7 +703,7 @@ func (j *jobRun) drive(conn sandbox.Conn, rt *Runner) (*execpb.Exit, error) {
 	if p := j.job.Permissions; p != nil && j.features.secrets {
 		run.Job.TokenPermissions = &execpb.TokenPermissions{Levels: p.GetLevels()}
 	}
-	run.Job.CachePort, run.Job.CacheToken, run.Job.CacheMode = j.cacheFor(rt)
+	run.Job.CachePort, run.Job.CacheToken, run.Job.CacheMode, run.Job.Results = j.runtimeFor(rt)
 	_, exit, err := execstream.DriveJob(conn, run, j.cancelCh, execstream.JobHandler{
 		StepStarted: j.stepStarted, StepCompleted: j.stepCompleted,
 		Log:             j.logLine,

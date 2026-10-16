@@ -14,13 +14,14 @@ import (
 // loopback: through the sandbox's own bind mount (container) or through
 // Firecracker's vsock proxy (VM, which connects to <uds>_<port> when the guest
 // connects to the host on that port). Nothing but that sandbox can reach the
-// path, and the service accepts on it only tokens made for job (see
-// cachesvc.Service.Serve). own, when not nil, sets the owner and mode of the
+// path, and the service accepts on it only tokens made for spec.JobID (see
+// cachesvc.Service.Serve). spec.Results, when set, is served on the same
+// channel beside the cache (cachesvc.WithResults). own, when not nil, sets the owner and mode of the
 // socket before it is served. mbit caps the channel's traffic, all its
 // connections and both directions together (0: unlimited); a VM passes its
 // NetMbit, as the cache stream does not cross eth0, which carries that limit.
 // With no cache service this does nothing.
-func (c Config) ServeCache(id, path, job string, mbit int, own func(path string) error) error {
+func (c Config) ServeCache(id, path string, spec JobSpec, mbit int, own func(path string) error) error {
 	if c.Cache == nil {
 		return nil
 	}
@@ -34,7 +35,11 @@ func (c Config) ServeCache(id, path, job string, mbit int, own func(path string)
 			return err
 		}
 	}
-	return c.Cache.Serve(id, ln, job, cachesvc.WithBandwidth(mbit))
+	opts := []cachesvc.ServeOption{cachesvc.WithBandwidth(mbit)}
+	if spec.Results != nil {
+		opts = append(opts, cachesvc.WithResults(spec.Results))
+	}
+	return c.Cache.Serve(id, ln, spec.JobID, opts...)
 }
 
 // StopCache ends the cache channel of sandbox id: it closes the listener (which

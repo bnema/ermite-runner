@@ -23,6 +23,9 @@ const (
 	// FeatureSecrets: the server sends Job.secrets, vars, environment,
 	// permissions and trusted. Without it Job.trusted is absent, not false.
 	FeatureSecrets = "ci.secrets"
+	// FeatureArtifacts: the server has JobArtifactService (artifacts v4). The
+	// runner serves the results service to a job only then.
+	FeatureArtifacts = "ci.artifacts"
 )
 
 // Limits of Annotation and UploadSummaryRequest (runner.proto). The executor
@@ -42,7 +45,7 @@ const (
 type ServerFeatures func(ctx context.Context) ([]string, error)
 
 // jobFeatures is what the server accepts for this job.
-type jobFeatures struct{ annotations, summaries, secrets bool }
+type jobFeatures struct{ annotations, summaries, secrets, artifacts bool }
 
 func featuresOf(list []string) jobFeatures {
 	var f jobFeatures
@@ -54,6 +57,8 @@ func featuresOf(list []string) jobFeatures {
 			f.summaries = true
 		case FeatureSecrets:
 			f.secrets = true
+		case FeatureArtifacts:
+			f.artifacts = true
 		}
 	}
 	return f
@@ -68,7 +73,7 @@ func (j *jobRun) loadFeatures(ctx context.Context, rt *Runner) jobFeatures {
 	defer cancel()
 	list, err := rt.Features(cctx)
 	if err != nil {
-		j.log.Warn().Err(err).Msg("GetVersion failed: annotations and summaries are not sent for this job")
+		j.log.Warn().Err(err).Msg("GetVersion failed: no annotations, summaries or artifacts for this job")
 		return jobFeatures{}
 	}
 	return featuresOf(list)

@@ -13,8 +13,10 @@ import (
 	"github.com/bnema/zerowrap"
 
 	ermite "bnema.dev/ermite-api/gen/ermite"
+	"bnema.dev/ermite-api/gen/ermite/ermiteconnect"
 
 	"bnema.dev/ermite-runner/internal/cachesvc"
+	"bnema.dev/ermite-runner/internal/resultssvc"
 )
 
 const scopeCtx = `{"github":{"repository":"o/r"}}`
@@ -123,7 +125,7 @@ func TestCacheScopeFallback(t *testing.T) {
 
 // A mismatched scope disables the cache of the job, with a log line; the job
 // goes on.
-func TestCacheForMismatchDisablesCache(t *testing.T) {
+func TestRuntimeForMismatchDisablesCache(t *testing.T) {
 	svc, err := cachesvc.New(cachesvc.Config{Dir: filepath.Join(t.TempDir(), "cache")})
 	if err != nil {
 		t.Fatal(err)
@@ -134,7 +136,7 @@ func TestCacheForMismatchDisablesCache(t *testing.T) {
 		job:      &ermite.Job{JobId: "j1", Ref: "refs/heads/main", Cache: &ermite.JobCache{Repository: "o/other", WriteRef: "refs/heads/main"}},
 		contexts: scopeCtx, log: zerowrap.New(zerowrap.Config{Output: &logs, Format: "json", Level: "debug"}),
 	}
-	if port, tok, _ := j.cacheFor(&Runner{Cache: svc}); port != 0 || tok != "" {
+	if port, tok, _, _ := j.runtimeFor(&Runner{Cache: svc}); port != 0 || tok != "" {
 		t.Fatalf("cache for a mismatched scope: %d %q", port, tok)
 	}
 	if !strings.Contains(logs.String(), "cache disabled for the job") || !strings.Contains(logs.String(), "o/other") {
@@ -142,16 +144,16 @@ func TestCacheForMismatchDisablesCache(t *testing.T) {
 	}
 }
 
-func TestCacheForNeedsServiceAndScope(t *testing.T) {
+func TestRuntimeForNeedsServiceAndScope(t *testing.T) {
 	j := &jobRun{job: &ermite.Job{JobId: "j1", Ref: "refs/heads/main", TimeoutMinutes: 5}, contexts: `{"github":{"repository":"o/r"}}`}
-	if port, tok, _ := j.cacheFor(&Runner{}); port != 0 || tok != "" {
+	if port, tok, _, _ := j.runtimeFor(&Runner{}); port != 0 || tok != "" {
 		t.Fatalf("no service: %d %q", port, tok)
 	}
 }
 
 // The token of a job is the one the service accepts, for the job's repository
 // and ref only.
-func TestCacheForToken(t *testing.T) {
+func TestRuntimeForToken(t *testing.T) {
 	svc, err := cachesvc.New(cachesvc.Config{Dir: filepath.Join(t.TempDir(), "cache")})
 	if err != nil {
 		t.Fatal(err)
@@ -161,10 +163,10 @@ func TestCacheForToken(t *testing.T) {
 	defer srv.Close()
 	rt := &Runner{Cache: svc}
 	j := &jobRun{job: &ermite.Job{JobId: "j1", Ref: "refs/heads/main", TimeoutMinutes: 5}, contexts: `{"github":{"repository":"o/r"}}`}
-	port, tok, mode := j.cacheFor(rt)
+	port, tok, mode, results := j.runtimeFor(rt)
 	// The port is the cache's loopback port in the guest, not a host port.
-	if port != 9089 || tok == "" {
-		t.Fatalf("%d %q", port, tok)
+	if port != 9089 || tok == "" || results {
+		t.Fatalf("%d %q %v", port, tok, results)
 	}
 	// No Job.cache: the narrowest scope writes the job's own ref.
 	if mode != "write" {
@@ -193,7 +195,7 @@ func TestCacheForToken(t *testing.T) {
 
 // ACTIONS_CACHE_MODE follows the write ref of the scope: none makes the job
 // read-only.
-func TestCacheForMode(t *testing.T) {
+func TestRuntimeForMode(t *testing.T) {
 	svc, err := cachesvc.New(cachesvc.Config{Dir: filepath.Join(t.TempDir(), "cache")})
 	if err != nil {
 		t.Fatal(err)
@@ -204,8 +206,82 @@ func TestCacheForMode(t *testing.T) {
 			job:      &ermite.Job{JobId: "j1", TimeoutMinutes: 5, Cache: &ermite.JobCache{Repository: "o/r", WriteRef: tc.write, ReadRefs: []string{"refs/heads/main"}}},
 			contexts: `{"github":{"repository":"o/r"}}`,
 		}
-		if _, _, mode := j.cacheFor(&Runner{Cache: svc}); mode != tc.want {
+		if _, _, mode, _ := j.runtimeFor(&Runner{Cache: svc}); mode != tc.want {
 			t.Errorf("write ref %q: mode %q, want %q", tc.write, mode, tc.want)
 		}
+	}
+}
+
+// A job with the results service gets the channel even without a cache scope:
+// its token carries the job's Actions.Results scope, the results service takes
+// it and the cache refuses it. With a cache scope the token serves both.
+func TestRuntimeForResults(t *testing.T) {
+	svc, err := cachesvc.New(cachesvc.Config{Dir: filepath.Join(t.TempDir(), "cache")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = svc.CloseAll() })
+	rt := &Runner{Cache: svc, Results: resultssvc.New(resultssvc.Config{Auth: svc}),
+		Artifacts: func(string) ermiteconnect.JobArtifactServiceClient { return nil }}
+	scope := resultssvc.Scope(42, "j1", 2)
+	for _, tc := range []struct {
+		name, ref string
+		mode      string
+	}{{"no cache scope", "", ""}, {"cache scope", "refs/heads/main", "write"}} {
+		j := &jobRun{job: &ermite.Job{JobId: "j1", RunId: 42, Attempt: 2, Ref: tc.ref, TimeoutMinutes: 5},
+			contexts: `{"github":{"repository":"o/r"}}`, features: jobFeatures{artifacts: true}}
+		j.results = j.resultsOn(rt)
+		port, tok, mode, results := j.runtimeFor(rt)
+		if port != cachesvc.DefaultPort || tok == "" || mode != tc.mode || !results {
+			t.Fatalf("%s: %d %q %q %v", tc.name, port, tok, mode, results)
+		}
+		job, scp, _, err := svc.RuntimeToken(tok)
+		if err != nil || job != "j1" || !strings.Contains(" "+scp+" ", " "+scope+" ") {
+			t.Fatalf("%s: %q %q %v", tc.name, job, scp, err)
+		}
+		if j.resultsHandler(rt) == nil {
+			t.Fatalf("%s: no results handler", tc.name)
+		}
+	}
+}
+
+// The results service needs the runner's service, its cache channel, the
+// client factory and the server's ci.artifacts; without any of them the job
+// gets none, and its token no Actions.Results scope.
+func TestResultsOnNeedsEverything(t *testing.T) {
+	svc, err := cachesvc.New(cachesvc.Config{Dir: filepath.Join(t.TempDir(), "cache")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = svc.CloseAll() })
+	res := resultssvc.New(resultssvc.Config{Auth: svc})
+	art := func(string) ermiteconnect.JobArtifactServiceClient { return nil }
+	full := &Runner{Cache: svc, Results: res, Artifacts: art}
+	for name, tc := range map[string]struct {
+		rt   *Runner
+		feat bool
+	}{
+		"no feature": {full, false},
+		"no service": {&Runner{Cache: svc, Artifacts: art}, true},
+		"no cache":   {&Runner{Results: res, Artifacts: art}, true},
+		"no client":  {&Runner{Cache: svc, Results: res}, true},
+	} {
+		j := &jobRun{job: &ermite.Job{JobId: "j1", RunId: 42, Ref: "refs/heads/main", TimeoutMinutes: 5},
+			contexts: `{"github":{"repository":"o/r"}}`, features: jobFeatures{artifacts: tc.feat}}
+		j.results = j.resultsOn(tc.rt)
+		if j.results || j.resultsHandler(tc.rt) != nil {
+			t.Errorf("%s: results on", name)
+		}
+		_, tok, _, results := j.runtimeFor(tc.rt)
+		if results {
+			t.Errorf("%s: results in the job spec", name)
+		}
+		if _, scp, _, err := svc.RuntimeToken(tok); err == nil && strings.Contains(scp, "Actions.Results") {
+			t.Errorf("%s: results scope in the token", name)
+		}
+	}
+	j := &jobRun{features: jobFeatures{artifacts: true}}
+	if !j.resultsOn(full) {
+		t.Fatal("everything there: results off")
 	}
 }

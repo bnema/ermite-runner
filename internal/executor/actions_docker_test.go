@@ -29,6 +29,7 @@ pull)
 build) echo "built" ;;
 run)
   echo "RUN-ENV INPUT_WHO=$INPUT_WHO HOME=$HOME GITHUB_ENV=$GITHUB_ENV GITHUB_WORKSPACE=$GITHUB_WORKSPACE FOO=$FOO"
+  echo "RUN-RT RUNTIME=${ACTIONS_RUNTIME_URL-unset} CACHE=${ACTIONS_CACHE_URL-unset} RESULTS=${ACTIONS_RESULTS_URL-unset} SERVER=$GITHUB_SERVER_URL"
   echo "::set-output name=x::y" ;;
 esac
 exit 0
