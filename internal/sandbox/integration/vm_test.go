@@ -305,3 +305,51 @@ grep ' /home/runner/externals ' /proc/mounts
 		t.Error("the externals are writable from the guest")
 	}
 }
+
+// TestVMBinfmtMisc checks what docker/setup-qemu-action needs from the guest:
+// binfmt_misc mounted at boot, as on GitHub's image, and a handler registered
+// with the F (fix binary) flag that tonistiigi/binfmt uses. The handler here is
+// cat on an extension, so the test needs neither QEMU nor the network.
+func TestVMBinfmtMisc(t *testing.T) {
+	if os.Getenv("ERMITE_RUNNER_IT_VM") != "1" {
+		t.Skip("set ERMITE_RUNNER_IT_VM=1")
+	}
+	need(t, "mkfs.ext4")
+	needNetAdmin(t)
+	ctx := ctxWithLog(t)
+	cfg := loadConfig(t, sandbox.VM)
+	drv, err := sandbox.Select(ctx, cfg, drivers.Factories(), sandbox.Prober{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = drv.Close() }()
+	_ = drv.Reap(ctx)
+	sb, err := drv.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = sb.Stop(context.Background()) }()
+	conn, err := sb.Start(ctx, sandbox.JobSpec{JobID: "binfmt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := runJob(ctx, conn, `
+S=; [ "$(id -u)" = 0 ] || S="sudo -n"
+grep ' /proc/sys/fs/binfmt_misc ' /proc/mounts
+echo "status: $(cat /proc/sys/fs/binfmt_misc/status)"
+echo ':ermitetest:E::ermitetest::/usr/bin/cat:F' | $S tee /proc/sys/fs/binfmt_misc/register >/dev/null
+grep -x 'flags: F' /proc/sys/fs/binfmt_misc/ermitetest
+printf 'ran through binfmt_misc\n' > /tmp/probe.ermitetest
+chmod +x /tmp/probe.ermitetest
+/tmp/probe.ermitetest
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Log("\n" + r.out + r.errOut)
+	for _, w := range []string{"binfmt_misc /proc/sys/fs/binfmt_misc binfmt_misc", "status: enabled\n", "flags: F\n", "ran through binfmt_misc\n"} {
+		if !strings.Contains(r.out, w) {
+			t.Errorf("output lacks %q", w)
+		}
+	}
+}

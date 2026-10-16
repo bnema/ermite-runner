@@ -382,6 +382,8 @@ scripts/build-image.sh tmp/image    # builds the OCI image with docker or podman
 
 The kernel configuration is `images/kernel/config-6.18` (+ per-architecture fragments), checked after `olddefconfig`: the build fails if a listed option did not survive. arm64 builds (`ARCH_NAME=arm64`) but is not tested in CI-1.
 
+`CONFIG_BINFMT_MISC` is built in (the guest has no modules) and the guest init mounts it at `/proc/sys/fs/binfmt_misc`, as systemd does on GitHub's image, so `docker/setup-qemu-action` (`tonistiigi/binfmt --install`) can register QEMU handlers and run foreign-architecture containers. The handlers belong to the job's VM and disappear with it. With a kernel built before this option, the init logs the failed mount and jobs run without it.
+
 ## Tests
 
 ```sh

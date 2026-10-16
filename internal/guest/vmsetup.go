@@ -140,6 +140,13 @@ func setupVM(log zerowrap.Logger, args map[string]string) error {
 			log.Warn().Err(err).Str("target", m.dst).Msg("init: mount")
 		}
 	}
+	// Mounted at boot on GitHub's image (systemd's
+	// proc-sys-fs-binfmt_misc.automount): jobs read the handlers that
+	// setup-qemu-action registers there. A kernel without BINFMT_MISC has no
+	// such directory; the jobs run without it.
+	if err := mount("binfmt_misc", "/proc/sys/fs/binfmt_misc", "binfmt_misc", unix.MS_NOSUID|unix.MS_NODEV|unix.MS_NOEXEC, ""); err != nil {
+		log.Warn().Err(err).Msg("init: mount binfmt_misc")
+	}
 	_ = os.Chmod("/tmp", sandbox.TmpMode)
 
 	gw := args[sandbox.CmdlineGateway]
