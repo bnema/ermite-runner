@@ -719,6 +719,38 @@ func TestRepositoryActionPrePostAndState(t *testing.T) {
 	}
 }
 
+// github.action_repository and github.action_ref are set by ActionRunner.RunAsync
+// of an action step (ActionRunner.cs:143-154, and cleared to null for any other
+// step, run: ones included), but the step env is evaluated before that, in
+// StepsRunner.cs:118-124. So `env:` of a step sees the values left by the last
+// step that ran RunAsync (a skipped step does not), while its own body sees
+// its own, empty ones. Pinned for a main that succeeds and one that fails.
+func TestActionContextInStepEnvAndBody(t *testing.T) {
+	probe := "      - run: echo \"ENV=[$R] BODY=[${{ github.action_repository }}@${{ github.action_ref }}]\"\n" +
+		"        if: always()\n" +
+		"        env:\n" +
+		"          R: ${{ github.action_repository }}@${{ github.action_ref }}\n"
+	for _, tc := range []struct{ name, main, between, want string }{
+		{"success", "exit 0\n", "", "ENV=[o/ar@v1] BODY=[@]"},
+		{"failure", "exit 1\n", "", "ENV=[o/ar@v1] BODY=[@]"},
+		{"a run step in between clears it", "exit 0\n", "      - run: echo between\n        if: always()\n", "ENV=[@] BODY=[@]"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			forge := newForge(t, map[string][]byte{"/tarball/o/ar/v1": tarOf(t, "o-ar-x", files{"action.yml": nodeAction, "main.sh": tc.main})})
+			steps := "      - uses: o/ar@v1\n" +
+				"      - uses: ./skipped\n        if: false\n" + tc.between + probe
+			rec, res := actionRun(t, files{}, steps, func(c *Config) { c.Actions.Resolver = forge.resolver("") })
+			if wantOK := tc.name != "failure"; (res.Conclusion == ConclusionSuccess) != wantOK {
+				t.Fatalf("conclusion %+v", res)
+			}
+			got := logOf(rec.steps[len(rec.steps)-2]) // the probe, before "Complete job"
+			if !strings.Contains(got, tc.want) {
+				t.Errorf("want %q in\n%s\nsteps %v", tc.want, got, rec.names())
+			}
+		})
+	}
+}
+
 func TestDockerPrePostEntrypoints(t *testing.T) {
 	forge := newForge(t, map[string][]byte{"/tarball/o/dk/v1": tarOf(t, "o-dk-x", files{
 		"action.yml": "name: dk\nruns:\n  using: docker\n  image: docker://alpine:3\n  pre-entrypoint: /pre.sh\n  entrypoint: /main.sh\n  post-entrypoint: /post.sh\n"})})

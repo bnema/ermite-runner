@@ -134,7 +134,7 @@ func TestCacheForMismatchDisablesCache(t *testing.T) {
 		job:      &ermite.Job{JobId: "j1", Ref: "refs/heads/main", Cache: &ermite.JobCache{Repository: "o/other", WriteRef: "refs/heads/main"}},
 		contexts: scopeCtx, log: zerowrap.New(zerowrap.Config{Output: &logs, Format: "json", Level: "debug"}),
 	}
-	if port, tok := j.cacheFor(&Runner{Cache: svc}); port != 0 || tok != "" {
+	if port, tok, _ := j.cacheFor(&Runner{Cache: svc}); port != 0 || tok != "" {
 		t.Fatalf("cache for a mismatched scope: %d %q", port, tok)
 	}
 	if !strings.Contains(logs.String(), "cache disabled for the job") || !strings.Contains(logs.String(), "o/other") {
@@ -144,7 +144,7 @@ func TestCacheForMismatchDisablesCache(t *testing.T) {
 
 func TestCacheForNeedsServiceAndScope(t *testing.T) {
 	j := &jobRun{job: &ermite.Job{JobId: "j1", Ref: "refs/heads/main", TimeoutMinutes: 5}, contexts: `{"github":{"repository":"o/r"}}`}
-	if port, tok := j.cacheFor(&Runner{}); port != 0 || tok != "" {
+	if port, tok, _ := j.cacheFor(&Runner{}); port != 0 || tok != "" {
 		t.Fatalf("no service: %d %q", port, tok)
 	}
 }
@@ -161,10 +161,14 @@ func TestCacheForToken(t *testing.T) {
 	defer srv.Close()
 	rt := &Runner{Cache: svc}
 	j := &jobRun{job: &ermite.Job{JobId: "j1", Ref: "refs/heads/main", TimeoutMinutes: 5}, contexts: `{"github":{"repository":"o/r"}}`}
-	port, tok := j.cacheFor(rt)
+	port, tok, mode := j.cacheFor(rt)
 	// The port is the cache's loopback port in the guest, not a host port.
 	if port != 9089 || tok == "" {
 		t.Fatalf("%d %q", port, tok)
+	}
+	// No Job.cache: the narrowest scope writes the job's own ref.
+	if mode != "write" {
+		t.Fatalf("mode %q", mode)
 	}
 	do := func(token string) int {
 		req, _ := http.NewRequest("POST", srv.URL+cachesvc.APIPath+"caches", strings.NewReader(`{"key":"k","version":"v","cacheSize":1}`))
@@ -184,5 +188,24 @@ func TestCacheForToken(t *testing.T) {
 	// The job token of ermite is not a cache token, nor the other way round.
 	if c := do("ermitejob_0123456789"); c != http.StatusForbidden {
 		t.Fatalf("foreign token: %d", c)
+	}
+}
+
+// ACTIONS_CACHE_MODE follows the write ref of the scope: none makes the job
+// read-only.
+func TestCacheForMode(t *testing.T) {
+	svc, err := cachesvc.New(cachesvc.Config{Dir: filepath.Join(t.TempDir(), "cache")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = svc.CloseAll() })
+	for _, tc := range []struct{ write, want string }{{"refs/heads/main", "write"}, {"", "read"}} {
+		j := &jobRun{
+			job:      &ermite.Job{JobId: "j1", TimeoutMinutes: 5, Cache: &ermite.JobCache{Repository: "o/r", WriteRef: tc.write, ReadRefs: []string{"refs/heads/main"}}},
+			contexts: `{"github":{"repository":"o/r"}}`,
+		}
+		if _, _, mode := j.cacheFor(&Runner{Cache: svc}); mode != tc.want {
+			t.Errorf("write ref %q: mode %q, want %q", tc.write, mode, tc.want)
+		}
 	}
 }

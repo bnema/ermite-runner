@@ -40,6 +40,31 @@ RUN install -m 0755 -d /etc/apt/keyrings \
       docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin \
  && rm -rf /var/lib/apt/lists/*
 
+# Node.js 22 and yarn 1 system-wide in /usr/local, like GitHub's image
+# (runner-images, install-nodejs.sh:11-24 and toolset-2404.json: node.default
+# 22, node_modules yarn). The tarball is checked against the SHA-256 published
+# in https://nodejs.org/dist/v22.23.3/SHASUMS256.txt. /usr/local/lib/node_modules
+# and /usr/local/bin are world-writable so that "npm install -g" works as the
+# runner user (runner-images issue 3727).
+ARG NODE_VERSION=22.23.3
+ARG NODE_SHA256_AMD64=df450af89261115ef9f9e3830c3eeb2cc9213b63c720b1af623cb5dcbe2e02de
+ARG NODE_SHA256_ARM64=a44aeb94849a299b22df10b9e622ec2f605c2183501bc40590705131de7c740f
+RUN arch=$(dpkg --print-architecture) \
+ && case "$arch" in \
+      amd64) node_arch=x64; node_sha=$NODE_SHA256_AMD64 ;; \
+      arm64) node_arch=arm64; node_sha=$NODE_SHA256_ARM64 ;; \
+      *) echo "unsupported architecture $arch" >&2; exit 1 ;; \
+    esac \
+ && curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${node_arch}.tar.xz" -o /tmp/node.tar.xz \
+ && echo "${node_sha}  /tmp/node.tar.xz" | sha256sum -c - \
+ && tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 --no-same-owner \
+      --exclude='*/CHANGELOG.md' --exclude='*/LICENSE' --exclude='*/README.md' \
+ && rm /tmp/node.tar.xz \
+ && npm install -g yarn@1.22.22 \
+ && npm cache clean --force \
+ && chmod -R 777 /usr/local/lib/node_modules \
+ && chmod 777 /usr/local/bin
+
 # Like GitHub-hosted runners: user "runner" (uid 1001), passwordless sudo,
 # member of "docker", with the job layout directories.
 RUN useradd --create-home --uid 1001 --shell /bin/bash runner \

@@ -259,7 +259,7 @@ func runJob(ctx context.Context, conn *execstream.Conn, cfg ExecConfig, spec *ex
 		Runner:        executor.RunnerInfo{Name: spec.GetRunnerName(), Environment: env},
 		RunnerVersion: spec.GetRunnerVersion(),
 		Home:          su.Home, ToolCache: os.Getenv("RUNNER_TOOL_CACHE"), BaseEnv: stepEnv(os.Environ(), su), Credential: su.Credential,
-		CacheURL: cacheEnv.url, CacheToken: cacheEnv.token,
+		CacheURL: cacheEnv.url, CacheToken: cacheEnv.token, CacheMode: cacheEnv.mode,
 		Debug: spec.GetDebug(), Reporter: rep, Actions: executor.DefaultActionsConfig(res.resolve), Log: zerowrap.FromCtx(ctx),
 		Secrets: vals.secrets, Vars: vals.vars, SecretsWithheld: spec.GetSecretsWithheld(), TokenPermissions: tokenPermissions(spec),
 		SendAnnotations: spec.GetSendAnnotations(), SendSummaries: spec.GetSendSummaries(),
@@ -286,8 +286,8 @@ func cacheURL(port uint32) string {
 // loopback it listens on and the token of the job. All are empty without a cache
 // service.
 type cacheRelay struct {
-	relay      *Relay
-	url, token string
+	relay            *Relay
+	url, token, mode string
 }
 
 func (c cacheRelay) close() {
@@ -313,7 +313,7 @@ func startCacheRelay(ctx context.Context, target Target, spec *execpb.JobSpec) c
 		log.Warn().Err(err).Msg("job runs without the cache")
 		return cacheRelay{}
 	}
-	return cacheRelay{relay: r, url: url, token: spec.GetCacheToken()}
+	return cacheRelay{relay: r, url: url, token: spec.GetCacheToken(), mode: spec.GetCacheMode()}
 }
 
 // failSetup ends a job that cannot start, like a failed "Set up job": step 1

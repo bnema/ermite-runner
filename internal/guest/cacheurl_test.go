@@ -58,9 +58,9 @@ func TestStartCacheRelay(t *testing.T) {
 	t.Cleanup(func() { _ = srv.Close() })
 
 	port := freePort(t)
-	spec := &execpb.JobSpec{CachePort: port, CacheToken: "tok"}
+	spec := &execpb.JobSpec{CachePort: port, CacheToken: "tok", CacheMode: "read"}
 	got := startCacheRelay(context.Background(), Target{Network: "unix", Addr: execSock}, spec)
-	if got.relay == nil || got.token != "tok" || got.url != cacheURL(port) {
+	if got.relay == nil || got.token != "tok" || got.mode != "read" || got.url != cacheURL(port) {
 		t.Fatalf("relay %+v", got)
 	}
 

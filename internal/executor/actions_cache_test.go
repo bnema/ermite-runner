@@ -21,7 +21,7 @@ runs:
   main: main.sh
 `
 
-const envScript = "echo \"url=[$ACTIONS_CACHE_URL] rurl=[$ACTIONS_RUNTIME_URL] token=[$ACTIONS_RUNTIME_TOKEN] v2=[${ACTIONS_CACHE_SERVICE_V2-unset}] results=[${ACTIONS_RESULTS_URL-unset}]\"\n"
+const envScript = "echo \"mode=[${ACTIONS_CACHE_MODE-unset}] url=[$ACTIONS_CACHE_URL] rurl=[$ACTIONS_RUNTIME_URL] token=[$ACTIONS_RUNTIME_TOKEN] v2=[${ACTIONS_CACHE_SERVICE_V2-unset}] results=[${ACTIONS_RESULTS_URL-unset}]\"\n"
 
 // NodeScriptActionHandler.cs:55-72: a node action gets the runtime variables. The
 // URL is the base the toolkit appends "_apis/artifactcache/…" to (it ends with a
@@ -34,7 +34,7 @@ func TestNodeActionGetsCacheEnv(t *testing.T) {
 		t.Fatalf("%+v\n%s", res, logOf(rec.steps[1]))
 	}
 	got := logOf(rec.step(t, "Run ./.github/actions/e"))
-	want := "url=[" + cacheTestURL + "] rurl=[" + cacheTestURL + "] token=[***] v2=[unset] results=[unset]"
+	want := "mode=[unset] url=[" + cacheTestURL + "] rurl=[" + cacheTestURL + "] token=[***] v2=[unset] results=[unset]"
 	if !strings.Contains(got, want) {
 		t.Errorf("want %q in\n%s", want, got)
 	}
@@ -58,7 +58,7 @@ func TestCacheEnvOnlyForActions(t *testing.T) {
 	if res.Conclusion != ConclusionSuccess {
 		t.Fatalf("%+v", res)
 	}
-	if got := logOf(rec.step(t, "Run ./.github/actions/e")); !strings.Contains(got, "url=[] rurl=[] token=[]") {
+	if got := logOf(rec.step(t, "Run ./.github/actions/e")); !strings.Contains(got, "mode=[unset] url=[] rurl=[] token=[]") {
 		t.Errorf("no cache service, no variables:\n%s", got)
 	}
 }
@@ -89,5 +89,45 @@ func TestDockerActionGetsCacheEnv(t *testing.T) {
 	}
 	if run := logOf(rec.steps[2]); strings.Contains(run, cacheTestToken) {
 		t.Errorf("the token is in the log:\n%s", run)
+	}
+}
+
+// ACTIONS_CACHE_MODE (NodeScriptActionHandler.cs:71-84): set from the cache
+// mode of the job, for node and docker actions, next to the URL only.
+func TestCacheModeEnv(t *testing.T) {
+	for _, mode := range []string{"write", "read"} {
+		rec, res := actionRun(t, files{".github/actions/e/action.yml": envAction, ".github/actions/e/main.sh": envScript},
+			"      - uses: ./.github/actions/e\n", func(c *Config) { withCache(c); c.CacheMode = mode })
+		if res.Conclusion != ConclusionSuccess {
+			t.Fatalf("%+v", res)
+		}
+		if got := logOf(rec.step(t, "Run ./.github/actions/e")); !strings.Contains(got, "mode=["+mode+"] url=[") {
+			t.Errorf("mode %s:\n%s", mode, got)
+		}
+	}
+	// A mode without a cache service sets nothing.
+	rec, res := actionRun(t, files{".github/actions/e/action.yml": envAction, ".github/actions/e/main.sh": envScript},
+		"      - uses: ./.github/actions/e\n", func(c *Config) { c.CacheMode = "write" })
+	if res.Conclusion != ConclusionSuccess {
+		t.Fatalf("%+v", res)
+	}
+	if got := logOf(rec.step(t, "Run ./.github/actions/e")); !strings.Contains(got, "mode=[unset]") {
+		t.Errorf("no cache service:\n%s", got)
+	}
+}
+
+func TestDockerActionGetsCacheMode(t *testing.T) {
+	d, lf := fakeDocker(t, 0)
+	_, res := actionRun(t, files{}, "      - uses: docker://alpine:3.20\n", func(c *Config) {
+		c.Actions.DockerPath = d
+		withCache(c)
+		c.CacheMode = "read"
+	})
+	if res.Conclusion != ConclusionSuccess {
+		t.Fatalf("%+v", res)
+	}
+	cs := calls(t, lf)
+	if len(cs) != 2 || !strings.Contains("\n"+strings.Join(cs[1], "\n")+"\n", "\n-e\nACTIONS_CACHE_MODE\n") {
+		t.Errorf("docker run lacks -e ACTIONS_CACHE_MODE: %v", cs)
 	}
 }

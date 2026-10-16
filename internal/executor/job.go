@@ -78,6 +78,9 @@ type Config struct {
 	// ACTIONS_RUNTIME_TOKEN of the node and docker actions of the job: the cache
 	// service of the runner. The token is masked in the log.
 	CacheURL, CacheToken string
+	// CacheMode is ACTIONS_CACHE_MODE ("read" or "write") next to the cache URL;
+	// empty sets nothing.
+	CacheMode string
 	// Secrets and Vars are Job.secrets and Job.vars. Secrets are registered in
 	// the masker before the first step and form the secrets context; they are
 	// never logged. Vars are the fallback of the vars context.

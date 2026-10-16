@@ -168,6 +168,11 @@ func (j *job) addRuntimeEnv(env *ordered) {
 	env.Set("ACTIONS_RUNTIME_URL", j.cfg.CacheURL)
 	env.Set("ACTIONS_RUNTIME_TOKEN", j.cfg.CacheToken)
 	env.Set("ACTIONS_CACHE_URL", j.cfg.CacheURL)
+	// ACTIONS_CACHE_MODE: NodeScriptActionHandler.cs:71-84, ContainerActionHandler.cs:
+	// 237-245; the toolkit skips uploads in "read" mode (cache config.ts:27-40).
+	if j.cfg.CacheMode != "" {
+		env.Set("ACTIONS_CACHE_MODE", j.cfg.CacheMode)
+	}
 }
 
 // runNode is NodeScriptActionHandler.RunAsync (NodeScriptActionHandler.cs:

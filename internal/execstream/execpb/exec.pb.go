@@ -764,8 +764,12 @@ type JobSpec struct {
 	// server sent none (an older server): the executor then reads them from the
 	// workflow.
 	TokenPermissions *TokenPermissions `protobuf:"bytes,20,opt,name=token_permissions,json=tokenPermissions,proto3" json:"token_permissions,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	// cache_mode is ACTIONS_CACHE_MODE of the node and docker actions: "write"
+	// when the job's cache scope has a write ref, "read" when it has none. Unset
+	// without a cache service.
+	CacheMode     string `protobuf:"bytes,21,opt,name=cache_mode,json=cacheMode,proto3" json:"cache_mode,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *JobSpec) Reset() {
@@ -922,6 +926,13 @@ func (x *JobSpec) GetTokenPermissions() *TokenPermissions {
 		return x.TokenPermissions
 	}
 	return nil
+}
+
+func (x *JobSpec) GetCacheMode() string {
+	if x != nil {
+		return x.CacheMode
+	}
+	return ""
 }
 
 // TokenPermissions maps a permission key ("contents", "pull-requests", ...) to
@@ -1905,7 +1916,7 @@ const file_exec_proto_rawDesc = "" +
 	"\x03job\x18\x03 \x01(\v2\x1e.ermite.runner.exec.v1.JobSpecR\x03job\x1a6\n" +
 	"\bEnvEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xb9\x05\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xd8\x05\n" +
 	"\aJobSpec\x12#\n" +
 	"\rworkflow_path\x18\x01 \x01(\tR\fworkflowPath\x12#\n" +
 	"\rworkflow_yaml\x18\x02 \x01(\tR\fworkflowYaml\x12\x17\n" +
@@ -1929,7 +1940,9 @@ const file_exec_proto_rawDesc = "" +
 	"\vcache_token\x18\x10 \x01(\tR\n" +
 	"cacheToken\x12)\n" +
 	"\x10secrets_withheld\x18\x13 \x01(\bR\x0fsecretsWithheld\x12T\n" +
-	"\x11token_permissions\x18\x14 \x01(\v2'.ermite.runner.exec.v1.TokenPermissionsR\x10tokenPermissionsJ\x04\b\x11\x10\x12J\x04\b\x12\x10\x13R\asecretsR\x04vars\"\x9a\x01\n" +
+	"\x11token_permissions\x18\x14 \x01(\v2'.ermite.runner.exec.v1.TokenPermissionsR\x10tokenPermissions\x12\x1d\n" +
+	"\n" +
+	"cache_mode\x18\x15 \x01(\tR\tcacheModeJ\x04\b\x11\x10\x12J\x04\b\x12\x10\x13R\asecretsR\x04vars\"\x9a\x01\n" +
 	"\x10TokenPermissions\x12K\n" +
 	"\x06levels\x18\x01 \x03(\v23.ermite.runner.exec.v1.TokenPermissions.LevelsEntryR\x06levels\x1a9\n" +
 	"\vLevelsEntry\x12\x10\n" +

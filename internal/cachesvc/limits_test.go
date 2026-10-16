@@ -6,7 +6,6 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
-	"github.com/bnema/zerowrap"
 	"io"
 	"net"
 	"net/http"
@@ -17,6 +16,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/bnema/zerowrap"
 )
 
 // chunkReq sends a PATCH whose body the test feeds through the returned writer;

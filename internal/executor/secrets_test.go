@@ -8,13 +8,14 @@ import (
 	"os"
 	"path/filepath"
 
-	"bnema.dev/ermite-actions/expr"
 	"encoding/base64"
 	"encoding/json"
-	"github.com/bnema/zerowrap"
 	"net/url"
 	"strings"
 	"testing"
+
+	"bnema.dev/ermite-actions/expr"
+	"github.com/bnema/zerowrap"
 )
 
 // jobSecretMasker is the masker of a job holding these secrets, built the way

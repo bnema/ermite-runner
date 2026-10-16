@@ -115,6 +115,10 @@ message JobSpec {
   // server sent none (an older server): the executor then reads them from the
   // workflow.
   TokenPermissions token_permissions = 20;
+  // cache_mode is ACTIONS_CACHE_MODE of the node and docker actions: "write"
+  // when the job's cache scope has a write ref, "read" when it has none. Unset
+  // without a cache service.
+  string cache_mode = 21;
 }
 
 // TokenPermissions maps a permission key ("contents", "pull-requests", ...) to

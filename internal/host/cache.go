@@ -108,20 +108,24 @@ func githubRepository(contexts string) string {
 
 // cacheFor returns the loopback port the cache has in the guest and the token
 // of a job, or 0 and "" when the runner serves no cache or the job has no scope.
-func (j *jobRun) cacheFor(rt *Runner) (port uint32, token string) {
+func (j *jobRun) cacheFor(rt *Runner) (port uint32, token, mode string) {
 	if rt.Cache == nil {
-		return 0, ""
+		return 0, "", ""
 	}
 	sc, ok, err := cacheScope(j.job, j.contexts)
 	if err != nil {
 		// A bad scope from the server is not the job's failure: it runs without a
 		// cache.
 		j.log.Warn().Err(err).Msg("cache disabled for the job")
-		return 0, ""
+		return 0, "", ""
 	}
 	if !ok {
-		return 0, ""
+		return 0, "", ""
 	}
 	ttl := time.Duration(j.timeoutMinutes())*time.Minute + cacheTokenMargin
-	return cachesvc.DefaultPort, rt.Cache.Token(j.job.JobId, sc, ttl)
+	mode = "read"
+	if sc.WriteRef != "" {
+		mode = "write"
+	}
+	return cachesvc.DefaultPort, rt.Cache.Token(j.job.JobId, sc, ttl), mode
 }
