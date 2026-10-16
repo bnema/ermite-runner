@@ -142,7 +142,7 @@ func (r *Runner) Run(ctx context.Context) error {
 			pollID = newPollID()
 		}
 		pctx, cancel := context.WithTimeout(ctx, t.PollTimeout)
-		resp, err := r.Poll.FetchJob(pctx, connect.NewRequest(&ermite.FetchJobRequest{PollId: pollID}))
+		resp, err := r.Poll.FetchJob(pctx, connect.NewRequest(&ermite.FetchJobRequest{PollId: pollID, Version: r.Cfg.Version}))
 		cancel()
 		if err != nil {
 			<-slots

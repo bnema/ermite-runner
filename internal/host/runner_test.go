@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -1324,5 +1325,28 @@ func TestUnitMountNamespaceCheckSeesOptions(t *testing.T) {
 	want := []string{"PrivateTmp=yes", "protecthome = read-only", "ProtectKernelModules=yes"}
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("%q", got)
+	}
+}
+
+// Every poll carries the version of the running binary, so that the server's
+// runner list shows what runs now and not what registered.
+func TestPollReportsTheRunningVersion(t *testing.T) {
+	h := newHarness(t, simpleScript("x"))
+	var mu sync.Mutex
+	var seen []string
+	h.srv.pollHook = func(_ int, req *ermite.FetchJobRequest) (*ermite.FetchJobResponse, error) {
+		mu.Lock()
+		seen = append(seen, req.GetVersion())
+		mu.Unlock()
+		return nil, nil
+	}
+	h.run(t)
+	eventually(t, "two polls", func() bool { mu.Lock(); defer mu.Unlock(); return len(seen) >= 2 })
+	mu.Lock()
+	defer mu.Unlock()
+	for _, v := range seen {
+		if v != "test" {
+			t.Fatalf("poll versions %v, want the runner's own", seen)
+		}
 	}
 }
