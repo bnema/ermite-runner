@@ -197,6 +197,9 @@ func (j *jobRun) callResolve(ctx context.Context, uses []string) ([]*execpb.Reso
 		ccancel()
 		if err == nil {
 			conv := j.resolveResponse(resp.Msg, len(uses))
+			if conv.Error == "" {
+				j.cacheArchives(ctx, resp.Msg.Actions, conv.Actions)
+			}
 			if conv.Error != "" {
 				return fail("%s", conv.Error)
 			}

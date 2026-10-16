@@ -17,6 +17,7 @@ import (
 
 	"bnema.dev/ermite-api/gen/ermite/ermiteconnect"
 
+	"bnema.dev/ermite-runner/internal/actionscache"
 	"bnema.dev/ermite-runner/internal/cachesvc"
 	"bnema.dev/ermite-runner/internal/externals"
 	"bnema.dev/ermite-runner/internal/host"
@@ -39,27 +40,52 @@ func loadHostConfig() (sandbox.Config, host.Config, error) {
 // setupCache starts the cache service of the runner (README, "Cache") and hands
 // it to the sandbox drivers through scfg. ERMITE_RUNNER_CACHE=0 turns it off;
 // ERMITE_RUNNER_CACHE_MAX is the size cap (default 10 GiB).
-func setupCache(ctx context.Context, scfg *sandbox.Config) (*cachesvc.Service, error) {
+func setupCache(ctx context.Context, scfg *sandbox.Config) (*cachesvc.Service, *actionscache.Cache, error) {
 	log := zerowrap.FromCtx(ctx)
 	switch strings.ToLower(strings.TrimSpace(os.Getenv(envCache))) {
 	case "", "1", "true", "yes":
 	case "0", "false", "no":
 		log.Info().Msg("the cache service is off (" + envCache + "=0)")
-		return nil, nil
+		return nil, nil, nil
 	default:
-		return nil, fmt.Errorf("%s: %q is not 0 or 1", envCache, os.Getenv(envCache))
+		return nil, nil, fmt.Errorf("%s: %q is not 0 or 1", envCache, os.Getenv(envCache))
 	}
 	max, err := cachesvc.ParseMax(os.Getenv(cachesvc.EnvMax))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	svc, err := cachesvc.New(cachesvc.Config{Dir: filepath.Join(scfg.StateDir, "cache"), Max: max, Log: log})
+	archives, err := setupArchives(ctx, scfg.StateDir)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
+	}
+	svc, err := cachesvc.New(cachesvc.Config{Dir: filepath.Join(scfg.StateDir, "cache"), Max: max, Log: log, Archives: archives})
+	if err != nil {
+		return nil, nil, err
 	}
 	scfg.Cache = svc
 	log.Info().Int64("max_bytes", max).Msg("cache service on (guest loopback only, no host port)")
-	return svc, nil
+	return svc, archives, nil
+}
+
+// setupArchives opens the cache of action archives (ERMITE_RUNNER_ACTIONS_CACHE_MAX,
+// default 2 GiB, 0 turns it off). It is served on the channel of the cache
+// service, so it is only used when that is on.
+func setupArchives(ctx context.Context, stateDir string) (*actionscache.Cache, error) {
+	log := zerowrap.FromCtx(ctx)
+	max, err := actionscache.ParseMax(os.Getenv(actionscache.EnvMax))
+	if err != nil {
+		return nil, err
+	}
+	if max == 0 {
+		log.Info().Msg("the action archive cache is off (" + actionscache.EnvMax + "=0)")
+		return nil, nil
+	}
+	c, err := actionscache.New(actionscache.Config{Dir: filepath.Join(stateDir, "actions-cache"), Max: max, Log: log})
+	if err != nil {
+		return nil, err
+	}
+	log.Info().Int64("max_bytes", max).Msg("action archive cache on")
+	return c, nil
 }
 
 // envCache=0 turns the cache service off.
@@ -176,7 +202,7 @@ func runCmd(ctx context.Context) int {
 		hcfg.GuestForgeOrigin = gf.Origin
 	}
 	setupExternals(ctx, &scfg)
-	cache, err := setupCache(ctx, &scfg)
+	cache, archives, err := setupCache(ctx, &scfg)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ermite-runner:", err)
 		return 2
@@ -201,6 +227,7 @@ func runCmd(ctx context.Context) int {
 		},
 		Features: hcfg.ServerFeaturesFunc(url),
 		Cache:    cache,
+		Archives: archives,
 	}
 	r.Cfg.URL = url
 	if err := r.Run(ctx); err != nil {

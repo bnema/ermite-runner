@@ -30,6 +30,8 @@ import (
 	"time"
 
 	"github.com/bnema/zerowrap"
+
+	"bnema.dev/ermite-runner/internal/actionscache"
 )
 
 // Defaults.
@@ -69,6 +71,9 @@ type Config struct {
 	// Now is the clock; nil means time.Now.
 	Now func() time.Time
 	Log zerowrap.Logger
+	// Archives, when not nil, is the host's cache of action archives, served on
+	// the channels (see ArchiveURL).
+	Archives *actionscache.Cache
 	// The limits below take the Default… values (or those of the store) when
 	// zero; tests set them.
 	ProgressTimeout              time.Duration
@@ -93,6 +98,7 @@ type Service struct {
 	wg       sync.WaitGroup
 	closed   bool
 
+	archives    *actionscache.Cache
 	hookChunk   func(id int64)
 	progress    time.Duration
 	perListener int
@@ -135,7 +141,7 @@ func New(cfg Config) (*Service, error) {
 		cfg.Conns = DefaultConns
 	}
 	s := &Service{store: st, sign: sg, now: cfg.Now, log: cfg.Log, channels: map[string]*listener{}, stop: make(chan struct{}),
-		hookChunk: cfg.hookChunk, progress: cfg.ProgressTimeout, perListener: cfg.ConnsPerListener, connsGlobal: make(chan struct{}, cfg.Conns)}
+		archives: cfg.Archives, hookChunk: cfg.hookChunk, progress: cfg.ProgressTimeout, perListener: cfg.ConnsPerListener, connsGlobal: make(chan struct{}, cfg.Conns)}
 	s.wg.Add(1)
 	go s.housekeeping()
 	return s, nil

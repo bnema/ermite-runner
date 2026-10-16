@@ -59,6 +59,7 @@ func (s *Service) handler(job string) http.Handler {
 	mux.HandleFunc("POST "+APIPath+"caches/{id}", s.auth(job, s.commit))
 	mux.HandleFunc("GET "+APIPath+"artifacts/{id}", s.download(job))
 	mux.HandleFunc("HEAD "+APIPath+"artifacts/{id}", s.download(job))
+	mux.HandleFunc("GET "+ArchivePath+"{key}", s.serveActionArchive(job))
 	// net/http resets the write deadline per request only when the server has a
 	// WriteTimeout, which would cut long uploads and downloads: set a fresh
 	// progress deadline for each request here, so that a deadline left by the

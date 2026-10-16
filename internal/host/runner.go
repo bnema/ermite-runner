@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net/http"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -19,6 +20,7 @@ import (
 	ermite "bnema.dev/ermite-api/gen/ermite"
 	"bnema.dev/ermite-api/gen/ermite/ermiteconnect"
 
+	"bnema.dev/ermite-runner/internal/actionscache"
 	"bnema.dev/ermite-runner/internal/cachesvc"
 	"bnema.dev/ermite-runner/internal/execstream/execpb"
 	"bnema.dev/ermite-runner/internal/sandbox"
@@ -42,6 +44,12 @@ type Runner struct {
 	// which the guest reaches on its loopback (cachesvc.DefaultPort), and each
 	// job gets a token scoped to its repository and refs.
 	Cache *cachesvc.Service
+	// Archives, when not nil (and Cache is), is the host's cache of action
+	// archives: the host downloads them and the sandbox reads them from the cache
+	// channel (see cacheArchives). ArchiveHTTP is its HTTP client (tests); nil
+	// means the default transport.
+	Archives    *actionscache.Cache
+	ArchiveHTTP *http.Client
 
 	// now returns the current time; tests replace it.
 	now func() time.Time
