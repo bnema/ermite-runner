@@ -5,6 +5,7 @@ package host
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"unicode/utf8"
@@ -213,13 +214,26 @@ func (j *jobRun) callResolve(ctx context.Context, uses []string) ([]*execpb.Reso
 			j.abandon(err)
 			return fail("the server ended the job")
 		case kindPermanent:
-			return fail("resolving actions failed: %s", connect.CodeOf(err))
+			return fail("resolving actions failed: %s", serverReason(err))
 		}
 		j.log.Warn().Err(err).Int("attempt", attempt).Msg("ResolveActions failed")
 		if attempt >= 3 || !sleep(ctx, b.next()) {
-			return fail("resolving actions failed: %s", connect.CodeOf(err))
+			return fail("resolving actions failed: %s", serverReason(err))
 		}
 	}
+}
+
+// serverReason is the code of a failed call, followed by the message of the
+// server when it gave one, so the job log names what could not be resolved.
+// Only a message the server sent goes in the job log, which the readers of the
+// repository see: a failure of the runner's own connection (DNS, TLS, an
+// address) stays in the runner's log.
+func serverReason(err error) string {
+	var ce *connect.Error
+	if errors.As(err, &ce) && connect.IsWireError(ce) && ce.Message() != "" {
+		return fmt.Sprintf("%s: %s", ce.Code(), ce.Message())
+	}
+	return connect.CodeOf(err).String()
 }
 
 // resolveResponse converts the answer of the server. The token of an archive is

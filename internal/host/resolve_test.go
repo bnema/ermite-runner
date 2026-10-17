@@ -5,7 +5,10 @@ package host
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +17,7 @@ import (
 	"github.com/bnema/zerowrap"
 
 	ermite "bnema.dev/ermite-api/gen/ermite"
+	"bnema.dev/ermite-api/gen/ermite/ermiteconnect"
 
 	"bnema.dev/ermite-runner/internal/execstream/execpb"
 )
@@ -301,5 +305,37 @@ func TestResolveResponseTokenOriginIPv6(t *testing.T) {
 		if a := conv(u); a.Token != "" || a.AuthOrigin != "" {
 			t.Errorf("%s: token kept: %+v", u, a)
 		}
+	}
+}
+
+type unavailableServer struct {
+	ermiteconnect.UnimplementedRunnerServiceHandler
+}
+
+func (unavailableServer) ResolveActions(context.Context, *connect.Request[ermite.ResolveActionsRequest]) (*connect.Response[ermite.ResolveActionsResponse], error) {
+	return nil, connect.NewError(connect.CodeUnavailable, errors.New("resolving `actions/checkout@v4`: github.com did not answer"))
+}
+
+// The job log gives the reason the server sent, not the runner's own
+// connection failures.
+func TestResolveActionsServerReason(t *testing.T) {
+	path, h := ermiteconnect.NewRunnerServiceHandler(unavailableServer{})
+	mux := http.NewServeMux()
+	mux.Handle(path, h)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	uses := &execpb.ResolveRequest{Uses: []string{"actions/checkout@v4"}}
+
+	r := resolveJob(ermiteconnect.NewRunnerServiceClient(srv.Client(), srv.URL)).resolveActions(context.Background(), uses)
+	if want := "resolving actions failed: unavailable: resolving `actions/checkout@v4`: github.com did not answer"; r.Error != want {
+		t.Errorf("the job log must name the action: %q", r.Error)
+	}
+
+	closed := httptest.NewServer(mux)
+	url := closed.URL
+	closed.Close()
+	r = resolveJob(ermiteconnect.NewRunnerServiceClient(http.DefaultClient, url)).resolveActions(context.Background(), uses)
+	if r.Error != "resolving actions failed: unavailable" {
+		t.Errorf("a connection failure of the runner stays out of the job log: %q", r.Error)
 	}
 }
