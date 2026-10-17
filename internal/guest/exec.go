@@ -95,6 +95,9 @@ func (c *ExecConfig) defaults() {
 // group with escalating signals (see ExecConfig).
 func Exec(ctx context.Context, cfg ExecConfig) (int, error) {
 	cfg.defaults()
+	// The steps inherit the executor's umask: GitHub's 022, whatever started
+	// the executor (Init sets it too; a container's entrypoint may not).
+	syscall.Umask(StepUmask)
 	raw, err := cfg.Target.Dial(ctx, cfg.ConnectTimeout)
 	if err != nil {
 		return 1, err

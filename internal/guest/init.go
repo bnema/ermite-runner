@@ -63,6 +63,10 @@ type InitConfig struct {
 // powering the VM off, or exiting with the executor's code in a container.
 func Init(ctx context.Context, cfg InitConfig) int {
 	log := zerowrap.FromCtx(ctx)
+	// The kernel starts a VM's init with umask 0, which dockerd, the executor
+	// and every step would inherit: files and t.TempDir() directories would be
+	// world-writable. GitHub's runners have 022, and so do the jobs here.
+	syscall.Umask(StepUmask)
 	if cfg.Getpid == nil {
 		cfg.Getpid = os.Getpid
 	}
@@ -101,6 +105,10 @@ func Init(ctx context.Context, cfg InitConfig) int {
 	}
 	return code
 }
+
+// StepUmask is the umask of everything the init starts, steps included: the
+// one of GitHub's hosted runners.
+const StepUmask = 0o022
 
 // defaultPath is the PATH of a sandbox whose init was started by the kernel
 // with an empty environment.

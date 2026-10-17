@@ -675,3 +675,18 @@ func TestStopDockerdKillsAndReapsATermIgnoringDaemon(t *testing.T) {
 		t.Fatal("dockerd was not reaped (zombie or alive)")
 	}
 }
+
+// A step runs with GitHub's umask 022 even when the executor was started with
+// 0, as the kernel starts a VM's init: its files and directories are not
+// world-writable.
+func TestExecStepsGetUmask022(t *testing.T) {
+	old := syscall.Umask(0)
+	defer syscall.Umask(old)
+	out, _, _, _, code, err := host(t, `umask`, 0, nil)
+	if err != nil || code != 0 {
+		t.Fatalf("code=%d err=%v", code, err)
+	}
+	if strings.TrimSpace(out) != "0022" {
+		t.Fatalf("umask = %q, want 0022", out)
+	}
+}
