@@ -136,7 +136,7 @@ func runPayload(ctx context.Context, cfg InitConfig, mode string, args map[strin
 		return 1
 	}
 
-	var dockerPid int
+	var dockerPid, containerdPid int
 	_, statErr := os.Stat("/usr/bin/dockerd")
 	if !cfg.SkipDocker && (statErr == nil || cfg.DockerdArgs != nil) {
 		_ = os.MkdirAll(sandbox.GuestScratch+"/docker", 0o711)
@@ -144,6 +144,14 @@ func runPayload(ctx context.Context, cfg InitConfig, mode string, args map[strin
 		if argv == nil {
 			argv = []string{"/usr/bin/dockerd", "--data-root", sandbox.GuestScratch + "/docker",
 				"--storage-driver", "overlay2", "--host", "unix:///var/run/docker.sock"}
+			// dockerd sets its umask to 0, and a containerd it starts itself
+			// inherits it, then every `docker exec` (the steps of a job
+			// container): their files would be world-writable. Start containerd
+			// here with our umask instead, as systemd does on GitHub's runners.
+			if pid, ok := startContainerd(ctx, log); ok {
+				containerdPid = pid
+				argv = append(argv, "--containerd", containerdSocket)
+			}
 		}
 		pid, err := spawn(argv, nil)
 		if err != nil {
@@ -183,6 +191,7 @@ func runPayload(ctx context.Context, cfg InitConfig, mode string, args map[strin
 		switch {
 		case errors.As(err, &abort):
 			stopDockerd(dockerPid)
+			stopDockerd(containerdPid)
 			return abort.code
 		case errors.As(err, &exited):
 			dockerPid = 0 // already reaped
@@ -194,6 +203,7 @@ func runPayload(ctx context.Context, cfg InitConfig, mode string, args map[strin
 	if err != nil {
 		log.Error().Err(err).Msg("init: start executor")
 		stopDockerd(dockerPid)
+		stopDockerd(containerdPid)
 		return 1
 	}
 	forward := func(sig os.Signal) {
@@ -217,10 +227,43 @@ func runPayload(ctx context.Context, cfg InitConfig, mode string, args map[strin
 	}()
 	code := reapUntil(execPid)
 	stopDockerd(dockerPid)
+	stopDockerd(containerdPid) // after dockerd, which needs it to stop its containers
 	return code
 }
 
-// stopDockerd stops dockerd (SIGTERM, then SIGKILL after 5 s) and reaps it (at
+// startContainerd starts /usr/bin/containerd (when the image has it) and waits,
+// bounded, for its socket. false: no containerd, or it did not come up; dockerd
+// then starts its own.
+func startContainerd(ctx context.Context, log zerowrap.Logger) (int, bool) {
+	if _, err := os.Stat(containerdBinary); err != nil {
+		return 0, false
+	}
+	// Its data next to dockerd's, on the scratch space: in a container the
+	// root is an overlay, which the overlayfs snapshotter cannot sit on.
+	root := sandbox.GuestScratch + "/containerd"
+	_ = os.MkdirAll(root, 0o711)
+	pid, err := spawn([]string{containerdBinary, "--address", containerdSocket, "--root", root}, nil)
+	if err != nil {
+		log.Warn().Err(err).Msg("init: start containerd (dockerd starts its own)")
+		return 0, false
+	}
+	deadline := time.Now().Add(containerdReadyTimeout)
+	for time.Now().Before(deadline) && ctx.Err() == nil {
+		if fi, err := os.Stat(containerdSocket); err == nil && fi.Mode()&os.ModeSocket != 0 {
+			return pid, true
+		}
+		if got, _ := wait4NoHang(pid); got == pid {
+			log.Warn().Msg("init: containerd exited at start (dockerd starts its own)")
+			return 0, false
+		}
+		time.Sleep(dockerPollInterval)
+	}
+	log.Warn().Msg("init: containerd socket not ready (dockerd starts its own)")
+	stopDockerd(pid)
+	return 0, false
+}
+
+// stopDockerd stops dockerd or containerd (SIGTERM, then SIGKILL after 5 s) and reaps it (at
 // most 5 s more after the SIGKILL); a zero pid is a no-op.
 func stopDockerd(pid int) {
 	if pid == 0 {
@@ -246,6 +289,11 @@ func stopDockerd(pid int) {
 }
 
 const (
+	// containerdBinary and containerdSocket are the containerd init starts for
+	// dockerd; containerdReadyTimeout bounds the wait for its socket.
+	containerdBinary       = "/usr/bin/containerd"
+	containerdSocket       = "/run/containerd/containerd.sock"
+	containerdReadyTimeout = 20 * time.Second
 	// dockerSocket is the Docker API socket of the nested dockerd.
 	dockerSocket = "/var/run/docker.sock"
 	// dockerReadyTimeout bounds the wait for the Docker API at boot.
