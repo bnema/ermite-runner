@@ -33,6 +33,7 @@ import (
 	"bnema.dev/ermite-runner/internal/sandbox"
 	"bnema.dev/ermite-runner/internal/sandbox/disk"
 	"bnema.dev/ermite-runner/internal/sandbox/netsetup"
+	"bnema.dev/ermite-runner/internal/tcprelay"
 )
 
 // Options are the testable knobs of the driver.
@@ -152,6 +153,9 @@ func New(ctx context.Context, cfg sandbox.Config, opt Options) (*Driver, error) 
 	if d.net == nil {
 		n := netsetup.New(opt.Run, cfg.DNSPort, "")
 		n.DNS.Override = cfg.GuestForge.DNSName()
+		if t := cfg.GuestForge.RelayTarget(); t != "" {
+			n.Relay = tcprelay.New(t)
+		}
 		d.net = n
 	}
 	if cfg.GuestForge != nil {

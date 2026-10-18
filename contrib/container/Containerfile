@@ -1,0 +1,50 @@
+# SPDX-License-Identifier: MIT
+#
+# ermite-runner as an unprivileged container (vm isolation, no jailer), for a
+# rootless Podman host. See docs/container.md.
+#
+# Build from the repository root, after scripts/build-kernel.sh and
+# scripts/build-image.sh have written tmp/image/{vmlinux,base.ext4}:
+#
+#   docker build -f contrib/container/Containerfile --build-arg VERSION=<tag> -t ermite-runner:<tag> .
+#
+# The guest kernel and the base image are part of the image: the runner then
+# needs nothing on the host but /dev/kvm, /dev/net/tun and NET_ADMIN.
+
+ARG GO_VERSION=1.27
+
+FROM docker.io/library/golang:${GO_VERSION} AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+ARG VERSION=dev
+RUN CGO_ENABLED=0 GOWORK=off go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /out/ermite-runner .
+
+FROM docker.io/library/alpine:3.22 AS firecracker
+ARG FIRECRACKER_VERSION=v1.17.0
+ARG FIRECRACKER_SHA256=06094a1108ae9e82aa4c23a775aa92758f53f1175d422270d9d6162cb9ade558
+RUN apk add --no-cache curl \
+ && curl -fsSL -o /tmp/fc.tgz "https://github.com/firecracker-microvm/firecracker/releases/download/${FIRECRACKER_VERSION}/firecracker-${FIRECRACKER_VERSION}-x86_64.tgz" \
+ && echo "${FIRECRACKER_SHA256}  /tmp/fc.tgz" | sha256sum -c - \
+ && tar -xzf /tmp/fc.tgz -C /tmp \
+ && install -m 0755 "/tmp/release-${FIRECRACKER_VERSION}-x86_64/firecracker-${FIRECRACKER_VERSION}-x86_64" /out-firecracker
+
+FROM docker.io/library/alpine:3.22
+# ip (TAP devices), nft (job network policy), mkfs.ext4 (scratch and exec
+# disks; e2fsprogs >= 1.47), ca-certificates (Node.js externals downloads).
+RUN apk add --no-cache iproute2 nftables e2fsprogs ca-certificates tini
+COPY --from=firecracker /out-firecracker /usr/local/bin/firecracker
+COPY --from=build /out/ermite-runner /usr/local/bin/ermite-runner
+COPY tmp/image/vmlinux tmp/image/base.ext4 /opt/ermite-runner/image/
+
+ENV ERMITE_RUNNER_ISOLATION=vm \
+    ERMITE_RUNNER_JAILER_MODE=off \
+    ERMITE_RUNNER_IMAGE=/opt/ermite-runner/image \
+    ERMITE_RUNNER_STATE_DIR=/var/lib/ermite-runner \
+    ERMITE_RUNNER_LOCK_FILE=/run/ermite-runner.lock \
+    ERMITE_RUNNER_LOG_FORMAT=json
+
+VOLUME /var/lib/ermite-runner
+ENTRYPOINT ["/sbin/tini", "--", "/usr/local/bin/ermite-runner"]
+CMD ["run"]

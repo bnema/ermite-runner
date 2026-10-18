@@ -17,6 +17,7 @@ import (
 	"bnema.dev/ermite-runner/internal/cmdrun"
 	"bnema.dev/ermite-runner/internal/dnsfwd"
 	"bnema.dev/ermite-runner/internal/netpolicy"
+	"bnema.dev/ermite-runner/internal/tcprelay"
 )
 
 // Plumbing is the host network surface a driver needs. Net implements it; tests
@@ -38,6 +39,10 @@ type Net struct {
 	DNS    *dnsfwd.Forwarder
 	// ForwardFile is the ip_forward sysctl; overridden in tests.
 	ForwardFile string
+	// Relay, when not nil, forwards the guest forge port of every gateway to
+	// the forge (ERMITE_RUNNER_GUEST_FORGE_TARGET): the forge then does not
+	// need to listen in the runner's network namespace.
+	Relay *tcprelay.Relay
 }
 
 // New builds a Net: nft runs through run, DNS listens on dnsPort and forwards
@@ -52,7 +57,9 @@ func New(run cmdrun.Runner, dnsPort int, resolvConf string) *Net {
 }
 
 // EnableForwarding turns on IPv4 forwarding (NAT needs it). It is a no-op when
-// already on, and an error that names the fix when it cannot be turned on.
+// already on, and an error that names the fix when it cannot be turned on. In
+// a container /proc/sys is read-only: the runtime must start the container's
+// network namespace with net.ipv4.ip_forward=1 (rootless Podman does).
 func (n *Net) EnableForwarding() error {
 	b, err := os.ReadFile(n.ForwardFile)
 	if err == nil && strings.TrimSpace(string(b)) == "1" {
@@ -74,11 +81,20 @@ func (n *Net) Attach(ctx context.Context, g netpolicy.Guest) error {
 	if err := n.DNS.Listen(ctx, g.Gateway); err != nil {
 		return errors.Join(err, n.Policy.Remove(context.WithoutCancel(ctx), g.Iface))
 	}
+	if n.Relay != nil && g.ForgePort != 0 {
+		if err := n.Relay.Listen(ctx, g.Gateway, g.ForgePort); err != nil {
+			n.DNS.Close(g.Gateway)
+			return errors.Join(err, n.Policy.Remove(context.WithoutCancel(ctx), g.Iface))
+		}
+	}
 	return nil
 }
 
 // Detach undoes Attach. It is idempotent and keeps going after an error.
 func (n *Net) Detach(ctx context.Context, iface string, gateway netip.Addr) error {
+	if n.Relay != nil {
+		n.Relay.Close(gateway)
+	}
 	n.DNS.Close(gateway)
 	return n.Policy.Remove(ctx, iface)
 }
@@ -89,5 +105,8 @@ func (n *Net) Reset(ctx context.Context) error { return n.Policy.Reset(ctx) }
 
 // Close stops every DNS listener.
 func (n *Net) Close() {
+	if n.Relay != nil {
+		n.Relay.CloseAll()
+	}
 	n.DNS.CloseAll()
 }

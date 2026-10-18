@@ -108,7 +108,8 @@ For every sandbox:
 
 Security notes:
 
-- The runner does not proxy. A service must listen on that port on an address the gateway reaches (`*`, not `127.0.0.1`).
+- Without `ERMITE_RUNNER_GUEST_FORGE_TARGET`, the runner does not proxy. A service must listen on that port on an address the gateway reaches (`*`, not `127.0.0.1`).
+- With `ERMITE_RUNNER_GUEST_FORGE_TARGET=host:port`, the runner listens on each sandbox gateway on that port and relays TCP to the target. Use it when the server is only reachable from the runner, for example on a container network. See [container](container.md#reaching-the-server).
 - A shared reverse proxy routes by `Host` header. A job can reach every app that proxy serves on that port.
 - Traffic comes from a private address. Anything behind the proxy that trusts private sources trusts job code too.
 - Jobs see the server over plain HTTP in this setup.

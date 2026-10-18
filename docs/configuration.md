@@ -12,7 +12,8 @@ Sizes accept `M`, `G` and `T`.
 | `ERMITE_RUNNER_NAME` | host name | Runner name: 1 to 64 letters, digits, `.`, `_` and `-` |
 | `ERMITE_RUNNER_LABELS` | | Extra labels, comma separated, same characters as the name |
 | `ERMITE_RUNNER_ENVIRONMENT` | `github-hosted` | `github-hosted` or `self-hosted`. Sets the `runner.environment` value that jobs see. `self-hosted` also makes "Set up job" print the runner and machine name |
-| `ERMITE_RUNNER_REGISTER_TOKEN` | | Token for `register` |
+| `ERMITE_RUNNER_REGISTER_TOKEN` | | Token for `register`, and for the first start of `run` when no registration exists |
+| `ERMITE_RUNNER_REGISTER_TOKEN_FILE` | | File holding the register token. Wins over `ERMITE_RUNNER_REGISTER_TOKEN` for the first start of `run`. See [container](container.md#first-start) |
 | `ERMITE_RUNNER_INSECURE_HTTP` | `0` | `1` allows a non-loopback `http://` URL. Every token then travels in clear. For tests and trusted networks |
 
 ### Server URL
@@ -42,7 +43,7 @@ The token has the scope `runner:register`. It can read the code and the secrets 
 | `ERMITE_RUNNER_ISOLATION` | `auto` | `auto`, `vm` or `container` |
 | `ERMITE_RUNNER_STATE_DIR` | `/var/lib/ermite-runner` | Absolute path. See the ownership rules in [sandboxes](sandboxes.md#state-directory) |
 | `ERMITE_RUNNER_CAPACITY` | `1` | Jobs in parallel. One sandbox, one uid, one `/30` network and one disk per slot. The runner polls the server only when a slot is free |
-| `ERMITE_RUNNER_IMAGE` | | `vm`: image directory with the kernel and `base.ext4` (default `<state dir>/image`). `container`: OCI reference (default `ermite-runner-ubuntu-24.04:latest`) |
+| `ERMITE_RUNNER_IMAGE` | | `vm`: image directory with the kernel and `base.ext4` (default `<state dir>/image`). `container`: OCI reference (default `ermite-runner-ubuntu-26.04:latest`) |
 | `ERMITE_RUNNER_DENY_PRIVILEGED` | `0` | `1` refuses `container` mode without sysbox |
 | `ERMITE_RUNNER_NETWORK` | `10.200.0.0/16` | Pool of `/30` subnets, one per slot |
 | `ERMITE_RUNNER_UID_BASE` | `900000` | First uid of the jailer pool. A VM runs as this value plus its slot |
@@ -79,6 +80,7 @@ The token has the scope `runner:register`. It can read the code and the secrets 
 | `ERMITE_RUNNER_ARTIFACTS` | `1` | `0` turns artifacts v4 off. Artifacts need the cache service |
 | `ERMITE_RUNNER_NODE` | `1` | `0` turns the Node.js externals off. See [externals](externals.md) |
 | `ERMITE_RUNNER_GUEST_FORGE` | `0` | `1` lets sandboxes reach the server host and port. Staging only. See [sandboxes](sandboxes.md#guest-forge-access) |
+| `ERMITE_RUNNER_GUEST_FORGE_TARGET` | | `host:port` the runner relays guest forge traffic to. Empty: no relay, a service must listen on the gateway port |
 
 ## Logging
 

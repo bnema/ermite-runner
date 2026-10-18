@@ -74,22 +74,22 @@ func TestResolveGuestForge(t *testing.T) {
 	ctx := context.Background()
 	var asked string
 	lookup := func(_ context.Context, h string) ([]string, error) { asked = h; return []string{"127.0.0.1"}, nil }
-	g, err := ResolveGuestForge(ctx, "http://ermite.bnema.dev:8088", true, lookup)
+	g, err := ResolveGuestForge(ctx, "http://ermite.bnema.dev:8088", "", true, lookup)
 	if err != nil || g.Port != 8088 || asked != "ermite.bnema.dev" {
 		t.Fatalf("%+v %v %q", g, err, asked)
 	}
-	_, err = ResolveGuestForge(ctx, "https://nx.example.org", false, func(context.Context, string) ([]string, error) {
+	_, err = ResolveGuestForge(ctx, "https://nx.example.org", "", false, func(context.Context, string) ([]string, error) {
 		return nil, errors.New("no such host")
 	})
 	if err == nil || !strings.Contains(err.Error(), "does not resolve") {
 		t.Fatalf("%v", err)
 	}
-	_, err = ResolveGuestForge(ctx, "https://empty.example.org", false, func(context.Context, string) ([]string, error) { return nil, nil })
+	_, err = ResolveGuestForge(ctx, "https://empty.example.org", "", false, func(context.Context, string) ([]string, error) { return nil, nil })
 	if err == nil || !strings.Contains(err.Error(), "no address") {
 		t.Fatalf("%v", err)
 	}
 	called := false
-	_, err = ResolveGuestForge(ctx, "https://10.0.0.1", false, func(context.Context, string) ([]string, error) { called = true; return nil, nil })
+	_, err = ResolveGuestForge(ctx, "https://10.0.0.1", "", false, func(context.Context, string) ([]string, error) { called = true; return nil, nil })
 	if err == nil || called {
 		t.Fatalf("an IP literal was looked up or accepted: %v", err)
 	}
@@ -103,6 +103,28 @@ func TestGuestForgeNilIsOff(t *testing.T) {
 	g, _ = ParseGuestForge("https://ermite.example.org:8443", false)
 	if g.Warning() != "guest forge access: sandboxes may reach https://ermite.example.org:8443 on the host" {
 		t.Fatal(g.Warning())
+	}
+}
+
+func TestResolveGuestForgeTarget(t *testing.T) {
+	ctx := context.Background()
+	var asked string
+	lookup := func(_ context.Context, h string) ([]string, error) { asked = h; return []string{"10.89.0.5"}, nil }
+	g, err := ResolveGuestForge(ctx, "http://ermite:7341", "ermite:7341", true, lookup)
+	if err != nil || g.Target != "ermite:7341" || g.RelayTarget() != "ermite:7341" || asked != "ermite" || g.Port != 7341 {
+		t.Fatalf("%+v %v %q", g, err, asked)
+	}
+	asked = ""
+	if g, err = ResolveGuestForge(ctx, "https://git.example.org", "10.89.0.5:7341", false, lookup); err != nil || asked != "" || g.Target != "10.89.0.5:7341" {
+		t.Fatalf("an IP target must not be looked up: %+v %v %q", g, err, asked)
+	}
+	for _, bad := range []string{"ermite", "ermite:0", "ermite:70000", ":7341", "bad_host:1", "*.x:1"} {
+		if _, err := ResolveGuestForge(ctx, "http://ermite:7341", bad, true, lookup); err == nil || !strings.Contains(err.Error(), EnvGuestForgeTarget) {
+			t.Errorf("%q: %v", bad, err)
+		}
+	}
+	if (*GuestForge)(nil).RelayTarget() != "" {
+		t.Fatal("nil RelayTarget")
 	}
 }
 

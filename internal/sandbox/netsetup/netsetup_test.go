@@ -13,6 +13,7 @@ import (
 
 	"bnema.dev/ermite-runner/internal/cmdrun"
 	"bnema.dev/ermite-runner/internal/netpolicy"
+	"bnema.dev/ermite-runner/internal/tcprelay"
 )
 
 func guest() netpolicy.Guest {
@@ -77,6 +78,61 @@ func TestAttachRollsBackPolicyWhenDNSFails(t *testing.T) {
 		t.Fatal("second Attach on the same gateway must fail")
 	}
 	if len(f.Calls) != before+2 {
+		t.Fatalf("expected add then rollback remove, got %v", f.Lines())
+	}
+}
+
+// With a relay, Attach relays the guest forge port of the gateway, Detach stops
+// it, and a guest without a forge port gets no relay listener.
+func TestAttachStartsAndStopsTheForgeRelay(t *testing.T) {
+	f := &cmdrun.Fake{}
+	n := New(f, 0, "")
+	n.Relay = tcprelay.New("127.0.0.1:1")
+	t.Cleanup(n.Close)
+	ctx := context.Background()
+	g := guest()
+	if err := n.Attach(ctx, g); err != nil {
+		t.Skip("cannot bind loopback:", err)
+	}
+	if _, ok := n.Relay.Addr(g.Gateway); ok {
+		t.Fatal("a relay was started for a guest without a forge port")
+	}
+	if err := n.Detach(ctx, g.Iface, g.Gateway); err != nil {
+		t.Fatal(err)
+	}
+	// Port 0 lets the kernel pick a free port for the relay.
+	g.ForgePort = 0
+	n.Relay = tcprelay.New("127.0.0.1:1")
+	if err := n.Relay.Listen(ctx, g.Gateway, 0); err != nil {
+		t.Skip(err)
+	}
+	if _, ok := n.Relay.Addr(g.Gateway); !ok {
+		t.Fatal("relay not listening")
+	}
+	if err := n.Detach(ctx, g.Iface, g.Gateway); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := n.Relay.Addr(g.Gateway); ok {
+		t.Fatal("relay still listening after Detach")
+	}
+}
+
+// A relay that cannot bind rolls back the DNS listener and the policy.
+func TestAttachRollsBackWhenTheRelayFails(t *testing.T) {
+	f := &cmdrun.Fake{}
+	n := New(f, 0, "")
+	n.Relay = tcprelay.New("127.0.0.1:1")
+	t.Cleanup(n.Close)
+	ctx := context.Background()
+	g := guest()
+	g.ForgePort = 1 // privileged port: binding fails without CAP_NET_BIND_SERVICE
+	if err := n.Attach(ctx, g); err == nil {
+		t.Skip("port 1 could be bound here")
+	}
+	if _, ok := n.DNS.Addr(g.Gateway); ok {
+		t.Fatal("DNS still listening after a failed Attach")
+	}
+	if len(f.Calls) != 2 {
 		t.Fatalf("expected add then rollback remove, got %v", f.Lines())
 	}
 }

@@ -1014,10 +1014,10 @@ func TestSocketPathTooLongIsExplained(t *testing.T) {
 // GO-002: only a podman daemon gets a DNS listener that may precede the gateway
 // address; Docker keeps a normal bind.
 func TestOnlyPodmanGetsAFreeBindDNSListener(t *testing.T) {
-	if newNet(nil, 0, false, "").DNS.FreeBind {
+	if newNet(nil, 0, false, "", "").DNS.FreeBind {
 		t.Fatal("Docker must keep a normal bind")
 	}
-	if !newNet(nil, 0, true, "").DNS.FreeBind {
+	if !newNet(nil, 0, true, "", "").DNS.FreeBind {
 		t.Fatal("podman needs the listener before the bridge address")
 	}
 }
@@ -1080,7 +1080,7 @@ func TestNoGuestForgeByDefault(t *testing.T) {
 	if strings.Contains(buf.String(), "guest forge") {
 		t.Fatal("a guest forge warning without the setting")
 	}
-	if n := newNet(nil, 0, false, "ermite.example.org").DNS.Override; n != "ermite.example.org" {
+	if n := newNet(nil, 0, false, "ermite.example.org", "").DNS.Override; n != "ermite.example.org" {
 		t.Fatalf("override %q", n)
 	}
 }

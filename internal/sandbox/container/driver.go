@@ -38,6 +38,7 @@ import (
 	"bnema.dev/ermite-runner/internal/sandbox"
 	"bnema.dev/ermite-runner/internal/sandbox/disk"
 	"bnema.dev/ermite-runner/internal/sandbox/netsetup"
+	"bnema.dev/ermite-runner/internal/tcprelay"
 )
 
 // SysboxRuntime is the name of the sysbox runtime in `docker info`.
@@ -163,7 +164,7 @@ func New(ctx context.Context, cfg sandbox.Config, opt Options) (*Driver, error) 
 	}
 	d.net = opt.Net
 	if d.net == nil {
-		n := newNet(opt.Run, cfg.DNSPort, info.Podman, cfg.GuestForge.DNSName())
+		n := newNet(opt.Run, cfg.DNSPort, info.Podman, cfg.GuestForge.DNSName(), cfg.GuestForge.RelayTarget())
 		d.net = n
 	}
 	if err := d.net.EnableForwarding(); err != nil {
@@ -178,10 +179,13 @@ func New(ctx context.Context, cfg sandbox.Config, opt Options) (*Driver, error) 
 // newNet builds the host network plumbing. Only podman creates the bridge
 // address late (see daemonInfo.Podman), so only there the DNS listener may come
 // before the address; on Docker a missing gateway address stays a startup error.
-func newNet(run cmdrun.Runner, dnsPort int, podman bool, forgeHost string) *netsetup.Net {
+func newNet(run cmdrun.Runner, dnsPort int, podman bool, forgeHost, relay string) *netsetup.Net {
 	n := netsetup.New(run, dnsPort, "")
 	n.DNS.FreeBind = podman
 	n.DNS.Override = forgeHost
+	if relay != "" {
+		n.Relay = tcprelay.New(relay)
+	}
 	return n
 }
 

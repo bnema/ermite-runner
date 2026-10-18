@@ -193,6 +193,50 @@ func registerCmd(ctx context.Context, args []string) int {
 	return 0
 }
 
+// registerOnFirstRun registers the runner when `run` finds no registration and
+// a register token is given in ERMITE_RUNNER_REGISTER_TOKEN or in the file
+// named by ERMITE_RUNNER_REGISTER_TOKEN_FILE. Without a token it returns
+// host.ErrNotRegistered, as before.
+func registerOnFirstRun(ctx context.Context, scfg sandbox.Config, hcfg host.Config) (host.State, error) {
+	tok, err := firstRunToken(os.Getenv)
+	if err != nil || tok == "" {
+		return host.State{}, errors.Join(host.ErrNotRegistered, err)
+	}
+	if hcfg.URL == "" {
+		return host.State{}, fmt.Errorf("%s is not set", host.EnvURL)
+	}
+	drv, err := buildDriver(ctx, scfg)
+	if err != nil {
+		return host.State{}, err
+	}
+	iso := drv.Isolation()
+	_ = drv.Close()
+	st, err := host.Register(ctx, hcfg, hcfg.Client(hcfg.URL, tok), iso, false)
+	if err != nil {
+		return host.State{}, fmt.Errorf("first-run registration: %w", err)
+	}
+	log := zerowrap.FromCtx(ctx)
+	log.Info().Str("runner", st.Name).Str("isolation", string(iso)).Msg("registered on first run; the register token is no longer needed")
+	return st, nil
+}
+
+// envRegisterTokenFile names a file holding the register token (a container
+// secret delivered as a file).
+const envRegisterTokenFile = "ERMITE_RUNNER_REGISTER_TOKEN_FILE"
+
+// firstRunToken reads the register token of a first run: the file of
+// envRegisterTokenFile when set, else host.EnvRegisterToken. "" means none.
+func firstRunToken(getenv func(string) string) (string, error) {
+	if p := strings.TrimSpace(getenv(envRegisterTokenFile)); p != "" {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return "", fmt.Errorf("%s: %w", envRegisterTokenFile, err)
+		}
+		return strings.TrimSpace(string(b)), nil
+	}
+	return strings.TrimSpace(getenv(host.EnvRegisterToken)), nil
+}
+
 // runCmd is `ermite-runner run`: poll ermite for jobs and run each one in its
 // own sandbox until SIGINT or SIGTERM, then cancel the running jobs with
 // runner_shutdown and report them.
@@ -204,6 +248,11 @@ func runCmd(ctx context.Context) int {
 		return 2
 	}
 	st, err := host.LoadState(hcfg.StateDir)
+	if errors.Is(err, host.ErrNotRegistered) {
+		// A container service has no separate install step: it registers on its
+		// first start when it is given a register token.
+		st, err = registerOnFirstRun(ctx, scfg, hcfg)
+	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ermite-runner:", err)
 		return 2
@@ -219,7 +268,7 @@ func runCmd(ctx context.Context) int {
 	if scfg.GuestForgeEnabled {
 		// The sandboxes reach the forge the way the runner does: by the host name
 		// and port of the URL the runner itself uses.
-		gf, err := sandbox.ResolveGuestForge(ctx, url, hcfg.InsecureHTTP, net.DefaultResolver.LookupHost)
+		gf, err := sandbox.ResolveGuestForge(ctx, url, os.Getenv(sandbox.EnvGuestForgeTarget), hcfg.InsecureHTTP, net.DefaultResolver.LookupHost)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "ermite-runner:", err)
 			return 2

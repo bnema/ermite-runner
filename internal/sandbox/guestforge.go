@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/netip"
 	"net/url"
 	"strconv"
@@ -19,6 +20,13 @@ import (
 // internet side of the NAT (see the README). Off by default.
 const EnvGuestForge = "ERMITE_RUNNER_GUEST_FORGE"
 
+// EnvGuestForgeTarget is ERMITE_RUNNER_GUEST_FORGE_TARGET=host:port: with the
+// guest forge access on, the runner relays the forge port of each sandbox's
+// gateway to that address instead of letting the host's own listener answer.
+// For a runner in a container, where the forge is another container reached
+// by name (ermite:7341) and nothing listens on the forge port locally.
+const EnvGuestForgeTarget = "ERMITE_RUNNER_GUEST_FORGE_TARGET"
+
 // GuestForge is the one forge endpoint that sandboxes may reach on the host.
 // It is derived from the server URL by ParseGuestForge.
 type GuestForge struct {
@@ -30,6 +38,39 @@ type GuestForge struct {
 	// Origin is scheme://host[:port] of the URL: the jobs' server URLs are
 	// rewritten to it.
 	Origin string
+	// Target, when not empty, is the host:port the runner relays the sandboxes'
+	// forge connections to (EnvGuestForgeTarget).
+	Target string
+}
+
+// RelayTarget is Target, "" when the access is off or not relayed. Safe on nil.
+func (g *GuestForge) RelayTarget() string {
+	if g == nil {
+		return ""
+	}
+	return g.Target
+}
+
+// ParseGuestForgeTarget checks a relay target: host:port with a host name or
+// an IP address and a port in 1-65535. "" is accepted (no relay).
+func ParseGuestForgeTarget(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", nil
+	}
+	h, p, err := net.SplitHostPort(raw)
+	if err != nil || h == "" {
+		return "", fmt.Errorf("%s: %q is not host:port", EnvGuestForgeTarget, raw)
+	}
+	if n, err := strconv.Atoi(p); err != nil || n < 1 || n > 65535 {
+		return "", fmt.Errorf("%s: port %q is not in 1-65535", EnvGuestForgeTarget, p)
+	}
+	if _, err := netip.ParseAddr(h); err != nil {
+		if err := CheckForgeHostname(strings.ToLower(h)); err != nil {
+			return "", fmt.Errorf("%s: %w", EnvGuestForgeTarget, err)
+		}
+	}
+	return raw, nil
 }
 
 // Warning is the line logged at start and for each job.
@@ -138,19 +179,33 @@ func CheckForgeHostname(h string) error {
 // resolves on the host (lookup is net.DefaultResolver.LookupHost in
 // production): the runner reaches the forge by that name, so a name that
 // resolves to nothing is a configuration error to report at start.
-func ResolveGuestForge(ctx context.Context, raw string, insecureHTTP bool, lookup func(ctx context.Context, host string) ([]string, error)) (*GuestForge, error) {
+//
+// target is the relay target (EnvGuestForgeTarget, "" for none). With a
+// target, the sandboxes still see the forge under the host name of raw, and it
+// is the target's host that must resolve: the runner connects there.
+func ResolveGuestForge(ctx context.Context, raw, target string, insecureHTTP bool, lookup func(ctx context.Context, host string) ([]string, error)) (*GuestForge, error) {
 	g, err := ParseGuestForge(raw, insecureHTTP)
 	if err != nil {
 		return nil, err
 	}
+	if g.Target, err = ParseGuestForgeTarget(target); err != nil {
+		return nil, err
+	}
+	host := g.Host
+	if g.Target != "" {
+		host, _, _ = net.SplitHostPort(g.Target)
+		if _, err := netip.ParseAddr(host); err == nil {
+			return g, nil
+		}
+	}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	addrs, err := lookup(ctx, g.Host)
+	addrs, err := lookup(ctx, host)
 	if err != nil {
-		return nil, fmt.Errorf("%s: %s does not resolve on this host: %w", EnvGuestForge, g.Host, err)
+		return nil, fmt.Errorf("%s: %s does not resolve on this host: %w", EnvGuestForge, host, err)
 	}
 	if len(addrs) == 0 {
-		return nil, fmt.Errorf("%s: %s resolves to no address on this host", EnvGuestForge, g.Host)
+		return nil, fmt.Errorf("%s: %s resolves to no address on this host", EnvGuestForge, host)
 	}
 	return g, nil
 }
