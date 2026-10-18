@@ -1020,6 +1020,12 @@ func TestOnlyPodmanGetsAFreeBindDNSListener(t *testing.T) {
 	if !newNet(nil, 0, true, "", "").DNS.FreeBind {
 		t.Fatal("podman needs the listener before the bridge address")
 	}
+	if newNet(nil, 0, false, "forge", "forge:80").Relay.FreeBind {
+		t.Fatal("Docker must keep a normal bind for the relay")
+	}
+	if !newNet(nil, 0, true, "forge", "forge:80").Relay.FreeBind {
+		t.Fatal("podman needs the relay listener before the bridge address")
+	}
 }
 
 // Guest forge access: the exception reaches the policy of every guest, and the

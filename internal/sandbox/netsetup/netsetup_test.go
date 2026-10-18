@@ -5,6 +5,7 @@ package netsetup
 import (
 	"context"
 	"errors"
+	"net"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -15,6 +16,17 @@ import (
 	"bnema.dev/ermite-runner/internal/netpolicy"
 	"bnema.dev/ermite-runner/internal/tcprelay"
 )
+
+// freePort returns a TCP port of 127.0.0.1 that was free when probed.
+func freePort(t *testing.T) uint16 {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Skip("cannot bind loopback:", err)
+	}
+	defer func() { _ = ln.Close() }()
+	return uint16(ln.Addr().(*net.TCPAddr).Port)
+}
 
 func guest() netpolicy.Guest {
 	return netpolicy.Guest{Iface: "ertap0", Gateway: netip.MustParseAddr("127.0.0.1"), Addr: netip.MustParseAddr("10.200.0.2")}
@@ -100,14 +112,13 @@ func TestAttachStartsAndStopsTheForgeRelay(t *testing.T) {
 	if err := n.Detach(ctx, g.Iface, g.Gateway); err != nil {
 		t.Fatal(err)
 	}
-	// Port 0 lets the kernel pick a free port for the relay.
-	g.ForgePort = 0
-	n.Relay = tcprelay.New("127.0.0.1:1")
-	if err := n.Relay.Listen(ctx, g.Gateway, 0); err != nil {
-		t.Skip(err)
+	// A port that was free a moment ago: Attach itself starts the relay.
+	g.ForgePort = freePort(t)
+	if err := n.Attach(ctx, g); err != nil {
+		t.Fatalf("Attach with a forge port: %v", err)
 	}
-	if _, ok := n.Relay.Addr(g.Gateway); !ok {
-		t.Fatal("relay not listening")
+	if a, ok := n.Relay.Addr(g.Gateway); !ok || a.(*net.TCPAddr).Port != int(g.ForgePort) {
+		t.Fatalf("relay not listening on the forge port: %v %v", a, ok)
 	}
 	if err := n.Detach(ctx, g.Iface, g.Gateway); err != nil {
 		t.Fatal(err)

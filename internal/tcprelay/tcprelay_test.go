@@ -103,6 +103,65 @@ func TestRelayCloseStopsListenerAndConnections(t *testing.T) {
 	r.Close(lo) // idempotent
 }
 
+// By default Listen fails on an address the host does not own; FreeBind
+// (podman: the bridge address comes when the first container starts) binds it.
+func TestRelayFreeBind(t *testing.T) {
+	ip := netip.MustParseAddr("203.0.113.77") // TEST-NET-3: never configured here
+	r := New("127.0.0.1:1")
+	t.Cleanup(r.CloseAll)
+	if err := r.Listen(context.Background(), ip, 0); err == nil {
+		t.Fatal("listening on an address the host does not own must fail without FreeBind")
+	}
+	r.FreeBind = true
+	if err := r.Listen(context.Background(), ip, 0); err != nil {
+		t.Fatalf("FreeBind: %v", err)
+	}
+	if _, ok := r.Addr(ip); !ok {
+		t.Fatal("no listener")
+	}
+}
+
+// At most MaxConns connections are relayed at once; the next one is closed,
+// and a slot freed by a closed connection is reused.
+func TestRelayConnectionLimit(t *testing.T) {
+	r := New(echo(t))
+	if err := r.Listen(context.Background(), lo, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(r.CloseAll)
+	roundTrip := func(c net.Conn) error {
+		_ = c.SetDeadline(time.Now().Add(5 * time.Second))
+		if _, err := c.Write([]byte("x\n")); err != nil {
+			return err
+		}
+		_, err := bufio.NewReader(c).ReadString('\n')
+		return err
+	}
+	conns := make([]net.Conn, MaxConns)
+	for i := range conns {
+		conns[i] = dialRelay(t, r)
+		if err := roundTrip(conns[i]); err != nil {
+			t.Fatalf("connection %d: %v", i, err)
+		}
+	}
+	extra := dialRelay(t, r)
+	if err := roundTrip(extra); err == nil {
+		t.Fatal("a connection over MaxConns was relayed")
+	}
+	_ = conns[0].Close()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		c := dialRelay(t, r)
+		if roundTrip(c) == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the freed slot was not reused")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 func TestRelayUnreachableTargetClosesTheGuestSide(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

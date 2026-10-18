@@ -177,14 +177,15 @@ func New(ctx context.Context, cfg sandbox.Config, opt Options) (*Driver, error) 
 }
 
 // newNet builds the host network plumbing. Only podman creates the bridge
-// address late (see daemonInfo.Podman), so only there the DNS listener may come
-// before the address; on Docker a missing gateway address stays a startup error.
+// address late (see daemonInfo.Podman), so only there the DNS and relay
+// listeners may come before the address; on Docker a missing gateway address stays a startup error.
 func newNet(run cmdrun.Runner, dnsPort int, podman bool, forgeHost, relay string) *netsetup.Net {
 	n := netsetup.New(run, dnsPort, "")
 	n.DNS.FreeBind = podman
 	n.DNS.Override = forgeHost
 	if relay != "" {
 		n.Relay = tcprelay.New(relay)
+		n.Relay.FreeBind = podman
 	}
 	return n
 }

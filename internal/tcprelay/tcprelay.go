@@ -16,9 +16,11 @@ import (
 	"net/netip"
 	"strconv"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/bnema/zerowrap"
+	"golang.org/x/sys/unix"
 )
 
 // MaxConns bounds the connections relayed at once for one listener: a guest
@@ -28,12 +30,20 @@ const MaxConns = 64
 // dialTimeout bounds the connection to the target.
 const dialTimeout = 10 * time.Second
 
+// saturationLogEvery bounds the warnings about refused connections: a guest
+// that floods its gateway must not flood the runner's log.
+const saturationLogEvery = 10 * time.Second
+
 // Relay forwards every connection accepted on its listeners to Target.
 type Relay struct {
 	// Target is host:port, resolved again for every connection.
 	Target string
 	// Dial connects to Target; nil means a net.Dialer.
 	Dial func(ctx context.Context, network, addr string) (net.Conn, error)
+	// FreeBind binds with IP_FREEBIND, so that the gateway address may be
+	// configured after Listen (podman's netavark creates the bridge address
+	// when the first container starts).
+	FreeBind bool
 
 	mu        sync.Mutex
 	listeners map[netip.Addr]*listener
@@ -63,6 +73,15 @@ func (r *Relay) Listen(ctx context.Context, addr netip.Addr, port uint16) error 
 		return fmt.Errorf("tcprelay: already listening on %s", addr)
 	}
 	var lc net.ListenConfig
+	if r.FreeBind {
+		lc.Control = func(_, _ string, c syscall.RawConn) error {
+			var serr error
+			if err := c.Control(func(fd uintptr) { serr = unix.SetsockoptInt(int(fd), unix.IPPROTO_IP, unix.IP_FREEBIND, 1) }); err != nil {
+				return err
+			}
+			return serr
+		}
+	}
 	ln, err := lc.Listen(ctx, "tcp", net.JoinHostPort(addr.String(), strconv.Itoa(int(port))))
 	if err != nil {
 		return fmt.Errorf("tcprelay: listen %s:%d: %w", addr, port, err)
@@ -120,6 +139,10 @@ func (l *listener) stop() {
 
 func (r *Relay) serve(ctx context.Context, l *listener) {
 	log := zerowrap.FromCtx(ctx)
+	var (
+		refused  int
+		lastWarn time.Time
+	)
 	for {
 		c, err := l.ln.Accept()
 		if err != nil {
@@ -132,8 +155,12 @@ func (r *Relay) serve(ctx context.Context, l *listener) {
 		select {
 		case l.slots <- struct{}{}:
 		default:
-			log.Warn().Str("target", r.Target).Msg("tcprelay: too many relayed connections, refusing one")
 			_ = c.Close()
+			refused++
+			if now := time.Now(); now.Sub(lastWarn) >= saturationLogEvery {
+				log.Warn().Str("target", r.Target).Int("refused", refused).Int("max", MaxConns).Msg("tcprelay: too many relayed connections, refusing")
+				lastWarn, refused = now, 0
+			}
 			continue
 		}
 		l.done.Add(1)
