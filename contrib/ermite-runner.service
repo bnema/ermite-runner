@@ -13,7 +13,7 @@
 # in the README.
 [Unit]
 Description=ermite CI runner
-Documentation=https://git.bnema.dev/bnema/ermite-runner
+Documentation=https://github.com/bnema/ermite-runner
 Wants=network-online.target
 After=network-online.target docker.service
 

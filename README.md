@@ -1,6 +1,8 @@
 # ermite-runner
 
-The CI runner of [ermite](https://git.bnema.dev/bnema/ermite). It runs workflows compatible with GitHub Actions (`.github/workflows/*.yml`), one job per sandbox:
+> Read-only mirror. Development happens at git.bnema.dev; issues and pull requests are closed here.
+
+The CI runner of [ermite](https://github.com/bnema/ermite). It runs workflows compatible with GitHub Actions (`.github/workflows/*.yml`), one job per sandbox:
 
 - **`vm`**: a Firecracker micro-VM per job, destroyed at the end. Needs `/dev/kvm`.
 - **`container`**: a container per job with its own Docker daemon, for hosts without KVM. Uses the sysbox runtime when available, else a privileged container.
@@ -64,7 +66,7 @@ One nftables table, `inet ermite_runner`, replaced atomically (`nft -f -`) and d
 
 ### Guest forge access (opt-in, staging only)
 
-Off by default. `ERMITE_RUNNER_GUEST_FORGE=1` lets sandboxes reach the forge **the way the runner does**, for a staging host where ermite is only reachable through an overlay (NetBird) and the runner itself uses a local route, e.g. `/etc/hosts` `ermite.bnema.dev -> 127.0.0.1` and a reverse proxy (Gordon) on `*:8088` with `ERMITE_RUNNER_URL=http://ermite.bnema.dev:8088`. Jobs otherwise cannot `git clone ${{ github.server_url }}/...`: the public URL (`https://ermite.bnema.dev`) is TLS-terminated off-host, and the private ranges are denied.
+Off by default. `ERMITE_RUNNER_GUEST_FORGE=1` lets sandboxes reach the forge **the way the runner does**, for a staging host where ermite is only reachable through an overlay network and the runner itself uses a local route, e.g. `/etc/hosts` `forge.example -> 127.0.0.1` and a reverse proxy on `*:8088` with `ERMITE_RUNNER_URL=http://forge.example:8088`. Jobs otherwise cannot `git clone ${{ github.server_url }}/...`: the public URL (`https://forge.example`) is TLS-terminated off-host, and the private ranges are denied.
 
 The host name and port come from `ERMITE_RUNNER_URL` (port defaulted from the scheme: 443 or 80). The runner **refuses to start** when the URL host is an IP literal (sandboxes are pointed at the host by DNS), when the URL has a path, when the name does not resolve on the host, or when the URL is plain `http://` without `ERMITE_RUNNER_INSECURE_HTTP=1` (same rule as for the runner itself: tokens then travel in clear). Then, for every sandbox in both modes:
 
@@ -73,7 +75,7 @@ The host name and port come from `ERMITE_RUNNER_URL` (port defaulted from the sc
 - the `github.server_url`, `github.api_url` and `github.graphql_url` of the job's contexts, and so `GITHUB_SERVER_URL`, `GITHUB_API_URL` and `GITHUB_GRAPHQL_URL`, are rewritten to the origin of `ERMITE_RUNNER_URL` when their origin is the server's public one (`github.server_url`); paths are kept (`/-/github/api`). Other values, and the URLs inside `github.event`, stay as the server recorded them;
 - `guest forge access: sandboxes may reach <origin> on the host` is logged at start and at the start of every job, like the privileged-container warning.
 
-**The runner does not proxy.** The traffic reaches the host's own listener on that port, so a service must listen on it on an address the gateway reaches (`*`, as Gordon does; a listener bound to `127.0.0.1` receives nothing). A shared reverse proxy on that port routes by `Host` header, so **a job can reach every app that proxy serves on that port**, not only the forge, by sending another `Host` header: use this on staging hosts only, with a proxy whose other apps you accept to expose to job code. That traffic comes from a private address (`10.200.x.x`), so anything behind the proxy that trusts private sources (admin pages, metrics, rate-limit exemptions) trusts job code too. Jobs also see the forge over plain HTTP in that setup.
+**The runner does not proxy.** The traffic reaches the host's own listener on that port, so a service must listen on it on an address the gateway reaches (`*`; a listener bound to `127.0.0.1` receives nothing). A shared reverse proxy on that port routes by `Host` header, so **a job can reach every app that proxy serves on that port**, not only the forge, by sending another `Host` header: use this on staging hosts only, with a proxy whose other apps you accept to expose to job code. That traffic comes from a private address (`10.200.x.x`), so anything behind the proxy that trusts private sources (admin pages, metrics, rate-limit exemptions) trusts job code too. Jobs also see the forge over plain HTTP in that setup.
 
 ### Cache (GitHub Actions cache, API v1)
 
@@ -182,7 +184,7 @@ sudo install -m 0644 contrib/ermite-runner.service /etc/systemd/system/
 sudo install -d -m 0700 /etc/ermite-runner
 sudo install -m 0600 /dev/stdin /etc/ermite-runner/env <<'ENV'
 ERMITE_RUNNER_URL=https://ermite.example.org
-ERMITE_RUNNER_NAME=igor
+ERMITE_RUNNER_NAME=runner-1
 ERMITE_RUNNER_LABELS=ubuntu-latest,ubuntu-24.04
 ERMITE_RUNNER_ISOLATION=auto
 ERMITE_RUNNER_CAPACITY=2

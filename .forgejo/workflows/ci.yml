@@ -16,8 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      # Job containers reach Forgejo through the Gordon edge on the host loopback,
-      # in plain HTTP on :8088 (see vps-infra homelab/igor/ci-runner).
+      # Job containers reach the forge over plain HTTP on the host loopback.
       - name: Fetch bnema.dev/ermite* modules through the runner's Forgejo route
         run: git config --global url."http://git.bnema.dev:8088/".insteadOf "https://git.bnema.dev/"
       - uses: actions/setup-go@v5
@@ -33,8 +32,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      # Job containers reach Forgejo through the Gordon edge on the host loopback,
-      # in plain HTTP on :8088 (see vps-infra homelab/igor/ci-runner).
+      # Job containers reach the forge over plain HTTP on the host loopback.
       - name: Fetch bnema.dev/ermite* modules through the runner's Forgejo route
         run: git config --global url."http://git.bnema.dev:8088/".insteadOf "https://git.bnema.dev/"
       - uses: actions/setup-go@v5
