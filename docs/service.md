@@ -4,7 +4,8 @@
 
 ## Privileges
 
-- The runner runs as root on the host. It needs TAP devices, nftables, loop mounts, the jailer and Docker.
+- As a host service, the runner runs as root. It needs TAP devices, nftables, loop mounts, the jailer and Docker.
+- To run without root on the host, use the [unprivileged container](container.md) instead.
 - Jobs never run as root on the host. They run as user `runner` in a microVM or a container.
 
 ## Registration

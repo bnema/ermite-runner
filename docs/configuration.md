@@ -50,7 +50,7 @@ The token has the scope `runner:register`. It can read the code and the secrets 
 | `ERMITE_RUNNER_FIRECRACKER` | from `PATH` | Firecracker binary |
 | `ERMITE_RUNNER_JAILER` | from `PATH` | Jailer binary |
 | `ERMITE_RUNNER_KERNEL` | `<image dir>/vmlinux` (`Image` on arm64) | Guest kernel |
-| `ERMITE_RUNNER_JAILER_MODE` | `on` | `off` only for development and tests. It removes the chroot, uid and namespace confinement of the VMM |
+| `ERMITE_RUNNER_JAILER_MODE` | `on` | `off` removes the chroot, uid and namespace confinement of the VMM. Use it only when an outer boundary replaces it, as in the [unprivileged container](container.md), or for development and tests |
 | `ERMITE_RUNNER_LOCK_FILE` | `/run/ermite-runner.lock` | Single-instance lock. Change it for tests only |
 
 `DOCKER_HOST` is honoured in `container` mode.
@@ -79,7 +79,7 @@ The token has the scope `runner:register`. It can read the code and the secrets 
 | `ERMITE_RUNNER_ACTIONS_CACHE_MAX` | `2G` | Size cap of the action archive cache. `0` turns it off |
 | `ERMITE_RUNNER_ARTIFACTS` | `1` | `0` turns artifacts v4 off. Artifacts need the cache service |
 | `ERMITE_RUNNER_NODE` | `1` | `0` turns the Node.js externals off. See [externals](externals.md) |
-| `ERMITE_RUNNER_GUEST_FORGE` | `0` | `1` lets sandboxes reach the server host and port. Staging only. See [sandboxes](sandboxes.md#guest-forge-access) |
+| `ERMITE_RUNNER_GUEST_FORGE` | `0` | `1` lets sandboxes reach the server host and port. Read the security notes first. See [sandboxes](sandboxes.md#guest-forge-access) |
 | `ERMITE_RUNNER_GUEST_FORGE_TARGET` | | `host:port` the runner relays guest forge traffic to. Empty: no relay, a service must listen on the gateway port |
 
 ## Logging

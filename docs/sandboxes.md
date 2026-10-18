@@ -7,7 +7,7 @@ Inside the sandbox, `ermite-runner init` is the entrypoint (PID 1 in a VM). `erm
 ## vm
 
 - Firecracker runs the job in a microVM. The VM is destroyed when the job ends.
-- Needs root, or `CAP_NET_ADMIN` and the rights the jailer requires.
+- With the jailer (default), needs root. Without it (`ERMITE_RUNNER_JAILER_MODE=off`), `CAP_NET_ADMIN`, `/dev/kvm` and `/dev/net/tun` are enough, as in the [unprivileged container](container.md).
 - Disks:
   - The runner executable is the read-only boot root.
   - The shared base image is read-only.
@@ -88,7 +88,7 @@ Host side effects:
 
 ## Guest forge access
 
-Off by default. Use it on staging hosts only.
+Off by default. Without a relay target, jobs reach whatever listens on that gateway port, so keep it to hosts where that is acceptable. With `ERMITE_RUNNER_GUEST_FORGE_TARGET`, jobs reach only the relayed target.
 
 `ERMITE_RUNNER_GUEST_FORGE=1` lets sandboxes reach the server the way the runner does. It is for hosts where the server is reachable only through a local route, such as an `/etc/hosts` entry plus a reverse proxy on a local port. Jobs cannot otherwise run `git clone` against `github.server_url`.
 

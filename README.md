@@ -25,7 +25,16 @@ ermite-runner fetches jobs from an ermite server and runs workflows written for 
 
 Details: [docs/sandboxes.md](docs/sandboxes.md).
 
-## Requirements
+## Deployment options
+
+| Option | Runs as | Isolation | Needs |
+| --- | --- | --- | --- |
+| Unprivileged container ([docs/container.md](docs/container.md)) | An unprivileged user (rootless Podman or Docker) | `vm`, no jailer | `/dev/kvm`, `/dev/net/tun` and `CAP_NET_ADMIN` in the container |
+| Host service (below) | root | `vm` with the jailer, or `container` | See the requirements below |
+
+The container image bundles the runner, Firecracker, the guest kernel and the base image. It is the simplest way to run `vm` mode without root on the host.
+
+## Requirements (host service)
 
 - A Linux host. The runner runs as root.
 - `ip`, `nft` and `mkfs.ext4` (e2fsprogs 1.43 or newer).
@@ -43,7 +52,9 @@ The binary must be static:
 CGO_ENABLED=0 go build -trimpath -o ermite-runner .
 ```
 
-## Register and run
+## Register and run (host service)
+
+In a container, the runner registers itself on its first start instead: see [docs/container.md](docs/container.md#first-start).
 
 1. On the ermite server, create a registration token:
 
@@ -100,7 +111,7 @@ More on the service, logs and shutdown: [docs/service.md](docs/service.md).
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `ERMITE_RUNNER_URL` | | Base URL of the ermite server. Must be `https://` |
+| `ERMITE_RUNNER_URL` | | Base URL of the ermite server. `https://`, or `http://` with `ERMITE_RUNNER_INSECURE_HTTP=1` |
 | `ERMITE_RUNNER_NAME` | host name | Runner name |
 | `ERMITE_RUNNER_LABELS` | | Extra labels, comma separated |
 | `ERMITE_RUNNER_ISOLATION` | `auto` | `auto`, `vm` or `container` |
@@ -117,12 +128,14 @@ All settings: [docs/configuration.md](docs/configuration.md).
 - Run only one runner per host.
 - The registration token can read the code and secrets of every repository. Pass it through standard input.
 - Without sysbox, `container` mode uses a privileged container, which is equivalent to host root. Set `ERMITE_RUNNER_DENY_PRIVILEGED=1` to refuse it.
-- The state directory and all its parents must be owned by root and not writable by others.
+- As a host service, the state directory and all its parents must be owned by root and not writable by others.
+- In an unprivileged container, the jailer is off: the container and its user namespace confine Firecracker instead, and each job still runs in its own microVM.
 
 ## Documentation
 
 - [Configuration](docs/configuration.md): every environment variable
 - [Sandboxes](docs/sandboxes.md): `vm` and `container` modes, network policy, cleanup
+- [Unprivileged container](docs/container.md): run the runner in a rootless container
 - [Service](docs/service.md): systemd unit, logs, shutdown
 - [Images](docs/images.md): job image, guest kernel
 - [Workflows](docs/workflows.md): job and service containers, cancellation, annotations
