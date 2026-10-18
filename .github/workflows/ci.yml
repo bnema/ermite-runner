@@ -8,7 +8,6 @@ on:
 env:
   # Test the module alone, with the versions in go.mod (never a go.work).
   GOWORK: "off"
-  GOPRIVATE: bnema.dev/ermite*
 
 jobs:
   lint:
@@ -16,9 +15,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      # Job containers reach the forge over plain HTTP on the host loopback.
-      - name: Fetch bnema.dev/ermite* modules through the runner's Forgejo route
-        run: git config --global url."http://git.bnema.dev:8088/".insteadOf "https://git.bnema.dev/"
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -32,9 +28,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      # Job containers reach the forge over plain HTTP on the host loopback.
-      - name: Fetch bnema.dev/ermite* modules through the runner's Forgejo route
-        run: git config --global url."http://git.bnema.dev:8088/".insteadOf "https://git.bnema.dev/"
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
