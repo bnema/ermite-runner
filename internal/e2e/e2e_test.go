@@ -3,7 +3,7 @@
 // Package e2e runs jobs through the real executor in a real sandbox. The tests
 // are opt-in because they need Docker (and, for the VM, KVM and Firecracker):
 //
-//	ERMITE_RUNNER_IT_E2E=1 ERMITE_RUNNER_TEST_IMAGE=ermite-runner-ubuntu-24.04:dev go test ./internal/e2e
+//	ERMITE_RUNNER_IT_E2E=1 ERMITE_RUNNER_TEST_IMAGE=ermite-runner-ubuntu-26.04:dev go test ./internal/e2e
 //
 // On a workstation with a rootless Docker daemon the container driver is used
 // with UnsafeAllowRootlessForTests (a test-only option): the jobs run as in production except

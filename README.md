@@ -60,7 +60,7 @@ CGO_ENABLED=0 go build -trimpath -o ermite-runner .
    sudo install -m 0600 /dev/stdin /etc/ermite-runner/env <<'ENV'
    ERMITE_RUNNER_URL=https://ermite.example.com
    ERMITE_RUNNER_NAME=runner-1
-   ERMITE_RUNNER_LABELS=ubuntu-latest,ubuntu-24.04
+   ERMITE_RUNNER_LABELS=ubuntu-latest,ubuntu-26.04
    ERMITE_RUNNER_LOG_FORMAT=json
    ENV
    ```

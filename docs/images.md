@@ -4,10 +4,10 @@ A job runs in the image named by `ERMITE_RUNNER_IMAGE`.
 
 | Mode | Value | Contents |
 | --- | --- | --- |
-| `container` | OCI reference | Default `ermite-runner-ubuntu-24.04:latest` |
+| `container` | OCI reference | Default `ermite-runner-ubuntu-26.04:latest` |
 | `vm` | Directory | `vmlinux` (`Image` on arm64) and `base.ext4`. Default `<state dir>/image` |
 
-Both come from `images/ubuntu-24.04/Dockerfile`. The runner executable and Node.js are attached by the host. They are never part of the image.
+Both come from `images/ubuntu-26.04/Dockerfile` (Ubuntu 26.04 LTS). The runner executable and Node.js are attached by the host. They are never part of the image.
 
 ## Build
 
@@ -18,7 +18,7 @@ scripts/build-image.sh tmp/image    # builds the OCI image and tmp/image/base.ex
 
 - `build-kernel.sh` downloads Linux 6.18 LTS from kernel.org and checks the tarball against the published sha256 sums. It needs `bc`, `flex`, `bison`, `pahole`, libelf and openssl headers.
 - `build-image.sh` needs Docker or Podman (rootless is fine) and e2fsprogs 1.47.1 or newer. No root is needed.
-- The OCI image is tagged `ermite-runner-ubuntu-24.04:latest`. Set `IMAGE_TAG` to change it.
+- The OCI image is tagged `ermite-runner-ubuntu-26.04:latest`. Set `IMAGE_TAG` to change it.
 - The kernel config is `images/kernel/config-6.18` plus per-architecture fragments. The build fails if a listed option does not survive `olddefconfig`.
 - arm64 builds with `ARCH_NAME=arm64`.
 - `CONFIG_BINFMT_MISC` is built in and mounted by the guest init, so `docker/setup-qemu-action` can run foreign-architecture containers.

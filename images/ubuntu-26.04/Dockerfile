@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: MIT
 #
-# ermite-runner-ubuntu-24.04: the minimal CI-1 runner image. The same
+# ermite-runner-ubuntu-26.04: the minimal CI-1 runner image. The same
 # filesystem is used as an OCI image (container isolation) and exported to an
 # ext4 base image (vm isolation) by scripts/build-image.sh. It holds the OS
 # only: the runner executable is attached by the host at start (never baked
 # in), so a runner upgrade does not need an image rebuild.
-FROM ubuntu:24.04
+FROM ubuntu:26.04
 
 ARG DEBIAN_FRONTEND=noninteractive
 
@@ -16,7 +16,8 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 # The command-line tools of GitHub's ubuntu-24.04 image that workflows call
-# directly (runner-images, images/ubuntu/toolsets/toolset-2404.json:
+# directly (runner-images, images/ubuntu/toolsets/toolset-2404.json, the
+# latest published toolset:
 # apt.vital_packages and apt.cmd_packages), minus the daemons and services
 # (haveged, pollinate, sphinxsearch, systemd-coredump). parallel pulls in
 # sysstat, whose collection units are masked: a job image runs no services.
@@ -33,7 +34,7 @@ RUN apt-get update \
 RUN install -m 0755 -d /etc/apt/keyrings \
  && curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc \
  && chmod a+r /etc/apt/keyrings/docker.asc \
- && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu noble stable" \
+ && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu resolute stable" \
       > /etc/apt/sources.list.d/docker.list \
  && apt-get update \
  && apt-get install -y --no-install-recommends \

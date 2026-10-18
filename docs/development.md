@@ -43,7 +43,7 @@ sudo env GOWORK=off ERMITE_RUNNER_IT_VM=1 ERMITE_RUNNER_ISOLATION=vm \
 ### Container
 
 ```sh
-sudo env GOWORK=off ERMITE_RUNNER_IT_CONTAINER=1 ERMITE_RUNNER_IMAGE=ermite-runner-ubuntu-24.04:latest \
+sudo env GOWORK=off ERMITE_RUNNER_IT_CONTAINER=1 ERMITE_RUNNER_IMAGE=ermite-runner-ubuntu-26.04:latest \
   DOCKER_HOST=unix:///var/run/docker.sock "$(command -v go)" test -count=1 -v ./internal/sandbox/integration -run Container
 ```
 
@@ -52,8 +52,8 @@ sudo env GOWORK=off ERMITE_RUNNER_IT_CONTAINER=1 ERMITE_RUNNER_IMAGE=ermite-runn
 The real executor runs in the real image, started by the container driver. It also works with a rootless Docker daemon, where `mount` and `umount` are replaced by stand-ins.
 
 ```sh
-IMAGE_TAG=ermite-runner-ubuntu-24.04:dev scripts/build-image.sh tmp/image
-ERMITE_RUNNER_IT_E2E=1 ERMITE_RUNNER_TEST_IMAGE=ermite-runner-ubuntu-24.04:dev GOWORK=off go test -race -count=1 ./internal/e2e
+IMAGE_TAG=ermite-runner-ubuntu-26.04:dev scripts/build-image.sh tmp/image
+ERMITE_RUNNER_IT_E2E=1 ERMITE_RUNNER_TEST_IMAGE=ermite-runner-ubuntu-26.04:dev GOWORK=off go test -race -count=1 ./internal/e2e
 ```
 
 - `TestChainCorpus` runs jobs of the ermite-conformance corpus through a fake server and compares the result with recordings made on github.com. It reads `ERMITE_CONFORMANCE_DIR` (default: a sibling checkout of ermite-conformance) and never writes to it.

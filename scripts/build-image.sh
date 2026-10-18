@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MIT
 #
-# Build the ermite-runner-ubuntu-24.04 image as an OCI image (container
+# Build the ermite-runner-ubuntu-26.04 image as an OCI image (container
 # isolation) and as a sparse ext4 base image (vm isolation). No root needed:
 # the OCI build uses docker or podman (rootless is fine), the ext4 image is
 # written by `mkfs.ext4 -d` from the exported rootfs tarball.
@@ -10,7 +10,7 @@
 #
 # Environment:
 #   ENGINE      docker or podman (default: first found)
-#   IMAGE_TAG   OCI tag (default ermite-runner-ubuntu-24.04:latest, the
+#   IMAGE_TAG   OCI tag (default ermite-runner-ubuntu-26.04:latest, the
 #               default of ERMITE_RUNNER_IMAGE in container mode)
 #   EXT4_SLACK  free space added to the base image in MiB (default 512)
 #
@@ -20,7 +20,7 @@ set -euo pipefail
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 out=${1:-$root/tmp/image}
-tag=${IMAGE_TAG:-ermite-runner-ubuntu-24.04:latest}
+tag=${IMAGE_TAG:-ermite-runner-ubuntu-26.04:latest}
 slack=${EXT4_SLACK:-512}
 engine=${ENGINE:-}
 
@@ -43,7 +43,7 @@ fi
 
 mkdir -p "$out"
 out=$(cd "$out" && pwd)
-"$engine" build -t "$tag" "$root/images/ubuntu-24.04"
+"$engine" build -t "$tag" "$root/images/ubuntu-26.04"
 
 cid=$("$engine" create "$tag")
 tmp=$(mktemp -d)

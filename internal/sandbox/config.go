@@ -46,7 +46,7 @@ const (
 // Defaults.
 const (
 	DefaultStateDir  = "/var/lib/ermite-runner"
-	DefaultOCIImage  = "ermite-runner-ubuntu-24.04:latest"
+	DefaultOCIImage  = "ermite-runner-ubuntu-26.04:latest"
 	DefaultUIDBase   = 900000
 	DefaultNetwork   = "10.200.0.0/16"
 	DefaultCPUs      = 2
