@@ -7,7 +7,7 @@ A job runs in the image named by `ERMITE_RUNNER_IMAGE`.
 | `container` | OCI reference | Default `ermite-runner-ubuntu-26.04:latest` |
 | `vm` | Directory | `vmlinux` (`Image` on arm64) and `base.ext4`. Default `<state dir>/image` |
 
-Both come from `images/ubuntu-26.04/Dockerfile` (Ubuntu 26.04 LTS). The runner executable and Node.js are attached by the host. They are never part of the image.
+Both come from `images/ubuntu-26.04/Dockerfile` (Ubuntu 26.04 LTS). The runner executable and action runtime Node.js are attached by the host. The image also includes system Node.js and the cached toolchains listed below.
 
 ## Build
 
@@ -26,9 +26,23 @@ scripts/build-image.sh tmp/image    # builds the OCI image and tmp/image/base.ex
 ## What the image must contain
 
 - User `runner`, uid and gid 1001, home `/home/runner`. Steps run as this user. Without it, steps run as root (test images only).
-- `/home/runner/work` and `/opt/hostedtoolcache`, owned by `runner`.
+- `/home/runner/work` and `/opt/hostedtoolcache`, owned by `runner`. The tool cache holds the toolchains listed in `images/ubuntu-26.04/toolcache.lock` for the image architecture.
 - `bash` and `sh`. `python3` and a `python` command for `shell: python`.
 - `dockerd` and passwordless `sudo` for `runner`, for jobs that use Docker.
 - Common tools: git, curl, jq, build-essential, ca-certificates, tzdata, zip and unzip.
 
 `pwsh` is not in the image. A step that asks for it fails with `pwsh: command not found`.
+
+## Toolchains
+
+`images/ubuntu-26.04/toolcache.lock` pins Go and Node.js archives by version,
+action architecture (`x64` or `arm64`), official SHA-256 and download URL.
+To add a version, add a line for each supported architecture with the checksum
+from go.dev's download JSON or nodejs.org's `SHASUMS256.txt`, then rebuild with
+`scripts/build-image.sh tmp/image`. A checksum mismatch fails the build.
+
+The installer uses the `@actions/tool-cache` layout, including the sibling
+`<arch>.complete` marker. `actions/setup-go` with an exact version, including
+one read from `go.mod`, uses the cache only for an exact match. A range such as
+`1.27` selects the highest matching cached version. Versions not in the cache
+still download normally (and `check-latest: true` may check upstream).
