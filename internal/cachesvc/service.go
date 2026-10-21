@@ -58,6 +58,15 @@ const (
 	// blocks at once by default, besides downloads and the cache.
 	DefaultConnsPerListener = 32
 	DefaultConns            = 128
+	// DefaultRegistryPerChannel bounds the registry requests of one channel in
+	// progress at once, so that one sandbox's pulls leave room for its cache and
+	// artifact traffic. dockerd pulls 3 layers at once by default.
+	DefaultRegistryPerChannel = 8
+	// DefaultRegistryDownloadsPerChannel bounds the cold Docker Hub downloads
+	// one channel may have started at once (dockerd's default
+	// max-concurrent-downloads), so that one sandbox cannot take every slot of
+	// the registry proxy.
+	DefaultRegistryDownloadsPerChannel = 3
 )
 
 // Config configures a Service.
@@ -78,10 +87,14 @@ type Config struct {
 	// Archives, when not nil, is the host's cache of action archives, served on
 	// the channels (see ArchiveURL).
 	Archives *actionscache.Cache
+	// Registry is an anonymous pull-only registry on the private channel.
+	Registry http.Handler
 	// The limits below take the Default… values (or those of the store) when
 	// zero; tests set them.
 	ProgressTimeout              time.Duration
 	ConnsPerListener, Conns      int
+	RegistryPerChannel           int
+	RegistryDownloadsPerChannel  int
 	MinCharge                    int64
 	MaxPending, MaxPendingPerJob int
 	// hookChunk, when set, is called by an upload once its range is admitted and
@@ -102,11 +115,16 @@ type Service struct {
 	wg       sync.WaitGroup
 	closed   bool
 
-	archives    *actionscache.Cache
-	hookChunk   func(id int64)
-	progress    time.Duration
-	perListener int
-	connsGlobal chan struct{}
+	archives *actionscache.Cache
+	registry http.Handler
+	// registryPerChannel caps the registry requests in progress per handler.
+	registryPerChannel int
+	// registryDownloads is the cold download quota of each channel.
+	registryDownloads int
+	hookChunk         func(id int64)
+	progress          time.Duration
+	perListener       int
+	connsGlobal       chan struct{}
 }
 
 type listener struct {
@@ -144,8 +162,14 @@ func New(cfg Config) (*Service, error) {
 	if cfg.Conns <= 0 {
 		cfg.Conns = DefaultConns
 	}
+	if cfg.RegistryPerChannel <= 0 {
+		cfg.RegistryPerChannel = DefaultRegistryPerChannel
+	}
+	if cfg.RegistryDownloadsPerChannel <= 0 {
+		cfg.RegistryDownloadsPerChannel = DefaultRegistryDownloadsPerChannel
+	}
 	s := &Service{store: st, sign: sg, now: cfg.Now, log: cfg.Log, channels: map[string]*listener{}, stop: make(chan struct{}),
-		archives: cfg.Archives, hookChunk: cfg.hookChunk, progress: cfg.ProgressTimeout, perListener: cfg.ConnsPerListener, connsGlobal: make(chan struct{}, cfg.Conns)}
+		archives: cfg.Archives, registry: cfg.Registry, hookChunk: cfg.hookChunk, progress: cfg.ProgressTimeout, perListener: cfg.ConnsPerListener, connsGlobal: make(chan struct{}, cfg.Conns), registryPerChannel: cfg.RegistryPerChannel, registryDownloads: cfg.RegistryDownloadsPerChannel}
 	s.wg.Add(1)
 	go s.housekeeping()
 	return s, nil
@@ -168,6 +192,9 @@ func (s *Service) housekeeping() {
 		}
 	}
 }
+
+// RegistryEnabled reports whether the channel serves an anonymous registry.
+func (s *Service) RegistryEnabled() bool { return s.registry != nil }
 
 // Token returns the ACTIONS_RUNTIME_TOKEN of a job. It is valid for ttl, which
 // should be the job timeout plus a margin. sc is the job's cache scope (the

@@ -111,10 +111,10 @@ func githubRepository(contexts string) string {
 // runtimeFor returns what the executor needs of the job's runtime channel: the
 // port it has in the guest, the job's ACTIONS_RUNTIME_TOKEN, the cache mode and
 // whether the channel serves the results service. The channel exists when the
-// runner serves a cache and the job has a cache scope or the results service;
-// without it, 0, "", "" and false. A job with the results service and no cache
-// scope gets an empty mode (the executor then sets no ACTIONS_CACHE_URL) and a
-// token that the cache refuses.
+// runner serves a cache and the job has a cache scope, the results service,
+// or the runner has a registry proxy. Without it, 0, "", "" and false.
+// A job without a cache scope gets an empty mode and a token that the cache
+// refuses. Registry-only jobs expose no runtime environment variables to steps.
 func (j *jobRun) runtimeFor(rt *Runner) (port uint32, token, mode string, results bool) {
 	if rt.Cache == nil {
 		return 0, "", "", false
@@ -134,7 +134,7 @@ func (j *jobRun) runtimeFor(rt *Runner) (port uint32, token, mode string, result
 			mode = "write"
 		}
 	}
-	if !ok && !j.results {
+	if !ok && !j.results && !rt.Registry {
 		return 0, "", "", false
 	}
 	var scopes []string

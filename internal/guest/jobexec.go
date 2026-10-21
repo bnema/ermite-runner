@@ -365,6 +365,12 @@ func startCacheRelay(ctx context.Context, target Target, spec *execpb.JobSpec, b
 		return cacheRelay{}
 	}
 	results := spec.GetResults()
+	// Registry-only jobs need dockerd's loopback relay, but no action runtime
+	// URLs or token. Leave those fields empty so neither node nor docker
+	// actions receive ACTIONS_* runtime variables.
+	if !results && spec.GetCacheMode() == "" {
+		return cacheRelay{relay: r}
+	}
 	c := cacheRelay{relay: r, url: url, token: spec.GetCacheToken(), mode: spec.GetCacheMode(),
 		results: results, cacheOff: results && spec.GetCacheMode() == ""}
 	if bridge == nil {

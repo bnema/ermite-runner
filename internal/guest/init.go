@@ -159,8 +159,7 @@ func runPayload(ctx context.Context, cfg InitConfig, mode string, args map[strin
 		_ = os.MkdirAll(sandbox.GuestScratch+"/docker", 0o711)
 		argv := cfg.DockerdArgs
 		if argv == nil {
-			argv = []string{"/usr/bin/dockerd", "--data-root", sandbox.GuestScratch + "/docker",
-				"--storage-driver", "overlay2", "--host", "unix:///var/run/docker.sock"}
+			argv = defaultDockerdArgs()
 			// dockerd sets its umask to 0, and a containerd it starts itself
 			// inherits it, then every `docker exec` (the steps of a job
 			// container): their files would be world-writable. Start containerd

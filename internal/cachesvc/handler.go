@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"bnema.dev/ermite-runner/internal/registryproxy"
 )
 
 // APIPath is the prefix of the cache API: the toolkit appends "_apis/
@@ -45,6 +47,11 @@ func (s *Service) Handler() http.Handler { return s.handler("") }
 // any other sandbox's channel.
 func (s *Service) handler(job string) http.Handler {
 	mux := http.NewServeMux()
+	if s.registry != nil {
+		registry := s.serveRegistry(make(chan struct{}, s.registryPerChannel), registryproxy.NewQuota(s.registryDownloads))
+		mux.HandleFunc("GET /v2/", registry)
+		mux.HandleFunc("HEAD /v2/", registry)
+	}
 	// The routes are those of the toolkit's v1 client (cacheHttpClient.ts):
 	//   GET   cache?keys=k1,k2&version=v  :89  lookup
 	//   GET   caches?key=k                :132 diagnostics (core.isDebug())
@@ -83,7 +90,7 @@ func (s *Service) channelHandler(job string, results http.Handler) http.Handler 
 		return cache
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, APIPath) || strings.HasPrefix(r.URL.Path, ArchivePath) {
+		if strings.HasPrefix(r.URL.Path, APIPath) || strings.HasPrefix(r.URL.Path, ArchivePath) || strings.HasPrefix(r.URL.Path, "/v2/") {
 			cache.ServeHTTP(w, r)
 			return
 		}
@@ -387,6 +394,40 @@ func (p *progressWriter) Write(b []byte) (int, error) {
 
 // Unwrap lets http.ResponseController reach the real writer.
 func (p *progressWriter) Unwrap() http.ResponseWriter { return p.ResponseWriter }
+
+// KeepAlive moves the deadlines without writing. The registry proxy calls it
+// while the client waits for a shared upstream download that is progressing,
+// before the first byte of the reply. The read deadline moves too: once it
+// passes, net/http cancels the request's context and the wait would end.
+func (p *progressWriter) KeepAlive() {
+	d := deadline(p.idle, p.remaining)
+	_ = p.rc.SetReadDeadline(d)
+	_ = p.rc.SetWriteDeadline(d)
+}
+
+// serveRegistry serves the Docker Hub mirror with the same sliding progress
+// deadline as the other downloads: a layer of GiB keeps going as long as it
+// moves, and a client that stops reading is cut after one progress period.
+// slots caps the requests of this channel in progress at once; one over the
+// cap gets 503 at once, which dockerd retries or answers by pulling from
+// Docker Hub, so the channel's connections stay free for the cache. quota is
+// the channel's share of the proxy's cold downloads.
+func (s *Service) serveRegistry(slots chan struct{}, quota *registryproxy.Quota) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case slots <- struct{}{}:
+			defer func() { <-slots }()
+		default:
+			w.Header().Set("Retry-After", "1")
+			reply(w, http.StatusServiceUnavailable, "registry busy")
+			return
+		}
+		rc := http.NewResponseController(w)
+		defer func() { _ = rc.SetWriteDeadline(deadline(s.progress, nil)) }()
+		r = r.WithContext(registryproxy.WithQuota(r.Context(), quota))
+		s.registry.ServeHTTP(&progressWriter{ResponseWriter: w, rc: rc, idle: s.progress}, r)
+	}
+}
 
 func (s *Service) commit(w http.ResponseWriter, r *http.Request, c Claims) {
 	id, ok := parseID(r)

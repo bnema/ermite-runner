@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,6 +22,7 @@ import (
 	"bnema.dev/ermite-runner/internal/cachesvc"
 	"bnema.dev/ermite-runner/internal/externals"
 	"bnema.dev/ermite-runner/internal/host"
+	"bnema.dev/ermite-runner/internal/registryproxy"
 	"bnema.dev/ermite-runner/internal/resultssvc"
 	"bnema.dev/ermite-runner/internal/sandbox"
 	"bnema.dev/ermite-runner/internal/sandbox/drivers"
@@ -46,7 +48,7 @@ func setupCache(ctx context.Context, scfg *sandbox.Config) (*cachesvc.Service, *
 	switch strings.ToLower(strings.TrimSpace(os.Getenv(envCache))) {
 	case "", "1", "true", "yes":
 	case "0", "false", "no":
-		log.Info().Msg("the cache service is off (" + envCache + "=0)")
+		log.Info().Msg("the cache service and registry proxy are off (" + envCache + "=0)")
 		return nil, nil, nil
 	default:
 		return nil, nil, fmt.Errorf("%s: %q is not 0 or 1", envCache, os.Getenv(envCache))
@@ -59,7 +61,11 @@ func setupCache(ctx context.Context, scfg *sandbox.Config) (*cachesvc.Service, *
 	if err != nil {
 		return nil, nil, err
 	}
-	svc, err := cachesvc.New(cachesvc.Config{Dir: filepath.Join(scfg.StateDir, "cache"), Max: max, Log: log, Archives: archives})
+	registry, err := setupRegistry(ctx, scfg.StateDir)
+	if err != nil {
+		return nil, nil, err
+	}
+	svc, err := cachesvc.New(cachesvc.Config{Dir: filepath.Join(scfg.StateDir, "cache"), Max: max, Log: log, Archives: archives, Registry: registry})
 	if err != nil {
 		return nil, nil, err
 	}
@@ -87,6 +93,38 @@ func setupArchives(ctx context.Context, stateDir string) (*actionscache.Cache, e
 	}
 	log.Info().Int64("max_bytes", max).Msg("action archive cache on")
 	return c, nil
+}
+
+const envRegistryMax = "ERMITE_RUNNER_REGISTRY_CACHE_MAX"
+
+// setupRegistry opens the Docker Hub mirror. The caller only calls this when
+// the cache channel is enabled; its capacity is independent of the cache API.
+func setupRegistry(ctx context.Context, stateDir string) (http.Handler, error) {
+	log := zerowrap.FromCtx(ctx)
+	value := strings.TrimSpace(os.Getenv(envRegistryMax))
+	if zeroSize(value) {
+		log.Info().Msg("registry proxy off (" + envRegistryMax + "=" + value + ")")
+		return nil, nil
+	}
+	if value == "" {
+		value = "10G"
+	}
+	max, err := cachesvc.ParseMax(value)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", envRegistryMax, err)
+	}
+	p, err := registryproxy.New(registryproxy.Config{Dir: filepath.Join(stateDir, "registry"), Max: max, Log: log})
+	if err != nil {
+		return nil, err
+	}
+	log.Info().Int64("max_bytes", max).Msg("registry proxy on (Docker Hub pull-through)")
+	return p, nil
+}
+
+// zeroSize reports a size of zero in any unit: 0, 00, 0M, 0G, 0GiB...
+func zeroSize(v string) bool {
+	digits := strings.TrimRight(v, "kKmMgGtTiIbB")
+	return digits != "" && strings.Trim(digits, "0") == ""
 }
 
 // envCache=0 turns the cache service off.
@@ -307,6 +345,7 @@ func runCmd(ctx context.Context) int {
 		},
 		Features: hcfg.ServerFeaturesFunc(url),
 		Cache:    cache,
+		Registry: cache != nil && cache.RegistryEnabled(),
 		Archives: archives,
 		Results:  results,
 		Artifacts: func(tok string) ermiteconnect.JobArtifactServiceClient {
