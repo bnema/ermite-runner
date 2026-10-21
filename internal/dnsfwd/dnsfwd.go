@@ -39,8 +39,15 @@ import (
 const (
 	// TCPLifetime is the absolute lifetime of a TCP connection, set at accept.
 	TCPLifetime = 30 * time.Second
-	// UpstreamTimeout is the deadline of one upstream attempt.
+	// UpstreamTimeout is the deadline of one upstream TCP attempt.
 	UpstreamTimeout = 3 * time.Second
+	// UDPAttemptTimeout is the deadline of one upstream UDP attempt. It is short
+	// on purpose: glibc guests use "timeout:2 attempts:2", so the reply (or its
+	// TC=1 / TCP fallback) must reach them well inside the first 2 s window.
+	UDPAttemptTimeout = time.Second
+	// MaxExchange caps one whole exchange over all upstreams and transports, so
+	// a long upstream list cannot hold an in-flight slot for long.
+	MaxExchange = 6 * time.Second
 	// TCPIdleTimeout closes TCP client connections that stay silent.
 	TCPIdleTimeout = 10 * time.Second
 
@@ -53,6 +60,9 @@ const (
 
 	maxUDP = 4096 // largest datagram relayed (EDNS0 sizes up to 4096)
 	hdrLen = 12
+
+	// plainUDPSize is the largest UDP reply for a client without EDNS (RFC 1035).
+	plainUDPSize = 512
 )
 
 // Forwarder relays DNS queries. The zero value is not usable; use New.
@@ -61,6 +71,11 @@ type Forwarder struct {
 	port      int
 	// Lifetime overrides TCPLifetime; set before Listen (tests).
 	Lifetime time.Duration
+	// Upstream deadlines, set to the constants above by New; tests shorten
+	// them before Listen.
+	udpTimeout, tcpTimeout, maxExchange time.Duration
+	// dial opens upstream connections; tests replace it with in-memory fakes.
+	dial func(ctx context.Context, network, addr string) (net.Conn, error)
 	// FreeBind binds with IP_FREEBIND, so that the gateway address may be
 	// configured after the listener. Off by default: with Docker the address
 	// exists when the network is created and a missing one is an error to
@@ -97,7 +112,12 @@ func New(upstreams func() []string, port int) *Forwarder {
 		upstreams: upstreams,
 		port:      port,
 		Lifetime:  TCPLifetime,
-		listeners: map[netip.Addr]*listener{},
+
+		udpTimeout:  UDPAttemptTimeout,
+		tcpTimeout:  UpstreamTimeout,
+		maxExchange: MaxExchange,
+		dial:        (&net.Dialer{}).DialContext,
+		listeners:   map[netip.Addr]*listener{},
 	}
 }
 
@@ -232,6 +252,11 @@ func (f *Forwarder) serveUDP(ctx context.Context, l *listener, log zerowrap.Logg
 		go func() {
 			defer func() { <-l.inflight }()
 			resp := f.exchange(ctx, l, q, false)
+			// A reply larger than the client accepts would be dropped or cut
+			// by its stack: send TC=1 so that it retries over TCP at once.
+			if len(resp) > clientUDPSize(q) {
+				resp = truncated(resp)
+			}
 			if len(resp) > 0 {
 				_, _ = pc.WriteTo(resp, from)
 			}
@@ -311,34 +336,130 @@ func (f *Forwarder) serveConn(ctx context.Context, l *listener, c net.Conn, dead
 	}
 }
 
-// exchange relays q to the upstreams in order and returns the first answer, or
-// a SERVFAIL when none answers. The transport towards the upstream matches the
-// client's: a client that fell back to TCP gets a complete answer. The
+// exchange relays q to the upstreams in order and returns the first answer,
+// SERVFAIL when none answers, or nil when ctx is cancelled. A TCP client is
+// served over TCP. A UDP client is served over UDP for at most udpTimeout; if
+// that fails, times out or returns TC=1, the same upstream is retried over TCP
+// (at most tcpTimeout) before the next upstream is tried, because some
+// resolvers or network paths lose large plain-UDP answers. Each upstream gets
+// its own budget, and the whole exchange is capped at maxExchange. The
 // overridden name, if any, is answered without asking the upstreams.
 func (f *Forwarder) exchange(ctx context.Context, l *listener, q []byte, overTCP bool) []byte {
 	if resp := f.overrideAnswer(l.addr, q); resp != nil {
 		return resp
 	}
+	cctx, cancel := context.WithTimeout(ctx, f.maxExchange)
+	defer cancel()
+	valid := func(resp []byte, err error) bool {
+		return err == nil && len(resp) >= hdrLen && resp[0] == q[0] && resp[1] == q[1]
+	}
 	for _, up := range f.upstreams() {
-		var resp []byte
-		var err error
+		if cctx.Err() != nil {
+			break
+		}
 		if overTCP {
-			resp, err = exchangeTCP(ctx, up, q)
-		} else {
-			resp, err = exchangeUDP(ctx, up, q)
+			if resp, err := f.exchangeTCP(cctx, up, q, f.tcpTimeout); valid(resp, err) {
+				return resp
+			}
+			continue
 		}
-		if err == nil && len(resp) >= hdrLen && resp[0] == q[0] && resp[1] == q[1] {
-			return resp
+		resp, err := f.exchangeUDP(cctx, up, q, f.udpTimeout)
+		var tc []byte
+		if valid(resp, err) {
+			if resp[2]&0x02 == 0 {
+				return resp
+			}
+			tc = resp
 		}
+		if full, err := f.exchangeTCP(cctx, up, q, f.tcpTimeout); valid(full, err) {
+			return full
+		}
+		if tc != nil {
+			return tc // the client retries over TCP itself
+		}
+	}
+	if ctx.Err() != nil {
+		return nil
 	}
 	return servfail(q)
 }
 
-func exchangeUDP(ctx context.Context, up string, q []byte) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(ctx, UpstreamTimeout)
+// clientUDPSize returns the largest UDP reply the client of q accepts: 512
+// without EDNS, else its advertised OPT size (at least 512, at most maxUDP).
+func clientUDPSize(q []byte) int {
+	size := plainUDPSize
+	if len(q) < hdrLen {
+		return size
+	}
+	off := hdrLen
+	for i := 0; i < int(binary.BigEndian.Uint16(q[4:])); i++ { // questions
+		if off = skipName(q, off); off < 0 || off+4 > len(q) {
+			return size
+		}
+		off += 4
+	}
+	rrs := int(binary.BigEndian.Uint16(q[6:])) + int(binary.BigEndian.Uint16(q[8:])) + int(binary.BigEndian.Uint16(q[10:]))
+	for i := 0; i < rrs; i++ {
+		if off = skipName(q, off); off < 0 || off+10 > len(q) {
+			return size
+		}
+		if binary.BigEndian.Uint16(q[off:]) == 41 { // OPT: class is the UDP size
+			size = max(size, int(binary.BigEndian.Uint16(q[off+2:])))
+			break
+		}
+		off += 10 + int(binary.BigEndian.Uint16(q[off+8:]))
+	}
+	return min(size, maxUDP)
+}
+
+// skipName returns the offset after the name at off, or -1 if malformed.
+func skipName(m []byte, off int) int {
+	for off < len(m) {
+		switch c := int(m[off]); {
+		case c == 0:
+			return off + 1
+		case c&0xc0 == 0xc0:
+			if off+2 > len(m) {
+				return -1
+			}
+			return off + 2
+		case c&0xc0 != 0:
+			return -1
+		default:
+			off += 1 + c
+		}
+	}
+	return -1
+}
+
+// truncated returns the header and question of resp with TC=1 and no records.
+func truncated(resp []byte) []byte {
+	if len(resp) < hdrLen {
+		return nil
+	}
+	end := hdrLen
+	for i := 0; i < int(binary.BigEndian.Uint16(resp[4:])); i++ {
+		if end = skipName(resp, end); end < 0 || end+4 > len(resp) {
+			end = hdrLen
+			break
+		}
+		end += 4
+	}
+	r := append([]byte(nil), resp[:end]...)
+	r[2] |= 0x02 // TC
+	if end == hdrLen {
+		r[4], r[5] = 0, 0
+	}
+	for i := 6; i < hdrLen; i++ { // ANCOUNT, NSCOUNT, ARCOUNT
+		r[i] = 0
+	}
+	return r
+}
+
+func (f *Forwarder) exchangeUDP(ctx context.Context, up string, q []byte, timeout time.Duration) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	var d net.Dialer
-	c, err := d.DialContext(ctx, "udp", up)
+	c, err := f.dial(ctx, "udp", up)
 	if err != nil {
 		return nil, err
 	}
@@ -361,11 +482,10 @@ func exchangeUDP(ctx context.Context, up string, q []byte) ([]byte, error) {
 	}
 }
 
-func exchangeTCP(ctx context.Context, up string, q []byte) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(ctx, UpstreamTimeout)
+func (f *Forwarder) exchangeTCP(ctx context.Context, up string, q []byte, timeout time.Duration) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	var d net.Dialer
-	c, err := d.DialContext(ctx, "tcp", up)
+	c, err := f.dial(ctx, "tcp", up)
 	if err != nil {
 		return nil, err
 	}

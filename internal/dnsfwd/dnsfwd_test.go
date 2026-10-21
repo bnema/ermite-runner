@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -39,18 +40,32 @@ func answer(q []byte) []byte {
 	return append(r, "ANSWER"...)
 }
 
+// listenUDPAndTCP binds UDP on a free loopback port and TCP on the same port.
+// The TCP port may already be taken (outbound connections use the same
+// ephemeral range), so it picks again a few times, like Listen does.
+func listenUDPAndTCP(t *testing.T) (net.PacketConn, net.Listener) {
+	t.Helper()
+	for attempt := 0; ; attempt++ {
+		pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+		if err != nil {
+			t.Skip("no loopback:", err)
+		}
+		tl, err := net.Listen("tcp", pc.LocalAddr().String())
+		if err == nil {
+			return pc, tl
+		}
+		_ = pc.Close()
+		if attempt == 49 || !errors.Is(err, syscall.EADDRINUSE) {
+			t.Fatal(err)
+		}
+	}
+}
+
 // fakeUpstream serves UDP and TCP on one port of 127.0.0.1 and returns it.
 func fakeUpstream(t *testing.T, handle func(q []byte) []byte) string {
 	t.Helper()
-	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		t.Skip("no loopback:", err)
-	}
+	pc, tl := listenUDPAndTCP(t)
 	addr := pc.LocalAddr().String()
-	tl, err := net.Listen("tcp", addr)
-	if err != nil {
-		t.Fatal(err)
-	}
 	t.Cleanup(func() { _ = pc.Close(); _ = tl.Close() })
 	go func() {
 		buf := make([]byte, 4096)
@@ -93,7 +108,16 @@ func fakeUpstream(t *testing.T, handle func(q []byte) []byte) string {
 
 func start(t *testing.T, ups ...string) (*Forwarder, string) {
 	t.Helper()
+	return startWith(t, nil, ups...)
+}
+
+// startWith is start with a hook to adjust the Forwarder before Listen.
+func startWith(t *testing.T, cfg func(*Forwarder), ups ...string) (*Forwarder, string) {
+	t.Helper()
 	f := New(func() []string { return ups }, 0)
+	if cfg != nil {
+		cfg(f)
+	}
 	ip := netip.MustParseAddr("127.0.0.1")
 	if err := f.Listen(context.Background(), ip); err != nil {
 		t.Fatal(err)
@@ -177,29 +201,6 @@ func TestServfailWhenNoUpstreamAnswers(t *testing.T) {
 	}
 	if n != hdrLen || binary.BigEndian.Uint16(buf) != 0xbeef || buf[3]&0x0f != 2 || buf[2]&0x80 == 0 {
 		t.Fatalf("not a SERVFAIL: %x", buf[:n])
-	}
-}
-
-func TestMismatchedUpstreamIDIgnored(t *testing.T) {
-	// Upstream answers with a wrong ID: treated as no answer, client gets SERVFAIL.
-	up := fakeUpstream(t, func(q []byte) []byte {
-		r := answer(q)
-		r[0] ^= 0xff
-		return r
-	})
-	f, addr := start(t, up)
-	_ = f
-	c, _ := net.Dial("udp", addr)
-	defer func() { _ = c.Close() }()
-	_ = c.SetDeadline(time.Now().Add(2*UpstreamTimeout + 2*time.Second))
-	_, _ = c.Write(query(5, "a.test"))
-	buf := make([]byte, 512)
-	n, err := c.Read(buf)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if buf[3]&0x0f != 2 {
-		t.Fatalf("want SERVFAIL, got %x", buf[:n])
 	}
 }
 
@@ -610,5 +611,347 @@ func TestOverrideIgnoresMalformedAndNonQueries(t *testing.T) {
 		if f.overrideAnswer(gw, q) != nil {
 			t.Errorf("%s was answered locally", name)
 		}
+	}
+}
+
+// bigAnswer returns an answer to q padded to size bytes, with TC set if tc.
+func bigAnswer(q []byte, size int, tc bool) []byte {
+	r := answer(q)
+	if tc {
+		r[2] |= 0x02
+	}
+	for len(r) < size {
+		r = append(r, 'x')
+	}
+	return r
+}
+
+func TestLargeAnswerNonEDNSClientGetsTC(t *testing.T) {
+	up := fakeUpstream(t, func(q []byte) []byte { return bigAnswer(q, 700, false) })
+	_, addr := start(t, up)
+	q := queryType(0x3333, "storage.googleapis.com", 1, false)
+	resp := udpExchange(t, addr, q)
+	if resp[2]&0x02 == 0 {
+		t.Fatalf("TC not set: %x", resp)
+	}
+	if len(resp) != len(q) || binary.BigEndian.Uint16(resp[4:]) != 1 || binary.BigEndian.Uint16(resp[6:]) != 0 {
+		t.Fatalf("want header+question only, got %x", resp)
+	}
+	if resp[0] != q[0] || resp[1] != q[1] {
+		t.Fatal("ID changed")
+	}
+}
+
+func TestLargeAnswerEDNSClientGetsFullAnswer(t *testing.T) {
+	up := fakeUpstream(t, func(q []byte) []byte { return bigAnswer(q, 700, false) })
+	_, addr := start(t, up)
+	// queryType advertises 0x1000 (4096) bytes.
+	resp := udpExchange(t, addr, queryType(0x4444, "storage.googleapis.com", 1, true))
+	if len(resp) != 700 || resp[2]&0x02 != 0 {
+		t.Fatalf("want the full 700-byte answer, got len %d tc=%d", len(resp), resp[2]&0x02)
+	}
+}
+
+// withOPT appends an OPT record (root name, type 41) with the given class and
+// RDLEN to a query and bumps ARCOUNT.
+func withOPT(q []byte, size, rdlen uint16, body int) []byte {
+	q = append([]byte(nil), q...)
+	q[11] = 1
+	q = append(q, 0, 0, 41)
+	q = binary.BigEndian.AppendUint16(q, size)
+	q = append(q, 0, 0, 0, 0)
+	q = binary.BigEndian.AppendUint16(q, rdlen)
+	return append(q, make([]byte, body)...)
+}
+
+func TestClientUDPSize(t *testing.T) {
+	plain := query(1, "a.b")
+	bigQD := append([]byte(nil), plain[:hdrLen]...)
+	bigQD[4], bigQD[5] = 0xff, 0xff
+	bigQD = append(bigQD, 1, 'a', 0, 0, 1, 0, 1)
+	ptrQ := append([]byte(nil), plain[:hdrLen]...)
+	ptrQ = append(ptrQ, 0xc0, hdrLen, 0, 1, 0, 1) // compression pointer in question
+	tests := []struct {
+		name string
+		q    []byte
+		want int
+	}{
+		{"no edns", plain, 512},
+		{"edns 1232", withOPT(plain, 1232, 0, 0), 1232},
+		{"edns below 512", withOPT(plain, 100, 0, 0), 512},
+		{"edns above cap", withOPT(plain, 65535, 0, 0), maxUDP},
+		{"edns 4096", withOPT(plain, 4096, 0, 0), 4096},
+		{"qdcount 65535 short body", bigQD, 512},
+		{"compression pointer in question", ptrQ, 512},
+		{"OPT rdlen overruns buffer", withOPT(plain, 4096, 500, 3), 4096},
+		{"truncated header", plain[:15], 512},
+		{"short", plain[:5], 512},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := clientUDPSize(tt.q); got != tt.want {
+				t.Fatalf("got %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestTruncated(t *testing.T) {
+	q := queryType(7, "a.b", 1, false)
+	full := bigAnswer(q, 700, false)
+	full[7] = 5 // ANCOUNT
+	got := truncated(full)
+	if len(got) != len(q) || got[2]&0x02 == 0 || got[6] != 0 || got[7] != 0 || got[4] != 0 || got[5] != 1 {
+		t.Fatalf("bad truncated reply %x", got)
+	}
+	bad := append([]byte(nil), full...)
+	bad[4], bad[5] = 0xff, 0xff // QDCOUNT lies, question parse fails
+	got = truncated(bad)
+	if len(got) != hdrLen || got[2]&0x02 == 0 || got[4] != 0 || got[5] != 0 {
+		t.Fatalf("bad-question case: %x", got)
+	}
+	if truncated(full[:5]) != nil {
+		t.Fatal("short input must give nil")
+	}
+}
+
+func TestServfailAndOverrideRepliesAreNotTruncated(t *testing.T) {
+	dead := "127.0.0.1:1" // nothing listens: UDP and TCP both fail at once
+	_, addr := startOverride(t, "forge.test", dead)
+	resp := udpExchange(t, addr, queryType(9, "x.test", 1, false))
+	if len(resp) != hdrLen || resp[3]&0x0f != 2 || resp[2]&0x02 != 0 {
+		t.Fatalf("want a plain 12-byte SERVFAIL, got %x", resp)
+	}
+	resp = udpExchange(t, addr, queryType(10, "forge.test", 1, false))
+	if resp[2]&0x02 != 0 || resp[3]&0x0f != 0 || binary.BigEndian.Uint16(resp[6:]) != 1 {
+		t.Fatalf("want the override A answer, got %x", resp)
+	}
+}
+
+// fakeNet is an in-memory upstream network for Forwarder.dial. One Write on a
+// UDP conn is one datagram (net.Pipe delivers a Write to a single Read when the
+// reader's buffer is large enough). A handler returning nil never answers.
+type fakeNet struct {
+	udp, tcp           func(addr string, q []byte) []byte
+	udpCalls, tcpCalls atomic.Int64
+}
+
+func (n *fakeNet) dial(ctx context.Context, network, addr string) (net.Conn, error) {
+	if err := ctx.Err(); err != nil { // like net.Dialer
+		return nil, err
+	}
+	c, s := net.Pipe()
+	switch network {
+	case "udp":
+		go func() {
+			defer func() { _ = s.Close() }()
+			buf := make([]byte, 4096)
+			for {
+				k, err := s.Read(buf)
+				if err != nil {
+					return
+				}
+				n.udpCalls.Add(1)
+				if r := n.udp(addr, append([]byte(nil), buf[:k]...)); r != nil {
+					if _, err := s.Write(r); err != nil {
+						return
+					}
+				}
+			}
+		}()
+	case "tcp":
+		go func() {
+			defer func() { _ = s.Close() }()
+			var l [2]byte
+			if _, err := io.ReadFull(s, l[:]); err != nil {
+				return
+			}
+			q := make([]byte, binary.BigEndian.Uint16(l[:]))
+			if _, err := io.ReadFull(s, q); err != nil {
+				return
+			}
+			n.tcpCalls.Add(1)
+			if r := n.tcp(addr, q); r != nil {
+				_, _ = s.Write(append(binary.BigEndian.AppendUint16(nil, uint16(len(r))), r...))
+			}
+			_, _ = io.Copy(io.Discard, s) // wait for the client to hang up
+		}()
+	default:
+		return nil, errors.New("unexpected network " + network)
+	}
+	return c, nil
+}
+
+// silent is a handler that never answers.
+func silent(string, []byte) []byte { return nil }
+
+// fakeForwarder returns a Forwarder with production timeouts whose upstreams
+// are served by n, and a listener for exchange.
+func fakeForwarder(n *fakeNet, ups ...string) (*Forwarder, *listener) {
+	f := New(func() []string { return ups }, 0)
+	f.dial = n.dial
+	return f, &listener{addr: netip.MustParseAddr("127.0.0.1")}
+}
+
+func isServfail(r []byte, id uint16) bool {
+	return len(r) == hdrLen && binary.BigEndian.Uint16(r) == id && r[3]&0x0f == 2
+}
+
+// The tests below run in a synctest bubble: the fake clock makes the real
+// production timeouts (1 s UDP, 3 s TCP, 6 s cap) instant and exact.
+
+func TestExchangeSilentUDPFallsBackToTCPAfterUDPTimeout(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		n := &fakeNet{udp: silent, tcp: func(_ string, q []byte) []byte { return answer(q) }}
+		f, l := fakeForwarder(n, "up:53")
+		start := time.Now()
+		resp := f.exchange(t.Context(), l, query(1, "storage.googleapis.com"), false)
+		if !strings.HasSuffix(string(resp), "ANSWER") {
+			t.Fatalf("want the TCP answer, got %x", resp)
+		}
+		if got := time.Since(start); got != UDPAttemptTimeout {
+			t.Fatalf("answered after %v, want %v", got, UDPAttemptTimeout)
+		}
+		if n.udpCalls.Load() != 1 || n.tcpCalls.Load() != 1 {
+			t.Fatalf("udp=%d tcp=%d, want 1 and 1", n.udpCalls.Load(), n.tcpCalls.Load())
+		}
+	})
+}
+
+func TestExchangeTruncatedUDPRetriedOverTCP(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		n := &fakeNet{
+			udp: func(_ string, q []byte) []byte { return bigAnswer(q, 0, true) },
+			tcp: func(_ string, q []byte) []byte { return bigAnswer(q, 700, false) },
+		}
+		f, l := fakeForwarder(n, "up:53")
+		start := time.Now()
+		resp := f.exchange(t.Context(), l, query(2, "example.com"), false)
+		if len(resp) != 700 || resp[2]&0x02 != 0 {
+			t.Fatalf("want the full TCP answer, got len %d tc=%d", len(resp), resp[2]&0x02)
+		}
+		if time.Since(start) != 0 {
+			t.Fatalf("took %v, want no waiting", time.Since(start))
+		}
+	})
+}
+
+func TestExchangeKeepsTruncatedReplyWhenTCPFails(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		n := &fakeNet{udp: func(_ string, q []byte) []byte { return bigAnswer(q, 0, true) }, tcp: silent}
+		f, l := fakeForwarder(n, "up:53")
+		resp := f.exchange(t.Context(), l, query(3, "example.com"), false)
+		if len(resp) < hdrLen || resp[2]&0x02 == 0 {
+			t.Fatalf("want the TC=1 reply, got %x", resp)
+		}
+	})
+}
+
+func TestExchangeSecondUpstreamNotStarved(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		n := &fakeNet{
+			udp: func(a string, q []byte) []byte {
+				if a == "dead:53" {
+					return nil
+				}
+				return answer(q)
+			},
+			tcp: func(a string, q []byte) []byte {
+				if a == "dead:53" {
+					return nil
+				}
+				return answer(q)
+			},
+		}
+		f, l := fakeForwarder(n, "dead:53", "live:53")
+		start := time.Now()
+		resp := f.exchange(t.Context(), l, query(4, "a.test"), false)
+		if !strings.HasSuffix(string(resp), "ANSWER") {
+			t.Fatalf("want the second upstream's answer, got %x", resp)
+		}
+		if got, want := time.Since(start), UDPAttemptTimeout+UpstreamTimeout; got != want {
+			t.Fatalf("took %v, want %v", got, want)
+		}
+	})
+}
+
+func TestExchangeMismatchedUpstreamIDIgnored(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		wrong := func(_ string, q []byte) []byte {
+			r := answer(q)
+			r[0] ^= 0xff
+			return r
+		}
+		f, l := fakeForwarder(&fakeNet{udp: wrong, tcp: wrong}, "up:53")
+		start := time.Now()
+		resp := f.exchange(t.Context(), l, query(5, "a.test"), false)
+		if !isServfail(resp, 5) {
+			t.Fatalf("want SERVFAIL, got %x", resp)
+		}
+		// UDP keeps listening for the right ID until its timeout; the TCP
+		// reply is read once and rejected.
+		if got := time.Since(start); got != UDPAttemptTimeout {
+			t.Fatalf("took %v, want %v", got, UDPAttemptTimeout)
+		}
+	})
+}
+
+func TestExchangeCappedAtMaxExchange(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		n := &fakeNet{udp: silent, tcp: silent}
+		f, l := fakeForwarder(n, "a:53", "b:53", "c:53")
+		start := time.Now()
+		resp := f.exchange(t.Context(), l, query(6, "a.test"), false)
+		if !isServfail(resp, 6) {
+			t.Fatalf("want SERVFAIL, got %x", resp)
+		}
+		if got := time.Since(start); got != MaxExchange {
+			t.Fatalf("took %v, want %v", got, MaxExchange)
+		}
+		// a: 1 s UDP + 3 s TCP; b: 1 s UDP + 1 s TCP (cut by the cap); c: skipped.
+		if n.udpCalls.Load() != 2 || n.tcpCalls.Load() != 2 {
+			t.Fatalf("udp=%d tcp=%d, want 2 and 2", n.udpCalls.Load(), n.tcpCalls.Load())
+		}
+	})
+}
+
+func TestExchangeTCPClientUsesTCPOnly(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		n := &fakeNet{udp: silent, tcp: func(_ string, q []byte) []byte { return answer(q) }}
+		f, l := fakeForwarder(n, "up:53")
+		resp := f.exchange(t.Context(), l, query(7, "a.test"), true)
+		if !strings.HasSuffix(string(resp), "ANSWER") || n.udpCalls.Load() != 0 {
+			t.Fatalf("resp=%x udp=%d", resp, n.udpCalls.Load())
+		}
+	})
+}
+
+func TestExchangeCancelledReturnsNil(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f, l := fakeForwarder(&fakeNet{udp: silent, tcp: silent}, "up:53")
+		ctx, cancel := context.WithCancel(t.Context())
+		time.AfterFunc(500*time.Millisecond, cancel)
+		start := time.Now()
+		if resp := f.exchange(ctx, l, query(8, "a.test"), false); resp != nil {
+			t.Fatalf("want nil on cancellation, got %x", resp)
+		}
+		// Cancellation is noticed at the next attempt boundary: the blocked UDP
+		// read runs to its own deadline, then no TCP attempt is started.
+		if got := time.Since(start); got != UDPAttemptTimeout {
+			t.Fatalf("returned after %v, want %v", got, UDPAttemptTimeout)
+		}
+	})
+}
+
+// End to end through real client-facing sockets; the upstream is in memory.
+func TestUDPClientGetsTCPAnswerWhenUpstreamUDPSilent(t *testing.T) {
+	n := &fakeNet{udp: silent, tcp: func(_ string, q []byte) []byte { return answer(q) }}
+	_, addr := startWith(t, func(f *Forwarder) {
+		f.dial = n.dial
+		f.udpTimeout = 50 * time.Millisecond
+	}, "up:53")
+	resp := udpExchange(t, addr, query(0x1111, "storage.googleapis.com"))
+	if !strings.HasSuffix(string(resp), "ANSWER") || resp[3]&0x0f != 0 {
+		t.Fatalf("want the TCP answer, got %x", resp)
 	}
 }

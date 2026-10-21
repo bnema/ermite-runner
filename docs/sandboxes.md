@@ -78,6 +78,7 @@ From a sandbox:
 
 - Source address and destination checks run before any "established" accept. A guest cannot forge another's flow.
 - The DNS forwarder allows 32 in-flight queries per listener (extra UDP is dropped), 16 TCP connections, and 30 s per TCP connection.
+- Upstream queries use UDP for 1 s, then TCP on the same resolver (also when UDP is truncated). One query takes at most 6 s. A UDP answer larger than the client accepts (512 bytes without EDNS) is replaced by an empty reply with TC=1, so the client retries over TCP.
 - Golden rulesets: `internal/netpolicy/testdata`.
 
 Host side effects:
