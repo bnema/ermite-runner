@@ -33,6 +33,7 @@ const (
 
 // ExecConfig configures the executor.
 type ExecConfig struct {
+	BootMs  map[string]int64
 	Target  Target
 	Sandbox string // "vm" or "container", reported in Hello
 	Version string
@@ -189,7 +190,7 @@ func serve(ctx context.Context, rw io.ReadWriteCloser, cfg ExecConfig) (int, err
 	conn := execstream.NewConn(rw)
 	host, _ := os.Hostname()
 	if err := conn.Send(&execpb.Frame{Body: &execpb.Frame_Hello{Hello: &execpb.Hello{
-		Version: cfg.Version, Sandbox: cfg.Sandbox, Hostname: host,
+		Version: cfg.Version, Sandbox: cfg.Sandbox, Hostname: host, BootMs: cfg.BootMs,
 	}}}); err != nil {
 		return 1, fmt.Errorf("send hello: %w", err)
 	}

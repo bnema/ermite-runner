@@ -39,6 +39,24 @@ func TestJobRunsAndReports(t *testing.T) {
 	if err := stop(); err != nil {
 		t.Fatal(err)
 	}
+	for _, line := range strings.Split(h.logs.String(), "\n") {
+		var fields map[string]any
+		if json.Unmarshal([]byte(line), &fields) != nil || fields["message"] != "job finished" {
+			continue
+		}
+		for _, key := range []string{"ack_ms", "sandbox_ms", "run_ms", "stop_ms", "complete_ms", "total_ms", "sb_socket_ms", "guest_dockerd_ms"} {
+			value, ok := fields[key].(float64)
+			if !ok || value < 0 {
+				t.Errorf("%s = %v", key, fields[key])
+			}
+		}
+		if fields["total_ms"].(float64) < fields["sandbox_ms"].(float64)+fields["run_ms"].(float64) {
+			t.Error("total shorter than sandbox + run")
+		}
+	}
+	if !strings.Contains(h.logs.String(), `"message":"job finished"`) {
+		t.Fatalf("no job finished log: %s", h.logs.String())
+	}
 	s := h.srv
 	s.mu.Lock()
 	defer s.mu.Unlock()

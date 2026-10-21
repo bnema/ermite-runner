@@ -79,6 +79,7 @@ func execCmd(ctx context.Context) int {
 	}
 	code, err := guest.Exec(ctx, guest.ExecConfig{
 		Target:  target,
+		BootMs:  guest.ParseBootMs(os.Getenv("ERMITE_BOOT_MS")),
 		Sandbox: envOr("ERMITE_SANDBOX", "container"),
 		Version: envOr("ERMITE_VERSION", version),
 		// A test image without the user "runner" (ERMITE_RUNNER_ALLOW_ROOT_STEPS=1);

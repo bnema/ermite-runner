@@ -54,9 +54,23 @@ func (j *jobRun) cacheArchives(ctx context.Context, orig []*ermite.ResolvedActio
 		if !ok {
 			continue
 		}
-		hit, err := rt.Archives.Ensure(ctx, key, func(ctx context.Context, w io.Writer) error {
-			return j.fetchArchive(ctx, a, origin, w)
+		var fetchTime time.Duration
+		var bytes int64
+		hit, verify, err := rt.Archives.Ensure(ctx, key, func(ctx context.Context, w io.Writer) error {
+			start := time.Now()
+			cw := &archiveCountWriter{Writer: w}
+			err := j.fetchArchive(ctx, a, origin, cw)
+			fetchTime += time.Since(start)
+			bytes += cw.n
+			return err
 		})
+		if !hit {
+			j.mu.Lock()
+			j.timeline.add("archive_miss_ms", fetchTime)
+			j.timeline["archive_misses"]++
+			j.timeline["archive_miss_bytes"] += bytes
+			j.mu.Unlock()
+		}
 		log := j.log.With().Str("action", a.NameWithOwner).Str("sha", a.ResolvedSha).Logger()
 		if err != nil {
 			log.Warn().Err(err).Msg("action archive not cached; the sandbox downloads it")
@@ -66,7 +80,11 @@ func (j *jobRun) cacheArchives(ctx context.Context, orig []*ermite.ResolvedActio
 		if u == "" {
 			continue
 		}
-		log.Info().Bool("hit", hit).Msg("action archive cache")
+		event := log.Info().Bool("hit", hit).Int64("verify_ms", verify.Milliseconds())
+		if !hit {
+			event = event.Int64("fetch_ms", fetchTime.Milliseconds()).Int64("bytes", bytes)
+		}
+		event.Msg("action archive cache")
 		c.TarballUrl, c.Token, c.AuthOrigin = u, "", ""
 	}
 }
@@ -101,4 +119,16 @@ func (j *jobRun) fetchArchive(ctx context.Context, a *ermite.ResolvedAction, ori
 		err = errors.New("the archive is larger than 1 GiB")
 	}
 	return err
+}
+
+// archiveCountWriter counts bytes accepted by the cache.
+type archiveCountWriter struct {
+	io.Writer
+	n int64
+}
+
+func (w *archiveCountWriter) Write(p []byte) (int, error) {
+	n, err := w.Writer.Write(p)
+	w.n += int64(n)
+	return n, err
 }

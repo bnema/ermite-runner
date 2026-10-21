@@ -48,6 +48,7 @@ message Hello {
   string version = 1;  // runner version of the executor
   string sandbox = 2;  // "vm" or "container"
   string hostname = 3;
+  map<string, int64> boot_ms = 4;
 }
 
 // Run asks the executor to run a script or a job. Without job it is the stub
