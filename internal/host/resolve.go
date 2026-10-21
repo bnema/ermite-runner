@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"connectrpc.com/connect"
@@ -111,6 +112,13 @@ func badRefRune(r rune) bool {
 // (ActionManager: FailedToResolveActionDownloadInfoException). ctx ends with the
 // session.
 func (j *jobRun) resolveActions(ctx context.Context, req *execpb.ResolveRequest) *execpb.ResolveResponse {
+	start := time.Now()
+	defer func() {
+		j.mu.Lock()
+		defer j.mu.Unlock()
+		j.timeline.addMs("resolve_ms", time.Since(start))
+		j.timeline.add("resolve_calls", 1)
+	}()
 	fail := func(format string, a ...any) *execpb.ResolveResponse {
 		return &execpb.ResolveResponse{Error: fmt.Sprintf(format, a...)}
 	}

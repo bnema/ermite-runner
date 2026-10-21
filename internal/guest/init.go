@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -62,6 +63,10 @@ type InitConfig struct {
 // (`ermite-runner exec`) as a child, reap orphans, stop dockerd, and finish by
 // powering the VM off, or exiting with the executor's code in a container.
 func Init(ctx context.Context, cfg InitConfig) int {
+	entry := time.Now()
+	// bootMs is the boot phase timing handed to the executor (ERMITE_BOOT_MS),
+	// which reports it in its Hello.
+	bootMs := make(map[string]int64)
 	log := zerowrap.FromCtx(ctx)
 	// The kernel starts a VM's init with umask 0, which dockerd, the executor
 	// and every step would inherit: files and t.TempDir() directories would be
@@ -93,13 +98,22 @@ func Init(ctx context.Context, cfg InitConfig) int {
 	mode := string(sandbox.Container)
 	if inVM {
 		mode = string(sandbox.VM)
+		if b, err := os.ReadFile("/proc/uptime"); err == nil {
+			if fields := strings.Fields(string(b)); len(fields) > 0 {
+				if seconds, err := strconv.ParseFloat(fields[0], 64); err == nil && seconds >= 0 {
+					bootMs["kernel"] = max(0, int64(seconds*1000)-time.Since(entry).Milliseconds())
+				}
+			}
+		}
+		start := time.Now()
 		if err := setupVM(log, args); err != nil {
 			log.Error().Err(err).Msg("init: vm setup failed")
 			powerOff()
 			return 1
 		}
+		bootMs["setup"] = time.Since(start).Milliseconds()
 	}
-	code := runPayload(ctx, cfg, mode, args)
+	code := runPayload(ctx, cfg, mode, args, bootMs)
 	if inVM {
 		powerOff()
 	}
@@ -114,7 +128,9 @@ const StepUmask = 0o022
 // with an empty environment.
 const defaultPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
-func runPayload(ctx context.Context, cfg InitConfig, mode string, args map[string]string) int {
+// runPayload starts dockerd and the executor and waits for them. It adds its
+// boot phases to bootMs, which the executor gets.
+func runPayload(ctx context.Context, cfg InitConfig, mode string, args map[string]string, bootMs map[string]int64) int {
 	log := zerowrap.FromCtx(ctx)
 	if os.Getenv("PATH") == "" {
 		_ = os.Setenv("PATH", defaultPath)
@@ -136,23 +152,31 @@ func runPayload(ctx context.Context, cfg InitConfig, mode string, args map[strin
 		return 1
 	}
 
+	var dockerStart time.Time
 	var dockerPid, containerdPid int
 	_, statErr := os.Stat("/usr/bin/dockerd")
 	if !cfg.SkipDocker && (statErr == nil || cfg.DockerdArgs != nil) {
 		_ = os.MkdirAll(sandbox.GuestScratch+"/docker", 0o711)
 		argv := cfg.DockerdArgs
 		if argv == nil {
-			argv = []string{"/usr/bin/dockerd", "--data-root", sandbox.GuestScratch + "/docker",
-				"--storage-driver", "overlay2", "--host", "unix:///var/run/docker.sock"}
+			argv = defaultDockerdArgs()
 			// dockerd sets its umask to 0, and a containerd it starts itself
 			// inherits it, then every `docker exec` (the steps of a job
 			// container): their files would be world-writable. Start containerd
 			// here with our umask instead, as systemd does on GitHub's runners.
-			if pid, ok := startContainerd(ctx, log); ok {
+			start := time.Now()
+			pid, ok := startContainerd(ctx, log)
+			// A containerd that never came up still cost its wait: keep it in the
+			// breakdown. A missing binary returns at once (0 ms) and is omitted.
+			if ms := time.Since(start).Milliseconds(); ok || ms > 0 {
+				bootMs["containerd"] = ms
+			}
+			if ok {
 				containerdPid = pid
 				argv = append(argv, "--containerd", containerdSocket)
 			}
 		}
+		dockerStart = time.Now()
 		pid, err := spawn(argv, nil)
 		if err != nil {
 			log.Error().Err(err).Msg("init: start dockerd")
@@ -186,6 +210,7 @@ func runPayload(ctx context.Context, cfg InitConfig, mode string, args map[strin
 			timeout = dockerReadyTimeout
 		}
 		err := waitDockerReady(ctx, log, sock, dockerPid, timeout, sigs)
+		bootMs["dockerd"] = time.Since(dockerStart).Milliseconds()
 		var exited *dockerdExitError
 		var abort *abortBootError
 		switch {
@@ -198,7 +223,7 @@ func runPayload(ctx context.Context, cfg InitConfig, mode string, args map[strin
 		}
 	}
 
-	execEnv := append(os.Environ(), "ERMITE_CONNECT="+target, "ERMITE_SANDBOX="+mode, "ERMITE_VERSION="+cfg.Version)
+	execEnv := append(os.Environ(), "ERMITE_CONNECT="+target, "ERMITE_SANDBOX="+mode, "ERMITE_VERSION="+cfg.Version, "ERMITE_BOOT_MS="+formatBootMs(bootMs))
 	execPid, err := spawn(cfg.ExecArgs, execEnv)
 	if err != nil {
 		log.Error().Err(err).Msg("init: start executor")

@@ -58,6 +58,17 @@ const (
 	// blocks at once by default, besides downloads and the cache.
 	DefaultConnsPerListener = 32
 	DefaultConns            = 128
+	// DefaultRegistryPerChannel bounds the registry requests of one channel in
+	// progress at once, so that one sandbox's pulls leave room for its cache and
+	// artifact traffic. dockerd pulls 3 layers at once by default.
+	DefaultRegistryPerChannel = 8
+	// RegistryDownloadsPerChannel bounds the cold Docker Hub downloads one
+	// channel may have started at once (dockerd's default
+	// max-concurrent-downloads), so that one sandbox cannot take every slot of
+	// the registry proxy.
+	RegistryDownloadsPerChannel = 3
+	// RegistryPath is the prefix of the Docker registry API on the channel.
+	RegistryPath = "/v2/"
 )
 
 // Config configures a Service.
@@ -78,10 +89,13 @@ type Config struct {
 	// Archives, when not nil, is the host's cache of action archives, served on
 	// the channels (see ArchiveURL).
 	Archives *actionscache.Cache
+	// Registry is an anonymous pull-only registry on the private channel.
+	Registry http.Handler
 	// The limits below take the Default… values (or those of the store) when
 	// zero; tests set them.
 	ProgressTimeout              time.Duration
 	ConnsPerListener, Conns      int
+	RegistryPerChannel           int
 	MinCharge                    int64
 	MaxPending, MaxPendingPerJob int
 	// hookChunk, when set, is called by an upload once its range is admitted and
@@ -102,11 +116,14 @@ type Service struct {
 	wg       sync.WaitGroup
 	closed   bool
 
-	archives    *actionscache.Cache
-	hookChunk   func(id int64)
-	progress    time.Duration
-	perListener int
-	connsGlobal chan struct{}
+	archives *actionscache.Cache
+	registry http.Handler
+	// registryPerChannel caps the registry requests in progress per handler.
+	registryPerChannel int
+	hookChunk          func(id int64)
+	progress           time.Duration
+	perListener        int
+	connsGlobal        chan struct{}
 }
 
 type listener struct {
@@ -144,8 +161,11 @@ func New(cfg Config) (*Service, error) {
 	if cfg.Conns <= 0 {
 		cfg.Conns = DefaultConns
 	}
+	if cfg.RegistryPerChannel <= 0 {
+		cfg.RegistryPerChannel = DefaultRegistryPerChannel
+	}
 	s := &Service{store: st, sign: sg, now: cfg.Now, log: cfg.Log, channels: map[string]*listener{}, stop: make(chan struct{}),
-		archives: cfg.Archives, hookChunk: cfg.hookChunk, progress: cfg.ProgressTimeout, perListener: cfg.ConnsPerListener, connsGlobal: make(chan struct{}, cfg.Conns)}
+		archives: cfg.Archives, registry: cfg.Registry, hookChunk: cfg.hookChunk, progress: cfg.ProgressTimeout, perListener: cfg.ConnsPerListener, connsGlobal: make(chan struct{}, cfg.Conns), registryPerChannel: cfg.RegistryPerChannel}
 	s.wg.Add(1)
 	go s.housekeeping()
 	return s, nil
@@ -168,6 +188,9 @@ func (s *Service) housekeeping() {
 		}
 	}
 }
+
+// RegistryEnabled reports whether the channel serves an anonymous registry.
+func (s *Service) RegistryEnabled() bool { return s.registry != nil }
 
 // Token returns the ACTIONS_RUNTIME_TOKEN of a job. It is valid for ttl, which
 // should be the job timeout plus a margin. sc is the job's cache scope (the
@@ -292,14 +315,17 @@ func (s *Service) CloseAll() error {
 	return s.store.flush()
 }
 
-// ParseMax reads ERMITE_RUNNER_CACHE_MAX: a number of bytes or a size with a K,
-// M, G or T suffix (optionally followed by iB or B). Empty means DefaultMax.
-func ParseMax(v string) (int64, error) {
+// ParseSize reads a size: a number of bytes or a number with a K, M, G or T
+// suffix (powers of 1024), optionally followed by iB or B, such as 10G, 500M
+// or 2GiB. Surrounding spaces are ignored; empty means def. Zero in any unit
+// (0, 0G, 0GiB) is 0. The error names no variable: the caller prefixes it.
+func ParseSize(v string, def int64) (int64, error) {
+	v = strings.TrimSpace(v)
 	if v == "" {
-		return DefaultMax, nil
+		return def, nil
 	}
 	s := []byte(v)
-	for len(s) > 0 && (s[len(s)-1] == 'B' || s[len(s)-1] == 'b' || s[len(s)-1] == 'i') {
+	for len(s) > 0 && strings.IndexByte("bBiI", s[len(s)-1]) >= 0 {
 		s = s[:len(s)-1]
 	}
 	mult := int64(1)
@@ -316,8 +342,8 @@ func ParseMax(v string) (int64, error) {
 		}
 	}
 	n, err := strconv.ParseInt(string(s), 10, 64)
-	if err != nil || n <= 0 || n > (1<<62)/mult {
-		return 0, fmt.Errorf("%s: %q is not a size (examples: 10G, 500M)", EnvMax, v)
+	if err != nil || n < 0 || n > (1<<62)/mult {
+		return 0, fmt.Errorf("%q is not a size (examples: 10G, 500M)", v)
 	}
 	return n * mult, nil
 }

@@ -351,6 +351,7 @@ type fakeDriver struct {
 	blockStart chan struct{}     // when set, Start waits on it
 	specs      []sandbox.JobSpec // what each Start was asked for
 	iso        sandbox.Isolation
+	bootMs     map[string]int64 // the guest's Hello.boot_ms; nil: dockerd=2
 }
 
 func (d *fakeDriver) Mode() sandbox.Mode           { return sandbox.Container }
@@ -380,7 +381,8 @@ type fakeSandbox struct {
 	stoped bool
 }
 
-func (s *fakeSandbox) ID() string { return "er00000000" }
+func (s *fakeSandbox) ID() string                     { return "er00000000" }
+func (s *fakeSandbox) StartTimings() map[string]int64 { return map[string]int64{"socket_ms": 1} }
 func (s *fakeSandbox) Start(ctx context.Context, spec sandbox.JobSpec) (sandbox.Conn, error) {
 	d := s.d
 	d.mu.Lock()
@@ -401,6 +403,10 @@ func (s *fakeSandbox) Start(ctx context.Context, spec sandbox.JobSpec) (sandbox.
 	}
 	d.started++
 	sc := d.script
+	bootMs := d.bootMs
+	if bootMs == nil {
+		bootMs = map[string]int64{"dockerd": 2}
+	}
 	d.mu.Unlock()
 	host, guest := net.Pipe()
 	s.mu.Lock()
@@ -409,7 +415,7 @@ func (s *fakeSandbox) Start(ctx context.Context, spec sandbox.JobSpec) (sandbox.
 	go func() {
 		defer func() { _ = guest.Close() }()
 		c := execstream.NewConn(guest)
-		_ = c.Send(&execpb.Frame{Body: &execpb.Frame_Hello{Hello: &execpb.Hello{Version: "test", Sandbox: "container"}}})
+		_ = c.Send(&execpb.Frame{Body: &execpb.Frame_Hello{Hello: &execpb.Hello{Version: "test", Sandbox: "container", BootMs: bootMs}}})
 		// NamedValue frames (secrets, variables) come before Run.
 		vals := &seenValues{secrets: map[string]string{}, vars: map[string]string{}}
 		var f *execpb.Frame

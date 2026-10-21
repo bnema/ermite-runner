@@ -3,7 +3,10 @@
 package host
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -58,7 +61,7 @@ func newArchiveRig(t *testing.T) *archiveRig {
 func (a *archiveRig) job(id string) *jobRun {
 	j := &jobRun{r: a.r, log: zerowrap.Logger{}, ctx: context.Background(),
 		job:      &ermite.Job{JobId: id, Ref: "refs/heads/main"},
-		contexts: `{"github":{"repository":"o/r"}}`}
+		contexts: `{"github":{"repository":"o/r"}}`, timeline: timeline{}}
 	return j
 }
 
@@ -128,7 +131,7 @@ func TestCacheArchivesFallsBack(t *testing.T) {
 		}
 	}
 
-	// No cache channel for the job (no repository): the guest has no relay.
+	// No cache scope for the job (no repository): archives are not served.
 	o, c = a.action(strings.Repeat("d", 40))
 	j := a.job("j")
 	j.contexts = `{}`
@@ -143,5 +146,83 @@ func TestCacheArchivesFallsBack(t *testing.T) {
 	a.job("j").cacheArchives(context.Background(), []*ermite.ResolvedAction{o}, []*execpb.ResolvedAction{c})
 	if c.Token != "t" {
 		t.Errorf("cache off: %+v", c)
+	}
+}
+
+func TestArchiveTimingLogs(t *testing.T) {
+	a := newArchiveRig(t)
+	var logs bytes.Buffer
+	j := a.job("timing")
+	j.log = zerowrap.New(zerowrap.Config{Level: "info", Format: "json", Output: &logs})
+	for i := 0; i < 2; i++ {
+		logs.Reset()
+		o, c := a.action(strings.Repeat("a", 40))
+		j.cacheArchives(context.Background(), []*ermite.ResolvedAction{o}, []*execpb.ResolvedAction{c})
+		var fields map[string]any
+		if err := json.Unmarshal(logs.Bytes(), &fields); err != nil {
+			t.Fatal(err, logs.String())
+		}
+		if value, ok := fields["verify_ms"].(float64); !ok || value < 0 {
+			t.Fatal(fields)
+		}
+		if fields["hit"] != (i == 1) {
+			t.Fatal(fields)
+		}
+		if i == 0 {
+			if value, ok := fields["fetch_ms"].(float64); !ok || value < 0 {
+				t.Fatal(fields)
+			}
+			if value, ok := fields["bytes"].(float64); !ok || value <= 0 {
+				t.Fatal(fields)
+			}
+		} else if _, ok := fields["fetch_ms"]; ok {
+			t.Fatal("hit has fetch_ms", fields)
+		}
+	}
+	if j.timeline["archive_misses"] != 1 || j.timeline["archive_miss_bytes"] <= 0 {
+		t.Fatal(j.timeline)
+	}
+}
+
+// Only a download the job ran itself is a miss: a failed one counts, a job
+// whose wait for another job's download is cancelled does not.
+func TestArchiveMissesCountFetches(t *testing.T) {
+	a := newArchiveRig(t)
+	a.status.Store(http.StatusTooManyRequests)
+	failed := a.job("failed")
+	o, c := a.action(strings.Repeat("a", 40))
+	failed.cacheArchives(context.Background(), []*ermite.ResolvedAction{o}, []*execpb.ResolvedAction{c})
+	if failed.timeline["archive_misses"] != 1 {
+		t.Fatalf("failed fetch: %v", failed.timeline)
+	}
+
+	a.status.Store(http.StatusOK)
+	// A joiner whose wait is cancelled while another job downloads.
+	release := make(chan struct{})
+	started, done := make(chan struct{}), make(chan struct{})
+	sha := strings.Repeat("b", 40)
+	key, ok := actionscache.Key(originOf(a.srv.URL), "x/y", sha)
+	if !ok {
+		t.Fatal("key")
+	}
+	go func() {
+		defer close(done)
+		_, _, _ = a.r.Archives.Ensure(context.Background(), key, func(_ context.Context, w io.Writer) error {
+			close(started)
+			<-release
+			_, err := io.WriteString(w, "tarball")
+			return err
+		})
+	}()
+	<-started
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	joiner := a.job("joiner")
+	o, c = a.action(sha)
+	joiner.cacheArchives(ctx, []*ermite.ResolvedAction{o}, []*execpb.ResolvedAction{c})
+	close(release)
+	<-done // the download writes under t.TempDir: let it finish before cleanup
+	if _, ok := joiner.timeline["archive_misses"]; ok {
+		t.Fatalf("cancelled joiner: %v", joiner.timeline)
 	}
 }

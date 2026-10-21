@@ -78,6 +78,10 @@ RUN useradd --create-home --uid 1001 --shell /bin/bash runner \
 ENV RUNNER_TOOL_CACHE=/opt/hostedtoolcache \
     LANG=C.UTF-8
 
+COPY toolcache.lock install-toolcache.sh /tmp/toolcache/
+RUN sh /tmp/toolcache/install-toolcache.sh /tmp/toolcache/toolcache.lock \
+ && rm -rf /tmp/toolcache
+
 # The runner executable is bind-mounted (container) or provided by the init
 # disk (vm) here; its init subcommand starts the job's own Docker daemon.
 ENTRYPOINT ["/opt/ermite/ermite-runner", "init"]

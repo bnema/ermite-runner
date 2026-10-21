@@ -228,6 +228,16 @@ func TestStartRunStop(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	timings := sb.(sandbox.Timed).StartTimings()
+	for _, key := range []string{"tap_ms", "net_ms", "vmm_ms", "files_ms", "scratch_ms", "vsock_ms", "configure_ms", "connect_ms"} {
+		if value, ok := timings[key]; !ok || value < 0 {
+			t.Errorf("%s = %d, present=%v", key, value, ok)
+		}
+	}
+	timings["tap_ms"] = -1
+	if sb.(sandbox.Timed).StartTimings()["tap_ms"] < 0 {
+		t.Error("shared timing map")
+	}
 	out, code := runStub(t, conn)
 	if out != "hello from fake guest\n" || code != 0 {
 		t.Fatalf("out=%q code=%d", out, code)

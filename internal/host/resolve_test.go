@@ -48,7 +48,7 @@ func (c *resolveStub) ResolveActions(_ context.Context, r *connect.Request[ermit
 }
 
 func resolveJob(c jobClient) *jobRun {
-	j := &jobRun{client: c, ctx: context.Background(), job: &ermite.Job{JobId: "j1"}, log: zerowrap.Logger{},
+	j := &jobRun{client: c, ctx: context.Background(), job: &ermite.Job{JobId: "j1"}, log: zerowrap.Logger{}, timeline: timeline{},
 		t: Timing{CallTimeout: time.Second, BackoffMin: time.Millisecond, BackoffMax: time.Millisecond}}
 	j.setOrigins(`{"github":{"server_url":"https://ermite.example"}}`, "https://ermite.example", "")
 	return j

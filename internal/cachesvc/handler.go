@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"bnema.dev/ermite-runner/internal/registryproxy"
 )
 
 // APIPath is the prefix of the cache API: the toolkit appends "_apis/
@@ -45,6 +47,11 @@ func (s *Service) Handler() http.Handler { return s.handler("") }
 // any other sandbox's channel.
 func (s *Service) handler(job string) http.Handler {
 	mux := http.NewServeMux()
+	if s.registry != nil {
+		registry := s.serveRegistry(job, make(chan struct{}, s.registryPerChannel), registryproxy.NewQuota(RegistryDownloadsPerChannel))
+		mux.HandleFunc("GET "+RegistryPath, registry)
+		mux.HandleFunc("HEAD "+RegistryPath, registry)
+	}
 	// The routes are those of the toolkit's v1 client (cacheHttpClient.ts):
 	//   GET   cache?keys=k1,k2&version=v  :89  lookup
 	//   GET   caches?key=k                :132 diagnostics (core.isDebug())
@@ -73,8 +80,8 @@ func (s *Service) handler(job string) http.Handler {
 	})
 }
 
-// channelHandler is the handler of a sandbox's channel: the cache API and the
-// action archives, and when results is not nil everything else goes to it (the results service of the
+// channelHandler is the handler of a sandbox's channel: the cache API, the
+// action archives and the registry, and when results is not nil everything else goes to it (the results service of the
 // job: Twirp and blob paths). The results service gets the same progress
 // deadlines as the cache: its bodies and replies must keep moving.
 func (s *Service) channelHandler(job string, results http.Handler) http.Handler {
@@ -83,7 +90,7 @@ func (s *Service) channelHandler(job string, results http.Handler) http.Handler 
 		return cache
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, APIPath) || strings.HasPrefix(r.URL.Path, ArchivePath) {
+		if strings.HasPrefix(r.URL.Path, APIPath) || strings.HasPrefix(r.URL.Path, ArchivePath) || strings.HasPrefix(r.URL.Path, RegistryPath) {
 			cache.ServeHTTP(w, r)
 			return
 		}
@@ -387,6 +394,47 @@ func (p *progressWriter) Write(b []byte) (int, error) {
 
 // Unwrap lets http.ResponseController reach the real writer.
 func (p *progressWriter) Unwrap() http.ResponseWriter { return p.ResponseWriter }
+
+var _ registryproxy.KeepAliver = (*progressWriter)(nil)
+
+// KeepAlive moves the deadlines without writing. The registry proxy calls it
+// while the client waits for a shared upstream download that is progressing,
+// before the first byte of the reply. The read deadline moves too: once it
+// passes, net/http cancels the request's context and the wait would end.
+func (p *progressWriter) KeepAlive() {
+	d := deadline(p.idle, p.remaining)
+	_ = p.rc.SetReadDeadline(d)
+	_ = p.rc.SetWriteDeadline(d)
+}
+
+// serveRegistry serves the Docker Hub mirror with the same sliding progress
+// deadline as the other downloads: a layer of GiB keeps going as long as it
+// moves, and a client that stops reading is cut after one progress period.
+// slots caps the requests of this channel in progress at once; one over the
+// cap gets 503 at once, which dockerd retries or answers by pulling from
+// Docker Hub, so the channel's connections stay free for the cache. quota is
+// the channel's share of the proxy's cold downloads. job, when not empty, is
+// the channel's job, which the registry logs.
+func (s *Service) serveRegistry(job string, slots chan struct{}, quota *registryproxy.Quota) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case slots <- struct{}{}:
+			defer func() { <-slots }()
+		default:
+			w.Header().Set("Retry-After", "1")
+			reply(w, http.StatusServiceUnavailable, "registry busy")
+			return
+		}
+		rc := http.NewResponseController(w)
+		defer func() { _ = rc.SetWriteDeadline(deadline(s.progress, nil)) }()
+		ctx := registryproxy.WithQuota(r.Context(), quota)
+		if job != "" {
+			ctx = registryproxy.WithJob(ctx, job)
+		}
+		r = r.WithContext(ctx)
+		s.registry.ServeHTTP(&progressWriter{ResponseWriter: w, rc: rc, idle: s.progress}, r)
+	}
+}
 
 func (s *Service) commit(w http.ResponseWriter, r *http.Request, c Claims) {
 	id, ok := parseID(r)

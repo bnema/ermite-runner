@@ -23,6 +23,7 @@ They are opt-in. They run the real stub executor. Output and exit codes come bac
 | `ERMITE_RUNNER_IT_E2E=1` | End-to-end job tests in `internal/e2e` |
 | `ERMITE_RUNNER_IT_NET=1` | Packet-level firewall test |
 | `ERMITE_RUNNER_IT_DOCKER_API=1` | Docker Engine calls against any daemon, including rootless |
+| `ERMITE_RUNNER_IT_REGISTRY=1` | Live Docker Hub pulls through the registry proxy with `curl` (`TestDockerHubCurl`). Needs internet access |
 | `ERMITE_RUNNER_IT_NODE_DIR` | Directory with `node-v24.21.0-linux-x64.tar.gz`, for offline hosts |
 | `ERMITE_RUNNER_TEST_IMAGE` | Image used by the container and end-to-end tests |
 
@@ -63,3 +64,28 @@ ERMITE_RUNNER_IT_E2E=1 ERMITE_RUNNER_TEST_IMAGE=ermite-runner-ubuntu-26.04:dev G
 - **Docker API.** Production `container` mode supports Docker Engine and sysbox. Podman's compatibility API is not a drop-in: it cannot disable DNS on the network that the runner creates.
 - **Jailer.** The jailer needs `--chroot-base-dir` to exist. The driver creates `<state dir>/jail`. It leaves `<state dir>/jail/<exec name>` and `/sys/fs/cgroup/firecracker` behind.
 - **Host firewalls.** A firewall that rejects `53` on `ertap*` or `erbr*` breaks guest DNS. The symptom is `dns silent` in `TestVMNetworkPolicy`.
+
+## Measuring start-up on a small host
+
+Build and register the [runner container](container.md) as usual, then constrain
+its CPU budget to reproduce a small host without changing the boot sequence:
+
+```sh
+docker run -d --name runner-timing --cpus=1 \
+  --device /dev/kvm --device /dev/net/tun --cap-add NET_ADMIN \
+  -v runner-timing-state:/var/lib/ermite-runner \
+  --env-file runner.env -e ERMITE_RUNNER_LOG_FORMAT=json ermite-runner:<tag>
+```
+
+Use a registered state volume or supply the registration settings in
+`runner.env`; never put tokens in shared shell history. Podman accepts the same
+CPU limit (device access may need the CDI setup described in the container
+guide). Submit representative jobs, then extract completed-job measurements:
+
+```sh
+docker logs runner-timing 2>&1 | jq 'select(.message=="job finished")'
+```
+
+Compare `sandbox_ms`, the `sb_*` stages and `guest_*` boot stages across jobs.
+`run_ms` includes action downloads and step execution; archive misses have their
+own counters. See [Job timing](service.md#job-timing) for the full field table.

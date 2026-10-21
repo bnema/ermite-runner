@@ -62,6 +62,8 @@ type jobRun struct {
 
 	mu    sync.Mutex
 	steps map[int32]*ermite.StepUpdate
+	// timeline is the job's phase timing, guarded by mu.
+	timeline timeline
 	// What the guest has told us, for the validation of the next frame: the
 	// guest is untrusted code, its step numbers and lines are checked before
 	// they reach the server (see violate).
@@ -494,6 +496,7 @@ func (j *jobRun) acknowledge(ctx context.Context, shutdown <-chan struct{}) bool
 		}
 	}()
 	if j.ack(ackCtx) {
+		j.timeSet("ack_ms", time.Since(j.receivedAt))
 		return true
 	}
 	select {
@@ -627,7 +630,16 @@ func (j *jobRun) execute(ctx context.Context, rt *Runner, stopHard <-chan struct
 	j.features = j.loadFeatures(ctx, rt)
 	j.results = j.resultsOn(rt)
 
+	start := time.Now()
 	conn, err := j.startSandbox(ctx, rt, sb, stopHard)
+	j.timeSet("sandbox_ms", time.Since(start))
+	if timed, ok := sb.(sandbox.Timed); ok && err == nil {
+		j.mu.Lock()
+		for k, v := range timed.StartTimings() {
+			j.timeline["sb_"+k] = max(0, v)
+		}
+		j.mu.Unlock()
+	}
 	if err != nil {
 		if ctx.Err() != nil || j.cancelRequested() {
 			return outcome{conclusion: ermite.CiConclusion_CI_CONCLUSION_CANCELLED, shutdown: j.isStopping()}
@@ -651,7 +663,9 @@ func (j *jobRun) execute(ctx context.Context, rt *Runner, stopHard <-chan struct
 		}
 	}()
 
+	start = time.Now()
 	exit, err := j.drive(conn, rt)
+	j.timeSet("run_ms", time.Since(start))
 	return j.outcomeOf(ctx, exit, err)
 }
 
@@ -660,6 +674,8 @@ func (j *jobRun) execute(ctx context.Context, rt *Runner, stopHard <-chan struct
 func (j *jobRun) stopSandbox(ctx context.Context, rt *Runner, sb sandbox.Sandbox) {
 	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), j.t.StopDeadline)
 	defer cancel()
+	start := time.Now()
+	defer func() { j.timeSet("stop_ms", time.Since(start)) }()
 	if err := sb.Stop(sctx); err != nil {
 		j.log.Error().Err(err).Msg("stopping the sandbox")
 		if errors.Is(err, sandbox.ErrLeaked) {
@@ -706,6 +722,11 @@ func (j *jobRun) drive(conn sandbox.Conn, rt *Runner) (*execpb.Exit, error) {
 	}
 	run.Job.CachePort, run.Job.CacheToken, run.Job.CacheMode, run.Job.Results = j.runtimeFor(rt)
 	_, exit, err := execstream.DriveJob(conn, run, j.cancelCh, execstream.JobHandler{
+		Hello: func(h *execpb.Hello) {
+			j.mu.Lock()
+			defer j.mu.Unlock()
+			j.timeline.addGuestBoot(h.GetBootMs())
+		},
 		StepStarted: j.stepStarted, StepCompleted: j.stepCompleted,
 		Log:             j.logLine,
 		JobResult:       func(r *execpb.JobResult) { j.mu.Lock(); j.result = r; j.mu.Unlock() },
@@ -818,6 +839,8 @@ func (j *jobRun) sandboxError(msg string) {
 // complete reports the end of the job. CompleteJob is idempotent, so a lost
 // response is retried until it is answered (applied or not).
 func (j *jobRun) complete(ctx context.Context, conclusion ermite.CiConclusion, outputs map[string]string, shutdown bool) {
+	start := time.Now()
+	defer func() { j.timeSet("complete_ms", time.Since(start)) }()
 	req := &ermite.CompleteJobRequest{
 		JobId: j.job.JobId, Conclusion: conclusion, Outputs: outputs,
 		RunnerShutdown: shutdown && conclusion == ermite.CiConclusion_CI_CONCLUSION_CANCELLED,

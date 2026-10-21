@@ -121,11 +121,11 @@ func TestStartCacheRelay(t *testing.T) {
 	}
 }
 
-// No cache service, no relay and no variables; a port that is taken leaves the
-// job without a cache instead of failing it.
+// No port, no relay and no variables; a port that is taken leaves the job
+// without a cache instead of failing it.
 func TestStartCacheRelayWithoutServiceOrPort(t *testing.T) {
 	target := Target{Network: "unix", Addr: filepath.Join(t.TempDir(), "exec.sock")}
-	for _, spec := range []*execpb.JobSpec{{}, {CachePort: 9089}, {CacheToken: "tok"}} {
+	for _, spec := range []*execpb.JobSpec{{}, {CacheToken: "tok"}, {CacheToken: "tok", CacheMode: "write"}} {
 		if got := startCacheRelay(context.Background(), target, spec, noBridge); got != (cacheRelay{}) {
 			t.Errorf("%+v: relay %+v", spec, got)
 		}

@@ -74,9 +74,10 @@ The token has the scope `runner:register`. It can read the code and the secrets 
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `ERMITE_RUNNER_CACHE` | `1` | `0` turns the Actions cache off. See [cache and artifacts](cache-and-artifacts.md) |
+| `ERMITE_RUNNER_CACHE` | `1` | `0` turns the cache channel off, including the Actions cache and Docker Hub proxy. See [cache and artifacts](cache-and-artifacts.md) |
 | `ERMITE_RUNNER_CACHE_MAX` | `10G` | Size cap of the cache. Least recently used entries are evicted |
 | `ERMITE_RUNNER_ACTIONS_CACHE_MAX` | `2G` | Size cap of the action archive cache. `0` turns it off |
+| `ERMITE_RUNNER_REGISTRY_CACHE_MAX` | `10G` | Docker Hub blob and manifest cache cap, independent of `ERMITE_RUNNER_CACHE_MAX`. A zero size (`0`, `0M`, `0G`) turns only the proxy off; `ERMITE_RUNNER_CACHE=0` also disables it |
 | `ERMITE_RUNNER_ARTIFACTS` | `1` | `0` turns artifacts v4 off. Artifacts need the cache service |
 | `ERMITE_RUNNER_NODE` | `1` | `0` turns the Node.js externals off. See [externals](externals.md) |
 | `ERMITE_RUNNER_GUEST_FORGE` | `0` | `1` lets sandboxes reach the server host and port. Read the security notes first. See [sandboxes](sandboxes.md#guest-forge-access) |

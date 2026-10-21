@@ -22,6 +22,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"net/netip"
 	"os"
@@ -285,10 +286,11 @@ const (
 )
 
 type containerSandbox struct {
-	d    *Driver
-	slot int
-	id   string
-	gate sandbox.BootGate
+	d       *Driver
+	slot    int
+	id      string
+	gate    sandbox.BootGate
+	timings map[string]int64
 
 	mu        sync.Mutex
 	started   bool
@@ -304,6 +306,10 @@ type containerSandbox struct {
 	gateway   netip.Addr
 	attached  bool
 }
+
+// StartTimings returns a copy of the phase durations of a successful Start.
+// It is valid once Start has returned, which writes them.
+func (s *containerSandbox) StartTimings() map[string]int64 { return maps.Clone(s.timings) }
 
 // ID implements sandbox.Sandbox.
 func (s *containerSandbox) ID() string { return s.id }
@@ -334,8 +340,11 @@ func (s *containerSandbox) Start(ctx context.Context, spec sandbox.JobSpec) (san
 	if d.cfg.GuestForge != nil {
 		log.Warn().Str("job", spec.JobID).Str("container", s.id).Msg(d.cfg.GuestForge.Warning())
 	}
+	start := time.Now()
+	s.timings = make(map[string]int64)
 	conn, err := s.run(bootCtx, spec)
 	if err != nil {
+		s.timings = nil
 		var tail string
 		if s.container != "" {
 			tail, _ = d.eng.LogsTail(context.WithoutCancel(ctx), s.container, 40)
@@ -346,7 +355,11 @@ func (s *containerSandbox) Start(ctx context.Context, spec sandbox.JobSpec) (san
 		}
 		return nil, errors.Join(err, cerr)
 	}
-	log.Info().Str("container", s.container).Int("slot", s.slot).Str("job", spec.JobID).Bool("privileged", d.privileged).Msg("container running")
+	fields := map[string]any{"total_ms": time.Since(start).Milliseconds()}
+	for k, v := range s.timings {
+		fields[k] = v
+	}
+	log.Info().Str("container", s.container).Int("slot", s.slot).Str("job", spec.JobID).Bool("privileged", d.privileged).Fields(fields).Msg("container running")
 	return conn, nil
 }
 
@@ -356,25 +369,40 @@ func (s *containerSandbox) run(ctx context.Context, spec sandbox.JobSpec) (sandb
 	if err != nil {
 		return nil, err
 	}
+	start := time.Now()
 	accepted, err := s.runSocket()
 	if err != nil {
 		return nil, err
 	}
+	s.timings["socket_ms"] = time.Since(start).Milliseconds()
+	start = time.Now()
 	if err := s.runCache(spec); err != nil {
 		return nil, err
 	}
+	s.timings["cache_ms"] = time.Since(start).Milliseconds()
+	start = time.Now()
 	if err := s.runScratch(ctx, spec); err != nil {
 		return nil, err
 	}
 	labels := map[string]string{sandbox.LabelJob: spec.JobID}
+	s.timings["scratch_ms"] = time.Since(start).Milliseconds()
+	start = time.Now()
 	if err := s.runNetwork(ctx, netw, labels); err != nil {
 		return nil, err
 	}
+	s.timings["net_ms"] = time.Since(start).Milliseconds()
+	start = time.Now()
 	exited, err := s.runContainer(ctx, spec, netw, labels)
 	if err != nil {
 		return nil, err
 	}
-	return s.waitExecutor(ctx, accepted, exited)
+	s.timings["container_ms"] = time.Since(start).Milliseconds()
+	start = time.Now()
+	conn, err := s.waitExecutor(ctx, accepted, exited)
+	if err == nil {
+		s.timings["connect_ms"] = time.Since(start).Milliseconds()
+	}
+	return conn, err
 }
 
 type acceptResult struct {

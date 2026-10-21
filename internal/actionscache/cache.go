@@ -184,14 +184,16 @@ type Fetch func(ctx context.Context, w io.Writer) error
 // download it when it does not (a miss: hit is false). Concurrent calls for the
 // same key share one download; the others report a hit once it is in place. The
 // entry is pinned for PinFor.
-func (c *Cache) Ensure(ctx context.Context, key string, fetch Fetch) (hit bool, err error) {
+func (c *Cache) Ensure(ctx context.Context, key string, fetch Fetch) (hit bool, verify time.Duration, err error) {
 	if !validKey(key) {
-		return false, ErrNotFound
+		return false, verify, ErrNotFound
 	}
 	for {
-		if c.verify(key) == nil {
+		duration, err := c.verify(key)
+		verify += duration
+		if err == nil {
 			c.touch(key, true)
-			return true, nil
+			return true, verify, nil
 		}
 		c.mu.Lock()
 		if f, ok := c.flights[key]; ok {
@@ -199,10 +201,10 @@ func (c *Cache) Ensure(ctx context.Context, key string, fetch Fetch) (hit bool, 
 			select {
 			case <-f.done:
 			case <-ctx.Done():
-				return false, ctx.Err()
+				return false, verify, ctx.Err()
 			}
 			if f.err != nil {
-				return false, f.err
+				return false, verify, f.err
 			}
 			continue
 		}
@@ -215,10 +217,10 @@ func (c *Cache) Ensure(ctx context.Context, key string, fetch Fetch) (hit bool, 
 		c.mu.Unlock()
 		close(f.done)
 		if f.err != nil {
-			return false, f.err
+			return false, verify, f.err
 		}
 		c.touch(key, true)
-		return false, nil
+		return false, verify, nil
 	}
 }
 
@@ -314,11 +316,12 @@ func (w *countWriter) Write(p []byte) (int, error) {
 
 // verify re-hashes the archive of key against its sum. Any mismatch (or a
 // missing file) drops the entry and returns ErrNotFound.
-func (c *Cache) verify(key string) error {
+func (c *Cache) verify(key string) (time.Duration, error) {
+	start := time.Now()
 	sb, err := os.ReadFile(c.sumPath(key))
 	if err != nil {
 		c.drop(key)
-		return ErrNotFound
+		return time.Since(start), ErrNotFound
 	}
 	want, sizeS, _ := strings.Cut(strings.TrimSpace(string(sb)), " ")
 	size, perr := strconv.ParseInt(sizeS, 10, 64)
@@ -328,7 +331,7 @@ func (c *Cache) verify(key string) error {
 			_ = f.Close()
 		}
 		c.drop(key)
-		return ErrNotFound
+		return time.Since(start), ErrNotFound
 	}
 	defer func() { _ = f.Close() }()
 	h := sha256.New()
@@ -336,9 +339,9 @@ func (c *Cache) verify(key string) error {
 	if err != nil || n != size || hex.EncodeToString(h.Sum(nil)) != want {
 		c.log.Warn().Str("key", key).Msg("action archive failed its integrity check; dropped")
 		c.drop(key)
-		return ErrNotFound
+		return time.Since(start), ErrNotFound
 	}
-	return nil
+	return time.Since(start), nil
 }
 
 func (c *Cache) drop(key string) {
@@ -396,7 +399,7 @@ func (c *Cache) Open(key string) (*os.File, error) {
 	if !validKey(key) {
 		return nil, ErrNotFound
 	}
-	if err := c.verify(key); err != nil {
+	if _, err := c.verify(key); err != nil {
 		return nil, err
 	}
 	f, err := os.Open(c.archivePath(key))
@@ -413,35 +416,6 @@ func (c *Cache) Size() int64 {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.total
-}
-
-// ParseMax reads ERMITE_RUNNER_ACTIONS_CACHE_MAX: empty is DefaultMax, 0 is off
-// (returned as 0), otherwise a number of bytes or a size with a K, M, G or T
-// suffix (optionally followed by iB or B).
-func ParseMax(v string) (int64, error) {
-	v = strings.TrimSpace(v)
-	if v == "" {
-		return DefaultMax, nil
-	}
-	s := strings.TrimRight(strings.ToUpper(v), "IB")
-	mult := int64(1)
-	if n := len(s); n > 0 {
-		switch s[n-1] {
-		case 'K':
-			mult, s = 1<<10, s[:n-1]
-		case 'M':
-			mult, s = 1<<20, s[:n-1]
-		case 'G':
-			mult, s = 1<<30, s[:n-1]
-		case 'T':
-			mult, s = 1<<40, s[:n-1]
-		}
-	}
-	n, err := strconv.ParseInt(s, 10, 64)
-	if err != nil || n < 0 || n > (1<<62)/mult {
-		return 0, fmt.Errorf("%s: %q is not a size (examples: 2G, 500M, 0)", EnvMax, v)
-	}
-	return n * mult, nil
 }
 
 // Dir is the directory of the cache (tests).

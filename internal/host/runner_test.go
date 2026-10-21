@@ -39,6 +39,18 @@ func TestJobRunsAndReports(t *testing.T) {
 	if err := stop(); err != nil {
 		t.Fatal(err)
 	}
+	fields := jobFinished(t, h.logs.String())
+	ms := map[string]float64{}
+	for _, key := range []string{"ack_ms", "sandbox_ms", "run_ms", "stop_ms", "complete_ms", "total_ms", "sb_socket_ms", "guest_dockerd_ms"} {
+		value, ok := fields[key].(float64)
+		if !ok || value < 0 {
+			t.Errorf("%s = %v", key, fields[key])
+		}
+		ms[key] = value
+	}
+	if ms["total_ms"] < ms["sandbox_ms"]+ms["run_ms"] {
+		t.Error("total shorter than sandbox + run")
+	}
 	s := h.srv
 	s.mu.Lock()
 	defer s.mu.Unlock()

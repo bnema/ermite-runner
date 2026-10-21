@@ -1,6 +1,6 @@
 # Cache and artifacts
 
-The runner serves the GitHub Actions cache and artifacts v4 to jobs. Both use one channel per sandbox.
+The runner serves the GitHub Actions cache, artifacts v4 and a Docker Hub mirror to jobs. All three use one channel per sandbox.
 
 ## Channel
 
@@ -79,3 +79,58 @@ Works with `actions/cache`, `setup-go` and `setup-node` with `cache:`, and anyth
 - Artifacts v3.
 - The `artifact-url` output. It points at the fake host. The run page in ermite lists the artifacts.
 - Downloads from another run (`run-id` with `github-token`).
+
+## Docker Hub images
+
+The runner provides an anonymous, pull-only Docker Hub mirror on the same private
+channel. Each job's dockerd uses `http://127.0.0.1:9089` as a registry mirror.
+Other registries are not cached. There is no HTTPS interception, and the mirror
+needs no network policy rule. Guest credentials are never forwarded upstream. Private pulls
+fall back to Docker Hub directly, where dockerd can use the job's credentials.
+
+Verified sha256 blobs and manifests live under `<state dir>/registry/`. Tags are
+revalidated by an upstream HEAD on each request, with the client's Accept headers
+reduced to the known manifest media types. If Docker Hub is unreachable, times
+out, returns a server error or rate-limits (429), a previously cached tag can be
+served stale while its manifest remains stored. Unknown tags return an error so
+dockerd can fall back.
+
+A cold blob is downloaded once, whoever asks for it, and is not tied to any one
+client: every client waits for the digest check and then reads the stored file.
+A corrupt download returns 502 and leaves no file. A client that disconnects
+does not stop the download while another client waits for it; once no client
+has waited for 5 s, the download is cancelled and its temporary file removed.
+Each job may have started at most 3 cold blob downloads at once (dockerd's
+default concurrency), and at most 16 run at once across all jobs. A download
+counts against the job that started it until it ends; a job that asks for a
+layer another job is already downloading waits for it and uses none of its
+quota. A request over either limit waits up to 30 s for a slot, its connection
+kept alive, and then gets 503. A refused layer makes dockerd retry for about
+50 s before it pulls that layer from Docker Hub directly. Each sandbox may also
+have at most 8 registry requests in progress; one more gets 503 at once.
+
+Downloads have no total time limit, but they fail after 30 s without progress.
+Auth, manifest and HEAD requests are limited to 10 s. Auth and manifest requests
+never follow redirects; blob requests, HEAD included, follow the CDN redirect
+without the bearer token. Stored blobs support range requests. Cold blob HEAD
+requests fetch only upstream metadata, not the layer body.
+
+`ERMITE_RUNNER_REGISTRY_CACHE_MAX` defaults to `10G`. Blobs, manifests and tag
+files share one least-recently-used eviction; each is charged at least 4 KiB, so
+the number of files stays below the cap divided by 4 KiB. An entry that is being served is
+never evicted. This cap is independent of
+`ERMITE_RUNNER_CACHE_MAX`. A zero size in any unit (`0`, `0M`, `0G`) disables only
+the proxy. `ERMITE_RUNNER_CACHE=0` disables the whole channel and therefore also
+the proxy (logged at startup). Dockerd retains its mirror setting and falls back
+to Docker Hub if the mirror is unavailable. To clear the cache, stop the runner
+and remove `<state dir>/registry/`.
+
+Jobs with neither cache permissions nor artifacts get the loopback channel for
+dockerd when the proxy is on, but no `ACTIONS_CACHE_URL`, `ACTIONS_RESULTS_URL`, or
+`ACTIONS_RUNTIME_TOKEN` is exposed to their steps. Registry routes need no token:
+only public content is served over a channel exclusive to that sandbox.
+
+The host logs one `registry manifest` line per request with `job_id`, `repo`,
+`ref`, `hit` and `ms`. Blob misses log `registry blob` at debug level with
+`job_id`, `digest`, `bytes` and `ms`; `job_id` is the job that started the
+download.

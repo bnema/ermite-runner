@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"net"
 	"net/netip"
 	"os"
@@ -232,10 +233,11 @@ func (d *Driver) markLeaked(slot int) {
 
 // vmSandbox is one VM, single use.
 type vmSandbox struct {
-	d    *Driver
-	slot int
-	id   string
-	gate sandbox.BootGate
+	d       *Driver
+	slot    int
+	id      string
+	gate    sandbox.BootGate
+	timings map[string]int64
 
 	mu      sync.Mutex
 	started bool
@@ -256,6 +258,10 @@ type vmSandbox struct {
 	gateway  netip.Addr
 	attached bool
 }
+
+// StartTimings returns a copy of the phase durations of a successful Start.
+// It is valid once Start has returned, which writes them.
+func (s *vmSandbox) StartTimings() map[string]int64 { return maps.Clone(s.timings) }
 
 // ID implements sandbox.Sandbox.
 func (s *vmSandbox) ID() string { return s.id }
@@ -299,8 +305,11 @@ func (s *vmSandbox) Start(ctx context.Context, spec sandbox.JobSpec) (sandbox.Co
 		return nil, fmt.Errorf("write state record: %w", err)
 	}
 
+	start := time.Now()
+	s.timings = make(map[string]int64)
 	conn, err := s.boot(bootCtx, spec)
 	if err != nil {
+		s.timings = nil
 		console := ""
 		if s.console != nil {
 			console = s.console.String()
@@ -311,7 +320,11 @@ func (s *vmSandbox) Start(ctx context.Context, spec sandbox.JobSpec) (sandbox.Co
 		}
 		return nil, errors.Join(err, cerr)
 	}
-	log.Info().Str("vm", s.id).Int("slot", s.slot).Str("job", spec.JobID).Msg("micro-VM running")
+	fields := map[string]any{"total_ms": time.Since(start).Milliseconds()}
+	for k, v := range s.timings {
+		fields[k] = v
+	}
+	log.Info().Str("vm", s.id).Int("slot", s.slot).Str("job", spec.JobID).Fields(fields).Msg("micro-VM running")
 	return conn, nil
 }
 
@@ -322,17 +335,24 @@ func (s *vmSandbox) boot(ctx context.Context, spec sandbox.JobSpec) (sandbox.Con
 	if err != nil {
 		return nil, err
 	}
+	start := time.Now()
 	if err := s.bootNetwork(ctx, netw); err != nil {
 		return nil, err
 	}
+	s.timings["net_ms"] = time.Since(start).Milliseconds() - s.timings["tap_ms"]
+	start = time.Now()
 	api, err := s.bootVMM(ctx, spec)
 	if err != nil {
 		return nil, err
 	}
+	s.timings["vmm_ms"] = time.Since(start).Milliseconds()
+	start = time.Now()
 	files, err := s.bootFiles(ctx, spec)
 	if err != nil {
 		return nil, err
 	}
+	s.timings["files_ms"] = time.Since(start).Milliseconds() - s.timings["scratch_ms"]
+	start = time.Now()
 	accepted, err := s.bootVsock()
 	if err != nil {
 		return nil, err
@@ -340,10 +360,18 @@ func (s *vmSandbox) boot(ctx context.Context, spec sandbox.JobSpec) (sandbox.Con
 	if err := s.bootCache(spec); err != nil {
 		return nil, err
 	}
+	s.timings["vsock_ms"] = time.Since(start).Milliseconds()
+	start = time.Now()
 	if err := api.configure(ctx, s.vmConfig(spec, netw, files)); err != nil {
 		return nil, err
 	}
-	return s.waitExecutor(ctx, accepted)
+	s.timings["configure_ms"] = time.Since(start).Milliseconds()
+	start = time.Now()
+	conn, err := s.waitExecutor(ctx, accepted)
+	if err == nil {
+		s.timings["connect_ms"] = time.Since(start).Milliseconds()
+	}
+	return conn, err
 }
 
 // bootNetwork creates the TAP (it must exist when Firecracker opens it) and
@@ -355,9 +383,11 @@ func (s *vmSandbox) bootNetwork(ctx context.Context, netw netpolicy.Net) error {
 	if err := d.store.save(s.rec); err != nil {
 		return err
 	}
+	start := time.Now()
 	if err := createTap(ctx, d.opt.Run, s.tap, s.lay.uid, s.gateway); err != nil {
 		return err
 	}
+	s.timings["tap_ms"] = time.Since(start).Milliseconds()
 	s.attached = true // from here Detach is idempotent and always safe
 	return d.net.Attach(ctx, netpolicy.Guest{Iface: s.tap, Gateway: netw.Gateway, Addr: netw.Guest, ForgePort: d.cfg.GuestForge.TCPPort()})
 }
@@ -402,7 +432,12 @@ func (s *vmSandbox) bootFiles(ctx context.Context, spec sandbox.JobSpec) (vmFile
 	if s.lay.jailed {
 		owner = s.lay.uid
 	}
-	return f, disk.CreateScratch(ctx, d.opt.Run, s.lay.host("scratch.ext4"), spec.DiskMiB, owner)
+	start := time.Now()
+	err = disk.CreateScratch(ctx, d.opt.Run, s.lay.host("scratch.ext4"), spec.DiskMiB, owner)
+	if err == nil {
+		s.timings["scratch_ms"] = time.Since(start).Milliseconds()
+	}
+	return f, err
 }
 
 // shareExternals makes the read-only disk of the host's external tools available

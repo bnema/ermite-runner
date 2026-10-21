@@ -600,15 +600,20 @@ func TestListDiagnostics(t *testing.T) {
 	}
 }
 
-func TestParseMax(t *testing.T) {
-	for in, want := range map[string]int64{"": DefaultMax, "10G": 10 << 30, "500m": 500 << 20, "1GiB": 1 << 30, "2048": 2048, "3TB": 3 << 40} {
-		if got, err := ParseMax(in); err != nil || got != want {
+func TestParseSize(t *testing.T) {
+	const def = 7
+	for in, want := range map[string]int64{"": def, "  ": def, "10G": 10 << 30, "500m": 500 << 20, "1GiB": 1 << 30, "2048": 2048, "3TB": 3 << 40, " 2G ": 2 << 30,
+		"0": 0, "00": 0, "0G": 0, "0GiB": 0, "2GIB": 2 << 30} {
+		if got, err := ParseSize(in, def); err != nil || got != want {
 			t.Errorf("%q: %d %v", in, got, err)
 		}
 	}
-	for _, in := range []string{"0", "-1", "G", "ten", "1.5G", "99999999999T"} {
-		if _, err := ParseMax(in); err == nil {
+	for _, in := range []string{"-1", "G", "ten", "1.5G", "99999999999T"} {
+		_, err := ParseSize(in, def)
+		if err == nil {
 			t.Errorf("%q accepted", in)
+		} else if strings.Contains(err.Error(), "ERMITE_") {
+			t.Errorf("%q: the error names a variable: %v", in, err)
 		}
 	}
 }
