@@ -89,6 +89,11 @@ type Sandbox interface {
 	Stop(ctx context.Context) error
 }
 
+// Timed is implemented by sandboxes that measure their start phases.
+type Timed interface {
+	StartTimings() map[string]int64
+}
+
 // Driver creates sandboxes of one mode and reaps what a previous run left.
 type Driver interface {
 	// Mode is VM or Container.

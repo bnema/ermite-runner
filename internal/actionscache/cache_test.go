@@ -55,10 +55,10 @@ func TestHitMiss(t *testing.T) {
 	k := keyOf(t, 0)
 	var fetches int
 	f := func(ctx context.Context, w io.Writer) error { fetches++; return body("archive")(ctx, w) }
-	if hit, err := c.Ensure(context.Background(), k, f); err != nil || hit {
+	if hit, _, err := c.Ensure(context.Background(), k, f); err != nil || hit {
 		t.Fatalf("first: hit=%v err=%v", hit, err)
 	}
-	if hit, err := c.Ensure(context.Background(), k, f); err != nil || !hit {
+	if hit, verify, err := c.Ensure(context.Background(), k, f); err != nil || !hit || verify <= 0 {
 		t.Fatalf("second: hit=%v err=%v", hit, err)
 	}
 	if fetches != 1 || read(t, c, k) != "archive" {
@@ -69,7 +69,7 @@ func TestHitMiss(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if hit, _ := c2.Ensure(context.Background(), k, f); !hit || fetches != 1 {
+	if hit, _, _ := c2.Ensure(context.Background(), k, f); !hit || fetches != 1 {
 		t.Fatalf("restart: hit=%v fetches=%d", hit, fetches)
 	}
 }
@@ -78,7 +78,7 @@ func TestFailedFetchLeavesNothing(t *testing.T) {
 	c, _ := newCache(t, 1<<20)
 	k := keyOf(t, 0)
 	boom := errors.New("429")
-	_, err := c.Ensure(context.Background(), k, func(_ context.Context, w io.Writer) error { _, _ = io.WriteString(w, "part"); return boom })
+	_, _, err := c.Ensure(context.Background(), k, func(_ context.Context, w io.Writer) error { _, _ = io.WriteString(w, "part"); return boom })
 	if !errors.Is(err, boom) {
 		t.Fatal(err)
 	}
@@ -107,7 +107,7 @@ func TestConcurrentSingleFlight(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			hit, err := c.Ensure(context.Background(), k, f)
+			hit, _, err := c.Ensure(context.Background(), k, f)
 			if err != nil {
 				t.Error(err)
 			}
@@ -130,7 +130,7 @@ func TestConcurrentSingleFlight(t *testing.T) {
 func TestCorruptEntryIsDroppedAndRefetched(t *testing.T) {
 	c, _ := newCache(t, 1<<20)
 	k := keyOf(t, 0)
-	if _, err := c.Ensure(context.Background(), k, body("good bytes")); err != nil {
+	if _, _, err := c.Ensure(context.Background(), k, body("good bytes")); err != nil {
 		t.Fatal(err)
 	}
 	// Same size, other content: only the hash can tell.
@@ -143,7 +143,7 @@ func TestCorruptEntryIsDroppedAndRefetched(t *testing.T) {
 	if c.Size() != 0 {
 		t.Errorf("size %d after the drop", c.Size())
 	}
-	hit, err := c.Ensure(context.Background(), k, body("good bytes"))
+	hit, _, err := c.Ensure(context.Background(), k, body("good bytes"))
 	if err != nil || hit {
 		t.Fatalf("hit=%v err=%v", hit, err)
 	}
@@ -165,17 +165,17 @@ func TestLRUEviction(t *testing.T) {
 	step := func() { *now = now.Add(time.Hour + PinFor) } // past every pin
 	a, b, d := keyOf(t, 0), keyOf(t, 1), keyOf(t, 2)
 	for _, k := range []string{a, b} {
-		if _, err := c.Ensure(ctx, k, body(strings.Repeat("x", 10))); err != nil {
+		if _, _, err := c.Ensure(ctx, k, body(strings.Repeat("x", 10))); err != nil {
 			t.Fatal(err)
 		}
 		step()
 	}
 	// Use a again: b is now the least recently used.
-	if hit, _ := c.Ensure(ctx, a, body("unused")); !hit {
+	if hit, _, _ := c.Ensure(ctx, a, body("unused")); !hit {
 		t.Fatal("a should hit")
 	}
 	step()
-	if _, err := c.Ensure(ctx, d, body(strings.Repeat("y", 10))); err != nil {
+	if _, _, err := c.Ensure(ctx, d, body(strings.Repeat("y", 10))); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := c.Open(b); !errors.Is(err, ErrNotFound) {
@@ -197,10 +197,10 @@ func TestPinnedEntryIsNotEvicted(t *testing.T) {
 	c, _ := newCache(t, 15)
 	ctx := context.Background()
 	a, b := keyOf(t, 0), keyOf(t, 1)
-	if _, err := c.Ensure(ctx, a, body(strings.Repeat("x", 10))); err != nil {
+	if _, _, err := c.Ensure(ctx, a, body(strings.Repeat("x", 10))); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.Ensure(ctx, b, body(strings.Repeat("y", 10))); !errors.Is(err, ErrTooLarge) {
+	if _, _, err := c.Ensure(ctx, b, body(strings.Repeat("y", 10))); !errors.Is(err, ErrTooLarge) {
 		t.Fatalf("got %v", err)
 	}
 	if _, err := c.Open(a); err != nil {
@@ -257,7 +257,7 @@ func TestConcurrentDownloadsStayUnderTheCap(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			k := keyOf(t, i)
-			_, _ = c.Ensure(context.Background(), k, func(_ context.Context, w io.Writer) error {
+			_, _, _ = c.Ensure(context.Background(), k, func(_ context.Context, w io.Writer) error {
 				for range 6 { // 6 x 10 bytes, in pieces
 					if _, err := w.Write([]byte(strings.Repeat("z", 10))); err != nil {
 						return err
@@ -307,7 +307,7 @@ func TestConcurrentDownloadsStayUnderTheCap(t *testing.T) {
 func TestTemporaryFilesAreCountedAndCleaned(t *testing.T) {
 	c, _ := newCache(t, 50)
 	seen := int64(-1)
-	_, err := c.Ensure(context.Background(), keyOf(t, 0), func(_ context.Context, w io.Writer) error {
+	_, _, err := c.Ensure(context.Background(), keyOf(t, 0), func(_ context.Context, w io.Writer) error {
 		_, _ = io.WriteString(w, strings.Repeat("a", 30))
 		c.mu.Lock()
 		seen = c.pending
@@ -318,7 +318,7 @@ func TestTemporaryFilesAreCountedAndCleaned(t *testing.T) {
 		t.Fatalf("err=%v pending during=%d", err, seen)
 	}
 	// Refused midway for size: the part already written is released too.
-	_, err = c.Ensure(context.Background(), keyOf(t, 1), body(strings.Repeat("b", 60)))
+	_, _, err = c.Ensure(context.Background(), keyOf(t, 1), body(strings.Repeat("b", 60)))
 	if !errors.Is(err, ErrTooLarge) {
 		t.Fatalf("got %v", err)
 	}
@@ -326,7 +326,7 @@ func TestTemporaryFilesAreCountedAndCleaned(t *testing.T) {
 		t.Fatalf("pending=%d size=%d disk=%d", c.pending, c.Size(), diskUse(t, c))
 	}
 	// The size is what was written, whatever the server announced.
-	if _, err := c.Ensure(context.Background(), keyOf(t, 2), body(strings.Repeat("c", 50))); err != nil {
+	if _, _, err := c.Ensure(context.Background(), keyOf(t, 2), body(strings.Repeat("c", 50))); err != nil {
 		t.Fatal(err)
 	}
 	if c.Size() != 50 {
@@ -336,7 +336,7 @@ func TestTemporaryFilesAreCountedAndCleaned(t *testing.T) {
 
 func TestTooLarge(t *testing.T) {
 	c, _ := newCache(t, 10)
-	_, err := c.Ensure(context.Background(), keyOf(t, 0), body(strings.Repeat("x", 11)))
+	_, _, err := c.Ensure(context.Background(), keyOf(t, 0), body(strings.Repeat("x", 11)))
 	if !errors.Is(err, ErrTooLarge) {
 		t.Fatalf("got %v", err)
 	}

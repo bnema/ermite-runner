@@ -3,7 +3,9 @@
 package host
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -143,5 +145,40 @@ func TestCacheArchivesFallsBack(t *testing.T) {
 	a.job("j").cacheArchives(context.Background(), []*ermite.ResolvedAction{o}, []*execpb.ResolvedAction{c})
 	if c.Token != "t" {
 		t.Errorf("cache off: %+v", c)
+	}
+}
+
+func TestArchiveTimingLogs(t *testing.T) {
+	a := newArchiveRig(t)
+	var logs bytes.Buffer
+	j := a.job("timing")
+	j.log = zerowrap.New(zerowrap.Config{Level: "info", Format: "json", Output: &logs})
+	for i := 0; i < 2; i++ {
+		logs.Reset()
+		o, c := a.action(strings.Repeat("a", 40))
+		j.cacheArchives(context.Background(), []*ermite.ResolvedAction{o}, []*execpb.ResolvedAction{c})
+		var fields map[string]any
+		if err := json.Unmarshal(logs.Bytes(), &fields); err != nil {
+			t.Fatal(err, logs.String())
+		}
+		if value, ok := fields["verify_ms"].(float64); !ok || value < 0 {
+			t.Fatal(fields)
+		}
+		if fields["hit"] != (i == 1) {
+			t.Fatal(fields)
+		}
+		if i == 0 {
+			if value, ok := fields["fetch_ms"].(float64); !ok || value < 0 {
+				t.Fatal(fields)
+			}
+			if value, ok := fields["bytes"].(float64); !ok || value <= 0 {
+				t.Fatal(fields)
+			}
+		} else if _, ok := fields["fetch_ms"]; ok {
+			t.Fatal("hit has fetch_ms", fields)
+		}
+	}
+	if j.timeline["archive_misses"] != 1 || j.timeline["archive_miss_bytes"] <= 0 {
+		t.Fatal(j.timeline)
 	}
 }

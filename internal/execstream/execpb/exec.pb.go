@@ -594,6 +594,7 @@ type Hello struct {
 	Version       string                 `protobuf:"bytes,1,opt,name=version,proto3" json:"version,omitempty"` // runner version of the executor
 	Sandbox       string                 `protobuf:"bytes,2,opt,name=sandbox,proto3" json:"sandbox,omitempty"` // "vm" or "container"
 	Hostname      string                 `protobuf:"bytes,3,opt,name=hostname,proto3" json:"hostname,omitempty"`
+	BootMs        map[string]int64       `protobuf:"bytes,4,rep,name=boot_ms,json=bootMs,proto3" json:"boot_ms,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"varint,2,opt,name=value"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -647,6 +648,13 @@ func (x *Hello) GetHostname() string {
 		return x.Hostname
 	}
 	return ""
+}
+
+func (x *Hello) GetBootMs() map[string]int64 {
+	if x != nil {
+		return x.BootMs
+	}
+	return nil
 }
 
 // Run asks the executor to run a script or a job. Without job it is the stub
@@ -1946,11 +1954,15 @@ const file_exec_proto_rawDesc = "" +
 	"\n" +
 	"NamedValue\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value\"W\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value\"\xd5\x01\n" +
 	"\x05Hello\x12\x18\n" +
 	"\aversion\x18\x01 \x01(\tR\aversion\x12\x18\n" +
 	"\asandbox\x18\x02 \x01(\tR\asandbox\x12\x1a\n" +
-	"\bhostname\x18\x03 \x01(\tR\bhostname\"\xbe\x01\n" +
+	"\bhostname\x18\x03 \x01(\tR\bhostname\x12A\n" +
+	"\aboot_ms\x18\x04 \x03(\v2(.ermite.runner.exec.v1.Hello.BootMsEntryR\x06bootMs\x1a9\n" +
+	"\vBootMsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\x03R\x05value:\x028\x01\"\xbe\x01\n" +
 	"\x03Run\x12\x16\n" +
 	"\x06script\x18\x01 \x01(\tR\x06script\x125\n" +
 	"\x03env\x18\x02 \x03(\v2#.ermite.runner.exec.v1.Run.EnvEntryR\x03env\x120\n" +
@@ -2104,7 +2116,7 @@ func file_exec_proto_rawDescGZIP() []byte {
 }
 
 var file_exec_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
-var file_exec_proto_msgTypes = make([]protoimpl.MessageInfo, 22)
+var file_exec_proto_msgTypes = make([]protoimpl.MessageInfo, 23)
 var file_exec_proto_goTypes = []any{
 	(StreamKind)(0),          // 0: ermite.runner.exec.v1.StreamKind
 	(CancelKind)(0),          // 1: ermite.runner.exec.v1.CancelKind
@@ -2129,9 +2141,10 @@ var file_exec_proto_goTypes = []any{
 	(*ResolveRequest)(nil),   // 20: ermite.runner.exec.v1.ResolveRequest
 	(*ResolveResponse)(nil),  // 21: ermite.runner.exec.v1.ResolveResponse
 	(*ResolvedAction)(nil),   // 22: ermite.runner.exec.v1.ResolvedAction
-	nil,                      // 23: ermite.runner.exec.v1.Run.EnvEntry
-	nil,                      // 24: ermite.runner.exec.v1.TokenPermissions.LevelsEntry
-	nil,                      // 25: ermite.runner.exec.v1.JobResult.OutputsEntry
+	nil,                      // 23: ermite.runner.exec.v1.Hello.BootMsEntry
+	nil,                      // 24: ermite.runner.exec.v1.Run.EnvEntry
+	nil,                      // 25: ermite.runner.exec.v1.TokenPermissions.LevelsEntry
+	nil,                      // 26: ermite.runner.exec.v1.JobResult.OutputsEntry
 }
 var file_exec_proto_depIdxs = []int32{
 	6,  // 0: ermite.runner.exec.v1.Frame.hello:type_name -> ermite.runner.exec.v1.Hello
@@ -2149,24 +2162,25 @@ var file_exec_proto_depIdxs = []int32{
 	21, // 12: ermite.runner.exec.v1.Frame.resolve_response:type_name -> ermite.runner.exec.v1.ResolveResponse
 	5,  // 13: ermite.runner.exec.v1.Frame.secret:type_name -> ermite.runner.exec.v1.NamedValue
 	5,  // 14: ermite.runner.exec.v1.Frame.var:type_name -> ermite.runner.exec.v1.NamedValue
-	23, // 15: ermite.runner.exec.v1.Run.env:type_name -> ermite.runner.exec.v1.Run.EnvEntry
-	8,  // 16: ermite.runner.exec.v1.Run.job:type_name -> ermite.runner.exec.v1.JobSpec
-	9,  // 17: ermite.runner.exec.v1.JobSpec.token_permissions:type_name -> ermite.runner.exec.v1.TokenPermissions
-	24, // 18: ermite.runner.exec.v1.TokenPermissions.levels:type_name -> ermite.runner.exec.v1.TokenPermissions.LevelsEntry
-	0,  // 19: ermite.runner.exec.v1.Output.stream:type_name -> ermite.runner.exec.v1.StreamKind
-	1,  // 20: ermite.runner.exec.v1.Cancel.kind:type_name -> ermite.runner.exec.v1.CancelKind
-	3,  // 21: ermite.runner.exec.v1.StepCompleted.conclusion:type_name -> ermite.runner.exec.v1.StepConclusion
-	3,  // 22: ermite.runner.exec.v1.StepCompleted.outcome:type_name -> ermite.runner.exec.v1.StepConclusion
-	2,  // 23: ermite.runner.exec.v1.Annotation.level:type_name -> ermite.runner.exec.v1.AnnotationLevel
-	15, // 24: ermite.runner.exec.v1.StepAnnotations.annotations:type_name -> ermite.runner.exec.v1.Annotation
-	3,  // 25: ermite.runner.exec.v1.JobResult.conclusion:type_name -> ermite.runner.exec.v1.StepConclusion
-	25, // 26: ermite.runner.exec.v1.JobResult.outputs:type_name -> ermite.runner.exec.v1.JobResult.OutputsEntry
-	22, // 27: ermite.runner.exec.v1.ResolveResponse.actions:type_name -> ermite.runner.exec.v1.ResolvedAction
-	28, // [28:28] is the sub-list for method output_type
-	28, // [28:28] is the sub-list for method input_type
-	28, // [28:28] is the sub-list for extension type_name
-	28, // [28:28] is the sub-list for extension extendee
-	0,  // [0:28] is the sub-list for field type_name
+	23, // 15: ermite.runner.exec.v1.Hello.boot_ms:type_name -> ermite.runner.exec.v1.Hello.BootMsEntry
+	24, // 16: ermite.runner.exec.v1.Run.env:type_name -> ermite.runner.exec.v1.Run.EnvEntry
+	8,  // 17: ermite.runner.exec.v1.Run.job:type_name -> ermite.runner.exec.v1.JobSpec
+	9,  // 18: ermite.runner.exec.v1.JobSpec.token_permissions:type_name -> ermite.runner.exec.v1.TokenPermissions
+	25, // 19: ermite.runner.exec.v1.TokenPermissions.levels:type_name -> ermite.runner.exec.v1.TokenPermissions.LevelsEntry
+	0,  // 20: ermite.runner.exec.v1.Output.stream:type_name -> ermite.runner.exec.v1.StreamKind
+	1,  // 21: ermite.runner.exec.v1.Cancel.kind:type_name -> ermite.runner.exec.v1.CancelKind
+	3,  // 22: ermite.runner.exec.v1.StepCompleted.conclusion:type_name -> ermite.runner.exec.v1.StepConclusion
+	3,  // 23: ermite.runner.exec.v1.StepCompleted.outcome:type_name -> ermite.runner.exec.v1.StepConclusion
+	2,  // 24: ermite.runner.exec.v1.Annotation.level:type_name -> ermite.runner.exec.v1.AnnotationLevel
+	15, // 25: ermite.runner.exec.v1.StepAnnotations.annotations:type_name -> ermite.runner.exec.v1.Annotation
+	3,  // 26: ermite.runner.exec.v1.JobResult.conclusion:type_name -> ermite.runner.exec.v1.StepConclusion
+	26, // 27: ermite.runner.exec.v1.JobResult.outputs:type_name -> ermite.runner.exec.v1.JobResult.OutputsEntry
+	22, // 28: ermite.runner.exec.v1.ResolveResponse.actions:type_name -> ermite.runner.exec.v1.ResolvedAction
+	29, // [29:29] is the sub-list for method output_type
+	29, // [29:29] is the sub-list for method input_type
+	29, // [29:29] is the sub-list for extension type_name
+	29, // [29:29] is the sub-list for extension extendee
+	0,  // [0:29] is the sub-list for field type_name
 }
 
 func init() { file_exec_proto_init() }
@@ -2197,7 +2211,7 @@ func file_exec_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_exec_proto_rawDesc), len(file_exec_proto_rawDesc)),
 			NumEnums:      4,
-			NumMessages:   22,
+			NumMessages:   23,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

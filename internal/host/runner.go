@@ -219,7 +219,7 @@ func (r *Runner) startJob(ctx context.Context, log zerowrap.Logger, job *ermite.
 		defer r.active.Done()
 		defer func() { <-slots }()
 		jr.run(r, shutdown)
-		jr.log.Info().Msg("job finished")
+		jr.log.Info().Fields(jr.timingFields()).Msg("job finished")
 	}()
 }
 

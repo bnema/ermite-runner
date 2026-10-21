@@ -24,7 +24,7 @@ func archiveRig(t *testing.T) (*rig, *actionscache.Cache, string) {
 	}
 	r := newRigWith(t, Config{Max: 1 << 20, MinCharge: 1, Archives: ac})
 	key, _ := actionscache.Key("https://github.com", "o/r", strings.Repeat("a", 40))
-	if _, err := ac.Ensure(context.Background(), key, func(_ context.Context, w io.Writer) error {
+	if _, _, err := ac.Ensure(context.Background(), key, func(_ context.Context, w io.Writer) error {
 		_, err := io.WriteString(w, "tarball")
 		return err
 	}); err != nil {

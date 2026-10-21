@@ -349,6 +349,17 @@ func TestStartRunStop(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	timed := sb.(sandbox.Timed)
+	timings := timed.StartTimings()
+	for _, key := range []string{"socket_ms", "cache_ms", "scratch_ms", "net_ms", "container_ms", "connect_ms"} {
+		if value, ok := timings[key]; !ok || value < 0 {
+			t.Errorf("StartTimings[%q] = %d, present=%v", key, value, ok)
+		}
+	}
+	timings["socket_ms"] = -1
+	if timed.StartTimings()["socket_ms"] < 0 {
+		t.Error("StartTimings returned shared storage")
+	}
 	out, code := stub(t, conn)
 	if out != "hello from fake container\n" || code != 7 {
 		t.Fatalf("out=%q code=%d", out, code)

@@ -63,3 +63,28 @@ ERMITE_RUNNER_IT_E2E=1 ERMITE_RUNNER_TEST_IMAGE=ermite-runner-ubuntu-26.04:dev G
 - **Docker API.** Production `container` mode supports Docker Engine and sysbox. Podman's compatibility API is not a drop-in: it cannot disable DNS on the network that the runner creates.
 - **Jailer.** The jailer needs `--chroot-base-dir` to exist. The driver creates `<state dir>/jail`. It leaves `<state dir>/jail/<exec name>` and `/sys/fs/cgroup/firecracker` behind.
 - **Host firewalls.** A firewall that rejects `53` on `ertap*` or `erbr*` breaks guest DNS. The symptom is `dns silent` in `TestVMNetworkPolicy`.
+
+## Measuring start-up on a small host
+
+Build and register the [runner container](container.md) as usual, then constrain
+its CPU budget to reproduce a small host without changing the boot sequence:
+
+```sh
+docker run --name runner-timing --cpus=1 \
+  --device /dev/kvm --device /dev/net/tun --cap-add NET_ADMIN \
+  -v runner-timing-state:/var/lib/ermite-runner \
+  --env-file runner.env -e ERMITE_RUNNER_LOG_FORMAT=json ermite-runner:<tag>
+```
+
+Use a registered state volume or supply the registration settings in
+`runner.env`; never put tokens in shared shell history. Podman accepts the same
+CPU limit (device access may need the CDI setup described in the container
+guide). Submit representative jobs, then extract completed-job measurements:
+
+```sh
+docker logs runner-timing 2>&1 | jq 'select(.message=="job finished")'
+```
+
+Compare `sandbox_ms`, the `sb_*` stages and `guest_*` boot stages across jobs.
+`run_ms` includes action downloads and step execution; archive misses have their
+own counters. See [Job timing](service.md#job-timing) for the full field table.
