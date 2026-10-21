@@ -29,6 +29,7 @@ func unavailable(err error) bool {
 	var network net.Error
 	return errors.As(err, &network) || errors.Is(err, context.DeadlineExceeded)
 }
+
 func proxyStatus(err error) int {
 	var e upstreamError
 	if errors.As(err, &e) && (e.status == http.StatusUnauthorized || e.status == http.StatusForbidden || e.status == http.StatusNotFound) {
@@ -41,12 +42,12 @@ type bearer struct {
 	value string
 	until time.Time
 }
+
 type upstream struct {
 	base, auth               string
 	client                   *http.Client
 	blobClient               *http.Client
 	requestTimeout, blobIdle time.Duration
-	now                      func() time.Time
 	mu                       sync.Mutex
 	tokens                   map[string]bearer
 }
@@ -58,7 +59,7 @@ func (u *upstream) token(ctx context.Context, name string, refresh bool) (string
 	u.mu.Lock()
 	t, ok := u.tokens[name]
 	u.mu.Unlock()
-	if ok && !refresh && u.now().Before(t.until) {
+	if ok && !refresh && time.Now().Before(t.until) {
 		return t.value, nil
 	}
 	a, err := url.Parse(u.auth)
@@ -113,33 +114,23 @@ func (u *upstream) token(ctx context.Context, name string, refresh bool) (string
 	if len(u.tokens) >= 1024 {
 		clear(u.tokens)
 	}
-	u.tokens[name] = bearer{data.Token, u.now().Add(time.Duration(data.Expires) * time.Second)}
+	u.tokens[name] = bearer{data.Token, time.Now().Add(time.Duration(data.Expires) * time.Second)}
 	return data.Token, nil
 }
 
-// request is a metadata request (manifests, blob HEAD) bounded by ctx. Manifests
-// use the client that never follows redirects; a blob HEAD uses the blob client,
-// because Docker Hub answers it with a redirect to its CDN.
-func (u *upstream) request(ctx context.Context, method, name, kind, ref, accept string) (*http.Response, error) {
-	client := u.client
-	if kind == "blobs" {
-		client = u.blobClient
-	}
+// authorized calls send with a bearer token for name, and once more with a
+// fresh token after a 401 or 403. Each token request is bounded by
+// RequestTimeout (and ctx). It returns a 200 response; any other closes the
+// body and is an upstreamError.
+func (u *upstream) authorized(ctx context.Context, name string, send func(tok string) (*http.Response, error)) (*http.Response, error) {
 	for attempt := 0; attempt < 2; attempt++ {
-		tok, err := u.token(ctx, name, attempt > 0)
+		authCtx, cancel := context.WithTimeout(ctx, u.requestTimeout)
+		tok, err := u.token(authCtx, name, attempt > 0)
+		cancel()
 		if err != nil {
 			return nil, err
 		}
-		req, err := http.NewRequestWithContext(ctx, method, u.base+"/v2/"+name+"/"+kind+"/"+ref, nil)
-		if err != nil {
-			return nil, err
-		}
-		req.Header.Set("Authorization", "Bearer "+tok)
-		if accept != "" {
-			req.Header.Set("Accept", accept)
-		}
-		// Do not forward guest Authorization, cookies, query parameters or Range.
-		resp, err := client.Do(req)
+		resp, err := send(tok)
 		if err != nil {
 			return nil, err
 		}
@@ -153,4 +144,26 @@ func (u *upstream) request(ctx context.Context, method, name, kind, ref, accept 
 		return nil, upstreamError{resp.StatusCode}
 	}
 	return nil, upstreamError{http.StatusUnauthorized}
+}
+
+// request is a metadata request (manifests, blob HEAD) bounded by ctx. Manifests
+// use the client that never follows redirects; a blob HEAD uses the blob client,
+// because Docker Hub answers it with a redirect to its CDN.
+func (u *upstream) request(ctx context.Context, method, name string, k kind, ref, accept string) (*http.Response, error) {
+	client := u.client
+	if k == kindBlob {
+		client = u.blobClient
+	}
+	return u.authorized(ctx, name, func(tok string) (*http.Response, error) {
+		req, err := http.NewRequestWithContext(ctx, method, u.base+"/v2/"+name+"/"+k.dir()+"/"+ref, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", "Bearer "+tok)
+		if accept != "" {
+			req.Header.Set("Accept", accept)
+		}
+		// Do not forward guest Authorization, cookies, query parameters or Range.
+		return client.Do(req)
+	})
 }

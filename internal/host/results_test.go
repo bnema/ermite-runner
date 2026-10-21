@@ -485,7 +485,7 @@ func TestAnnotationsWaitingForTheServerAreBounded(t *testing.T) {
 	tm := fastTiming()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	j := &jobRun{client: cl, t: tm, ctx: ctx, job: &ermite.Job{JobId: "j1"}, steps: map[int32]*ermite.StepUpdate{},
+	j := &jobRun{client: cl, t: tm, ctx: ctx, job: &ermite.Job{JobId: "j1"}, steps: map[int32]*ermite.StepUpdate{}, timeline: timeline{},
 		annSeen: map[int32]bool{}, sumSeen: map[int32]bool{}, features: jobFeatures{annotations: true},
 		cancelCh: make(chan *execpb.Cancel, 1), log: zerowrap.New(zerowrap.Config{Level: "debug", Format: "json", Output: logs})}
 	j.outbox = newOutbox(cl, "j1", tm, func(error) {}, j.log)

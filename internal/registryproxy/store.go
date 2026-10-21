@@ -28,7 +28,39 @@ var errDigest = errors.New("registry digest mismatch")
 // 503, and dockerd retries the layer (about 50 s) before pulling from Docker Hub.
 var errBusy = errors.New("registry downloads busy")
 
-const tagCharge int64 = 4096
+// minCharge is the least an entry is charged, whatever its size: about one
+// disk block and inode. It bounds the number of entries, and so of files, to
+// Max/minCharge. A tag file is charged exactly that.
+const minCharge int64 = 4096
+
+// charge is what an entry of n bytes counts against Max.
+func charge(n int64) int64 { return max(n, minCharge) }
+
+// kind is the directory of an entry: content (blobs, manifests) or a tag.
+type kind uint8
+
+const (
+	kindBlob kind = iota
+	kindManifest
+	kindTag
+)
+
+var kinds = []kind{kindBlob, kindManifest, kindTag}
+
+// dir is the directory of the kind in the store, and its route in /v2/.
+func (k kind) dir() string {
+	switch k {
+	case kindBlob:
+		return "blobs"
+	case kindManifest:
+		return "manifests"
+	default:
+		return "tags"
+	}
+}
+
+// key is the key of an entry of kind k: its path in the store.
+func (k kind) key(name string) string { return k.dir() + "/" + name }
 
 // lowWater bounds the extra room an eviction frees (with 5% of Max), so that a
 // full store evicts once per that many bytes, not on every write.
@@ -36,6 +68,7 @@ const lowWater int64 = 64 << 20
 
 type entry struct {
 	key    string
+	kind   kind
 	size   int64
 	used   time.Time
 	pins   int
@@ -55,27 +88,36 @@ type flight struct {
 	gen      int // bumped each time waiters drops to zero
 	finished bool
 	pinned   bool   // the committed entry holds a pin for the waiters
-	blob     bool   // takes a download slot
+	kind     kind   // a blob flight takes a download slot
 	quota    *Quota // the starter's quota, held until the flight ends
 	cancel   context.CancelFunc
 }
 
-type store struct {
-	dir                 string
-	max, total, pending int64
-	now                 func() time.Time
-	// grace is how long a flight with no waiter left keeps downloading in
+// storeConfig is a store's complete configuration: openStore applies no
+// defaults.
+type storeConfig struct {
+	dir string
+	max int64
+	now func() time.Time
+	// grace is how long a blob flight with no waiter left keeps downloading in
 	// case another request joins it; then it is cancelled.
 	grace time.Duration
-	// maxDownloads caps the concurrent blob downloads (0: no cap).
-	maxDownloads, downloads int
+	// maxDownloads caps the concurrent blob downloads.
+	maxDownloads int
 	// slotWait is how long a request waits for a download slot before errBusy.
 	slotWait time.Duration
+	log      zerowrap.Logger
+}
+
+type store struct {
+	storeConfig
+
+	mu             sync.Mutex
+	total, pending int64
+	downloads      int
 	// slotFreed is closed and replaced each time a download slot frees.
 	slotFreed chan struct{}
-	log       zerowrap.Logger
 
-	mu      sync.Mutex
 	entries map[string]*entry
 	lru     *list.List                     // *entry, least recently used first
 	tagsOf  map[string]map[string]struct{} // manifest digest -> tag keys
@@ -109,13 +151,17 @@ func (f *storedFile) Close() error {
 	return f.err
 }
 
-func openStore(dir string, max int64, now func() time.Time) (*store, error) {
-	if max <= 0 {
-		return nil, errors.New("registry cache cap must be positive")
+func openStore(c storeConfig) (*store, error) {
+	if c.max < minCharge {
+		return nil, fmt.Errorf("registry cache cap must be at least %d bytes", minCharge)
 	}
-	s := &store{dir: dir, max: max, now: now, entries: map[string]*entry{}, lru: list.New(), tagsOf: map[string]map[string]struct{}{}, flights: map[string]*flight{}, slotFreed: make(chan struct{}), hookBug: defaultBugHook}
-	for _, kind := range []string{"blobs", "manifests", "tags", "tmp"} {
-		if err := os.MkdirAll(filepath.Join(dir, kind), 0700); err != nil {
+	if c.now == nil || c.grace <= 0 || c.maxDownloads <= 0 || c.slotWait <= 0 {
+		return nil, errors.New("registry store configuration incomplete")
+	}
+	dir := c.dir
+	s := &store{storeConfig: c, entries: map[string]*entry{}, lru: list.New(), tagsOf: map[string]map[string]struct{}{}, flights: map[string]*flight{}, slotFreed: make(chan struct{}), hookBug: defaultBugHook}
+	for _, sub := range []string{kindBlob.dir(), kindManifest.dir(), kindTag.dir(), "tmp"} {
+		if err := os.MkdirAll(filepath.Join(dir, sub), 0700); err != nil {
 			return nil, err
 		}
 	}
@@ -129,13 +175,13 @@ func openStore(dir string, max int64, now func() time.Time) (*store, error) {
 		}
 	}
 	var types []string
-	for _, kind := range []string{"blobs", "manifests", "tags"} {
-		ds, err := os.ReadDir(filepath.Join(dir, kind))
+	for _, k := range kinds {
+		ds, err := os.ReadDir(filepath.Join(dir, k.dir()))
 		if err != nil {
 			return nil, err
 		}
 		for _, de := range ds {
-			if base, ok := strings.CutSuffix(de.Name(), ".type"); ok && kind == "manifests" {
+			if base, ok := strings.CutSuffix(de.Name(), ".type"); ok && k == kindManifest {
 				types = append(types, base)
 				continue
 			}
@@ -149,36 +195,38 @@ func openStore(dir string, max int64, now func() time.Time) (*store, error) {
 			if !fi.Mode().IsRegular() {
 				continue
 			}
-			key := kind + "/" + de.Name()
-			e := &entry{key: key, size: fi.Size(), used: fi.ModTime()}
-			if kind == "manifests" {
+			key := k.key(de.Name())
+			size := fi.Size()
+			e := &entry{key: key, kind: k, used: fi.ModTime()}
+			switch k {
+			case kindManifest:
 				info, err := os.Stat(filepath.Join(dir, key) + ".type")
 				if err != nil {
 					_ = os.Remove(filepath.Join(dir, key))
 					continue
 				}
-				e.size += info.Size()
-			}
-			if kind == "tags" {
+				size += info.Size()
+			case kindTag:
 				digest := s.readTagFile(key)
 				if !validDigest(digest) {
 					_ = os.Remove(filepath.Join(dir, key))
 					continue
 				}
-				if _, ok := s.entries["manifests/"+digest[7:]]; !ok {
+				if _, ok := s.entries[kindManifest.key(digest[7:])]; !ok {
 					_ = os.Remove(filepath.Join(dir, key))
 					continue
 				}
-				e.size = tagCharge
+				size = 0
 				e.digest = digest
 			}
+			e.size = charge(size)
 			s.addLocked(e)
 		}
 	}
 	// A .type whose manifest is gone (a crash between the two writes).
 	for _, base := range types {
-		if _, ok := s.entries["manifests/"+base]; !ok {
-			_ = os.Remove(filepath.Join(dir, "manifests", base+".type"))
+		if _, ok := s.entries[kindManifest.key(base)]; !ok {
+			_ = os.Remove(filepath.Join(dir, kindManifest.key(base)+".type"))
 		}
 	}
 	// Order the LRU by the access times kept in the mtimes.
@@ -254,9 +302,9 @@ func (s *store) removeLocked(key string) bool {
 	if e.pins > 0 {
 		return false
 	}
-	if hexDigest, ok := strings.CutPrefix(key, "manifests/"); ok {
+	if e.kind == kindManifest {
 		// Prune references first. If a tag cannot be removed, retain its target too.
-		for k := range s.tagsOf["sha256:"+hexDigest] {
+		for k := range s.tagsOf["sha256:"+strings.TrimPrefix(key, kindManifest.key(""))] {
 			if !s.removeLocked(k) {
 				return false
 			}
@@ -291,7 +339,7 @@ func (s *store) evictLocked(need int64) {
 		next := el.Next()
 		if e.pins == 0 {
 			removed := s.removeLocked(e.key)
-			if strings.HasPrefix(e.key, "manifests/") {
+			if e.kind == kindManifest {
 				// Removing a manifest removes its tags first, even when it then
 				// fails: next may be gone. Start over; only pinned or
 				// unremovable entries are walked again.
@@ -317,7 +365,7 @@ func (s *store) openLocked(key string) (*storedFile, string, error) {
 		return nil, "", err
 	}
 	media := "application/octet-stream"
-	if strings.HasPrefix(key, "manifests/") {
+	if e.kind == kindManifest {
 		b, err := os.ReadFile(filepath.Join(s.dir, key) + ".type")
 		if err != nil {
 			_ = f.Close()
@@ -329,13 +377,13 @@ func (s *store) openLocked(key string) (*storedFile, string, error) {
 	e.pins++
 	return &storedFile{File: f, s: s, key: key}, media, nil
 }
-func (s *store) open(kind, digest string) (*storedFile, string, error) {
-	if !validDigest(digest) || (kind != "blobs" && kind != "manifests") {
+func (s *store) open(k kind, digest string) (*storedFile, string, error) {
+	if !validDigest(digest) {
 		return nil, "", errDigest
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.openLocked(kind + "/" + digest[7:])
+	return s.openLocked(k.key(digest[7:]))
 }
 
 // fetch writes the upstream content to w. ctx belongs to the flight: it ends
@@ -360,12 +408,12 @@ type keepalive struct {
 // carried by ctx (WithQuota), both held until the flight really ends; joining
 // one takes neither. When a slot is missing, the request waits for one, kept
 // alive, for at most the slot wait, and then fails with errBusy.
-func (s *store) ensure(ctx context.Context, kind, digest string, fetch fetch, keep keepalive) (f *storedFile, media string, hit bool, err error) {
-	if !validDigest(digest) || (kind != "blobs" && kind != "manifests") {
+func (s *store) ensure(ctx context.Context, k kind, digest string, fetch fetch, keep keepalive) (f *storedFile, media string, hit bool, err error) {
+	if !validDigest(digest) {
 		return nil, "", false, errDigest
 	}
-	key := kind + "/" + digest[7:]
-	blob := kind == "blobs"
+	key := k.key(digest[7:])
+	blob := k == kindBlob
 	quota := quotaFrom(ctx)
 	var slotDeadline <-chan time.Time
 	var fl *flight
@@ -381,7 +429,7 @@ func (s *store) ensure(ctx context.Context, kind, digest string, fetch fetch, ke
 		}
 		if !blob || s.takeSlotLocked(quota) {
 			dctx, cancel := context.WithCancel(context.Background())
-			fl = &flight{key: key, done: make(chan struct{}), cancel: cancel, blob: blob}
+			fl = &flight{key: key, kind: k, done: make(chan struct{}), cancel: cancel}
 			if blob {
 				fl.quota = quota
 			}
@@ -433,7 +481,7 @@ func (s *store) leaveLocked(fl *flight) {
 	// once, so its flights never outnumber the requests in progress. A blob
 	// holds a download slot until it really ends, which bounds the abandoned
 	// ones to MaxDownloads.
-	if s.grace <= 0 || !fl.blob {
+	if fl.kind != kindBlob {
 		s.abandonLocked(fl)
 		return
 	}
@@ -458,7 +506,7 @@ func (s *store) abandonLocked(fl *flight) {
 // takeSlotLocked takes a global download slot and one of quota (nil: none),
 // both or neither.
 func (s *store) takeSlotLocked(quota *Quota) bool {
-	if s.maxDownloads > 0 && s.downloads >= s.maxDownloads {
+	if s.downloads >= s.maxDownloads {
 		return false
 	}
 	if quota != nil && !quota.tryAcquire() {
@@ -504,7 +552,7 @@ func (s *store) finishLocked(fl *flight, err error, committed *entry) {
 	if s.flights[fl.key] == fl {
 		delete(s.flights, fl.key)
 	}
-	if fl.blob {
+	if fl.kind == kindBlob {
 		s.downloads--
 		if fl.quota != nil {
 			fl.quota.release()
@@ -626,34 +674,43 @@ func (s *store) fill(ctx context.Context, fl *flight, digest string, fetch fetch
 	}
 	path := filepath.Join(s.dir, key)
 	metadata := int64(0)
-	if strings.HasPrefix(key, "manifests/") {
+	if fl.kind == kindManifest {
 		if len(media) > 1024 {
 			return errors.New("manifest media type too large")
 		}
 		metadata = int64(len(media))
-		s.evictLocked(metadata)
-		if metadata > s.max-s.total-s.pending {
+	}
+	// The download is charged its bytes in pending; the entry is charged at
+	// least minCharge, and its media type.
+	size := charge(cw.n + metadata)
+	if extra := size - cw.n; extra > 0 {
+		s.evictLocked(extra)
+		if extra > s.max-s.total-s.pending {
 			return errTooLarge
 		}
+	}
+	if fl.kind == kindManifest {
 		if err := os.WriteFile(path+".type", []byte(media), 0600); err != nil {
 			return err
 		}
 	}
 	if err := os.Rename(f.Name(), path); err != nil {
-		if metadata > 0 {
+		if fl.kind == kindManifest {
 			_ = os.Remove(path + ".type")
 		}
 		return err
 	}
-	e := &entry{key: key, size: cw.n + metadata, used: s.now()}
+	e := &entry{key: key, kind: fl.kind, size: size, used: s.now()}
 	s.addLocked(e)
 	s.pending -= cw.n
 	cw.n = 0
 	s.finishLocked(fl, nil, e)
 	return nil
 }
+
+// tagKey is the key of a tag for a normalized Accept (normalizeAccept).
 func tagKey(name, tag, accept string) string {
-	return fmt.Sprintf("%x", sha256.Sum256([]byte(name+"\x00"+tag+"\x00"+normalizeAccept(accept))))
+	return kindTag.key(fmt.Sprintf("%x", sha256.Sum256([]byte(name+"\x00"+tag+"\x00"+accept))))
 }
 func (s *store) readTagFile(key string) string {
 	f, err := os.Open(filepath.Join(s.dir, key))
@@ -670,7 +727,7 @@ func (s *store) readTagFile(key string) string {
 func (s *store) tag(name, tag, accept string) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	e, ok := s.entries["tags/"+tagKey(name, tag, accept)]
+	e, ok := s.entries[tagKey(name, tag, accept)]
 	if !ok {
 		return ""
 	}
@@ -683,21 +740,21 @@ func (s *store) setTag(name, tag, accept, digest string) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	manifest, ok := s.entries["manifests/"+digest[7:]]
+	manifest, ok := s.entries[kindManifest.key(digest[7:])]
 	if !ok {
 		return os.ErrNotExist
 	}
 	// Protect the target while making room for its metadata.
 	manifest.pins++
 	defer func() { manifest.pins-- }()
-	key := "tags/" + tagKey(name, tag, accept)
+	key := tagKey(name, tag, accept)
 	old, exists := s.entries[key]
 	if exists {
 		// Already charged: rewriting it needs no room.
 		s.touchLocked(old)
 	} else {
-		s.evictLocked(tagCharge)
-		if tagCharge > s.max-s.total-s.pending {
+		s.evictLocked(charge(0))
+		if charge(0) > s.max-s.total-s.pending {
 			return errTooLarge
 		}
 	}
@@ -722,6 +779,6 @@ func (s *store) setTag(name, tag, accept, digest string) error {
 		s.indexTagLocked(key, digest)
 		return nil
 	}
-	s.addLocked(&entry{key: key, size: tagCharge, used: s.now(), digest: digest})
+	s.addLocked(&entry{key: key, kind: kindTag, size: charge(0), used: s.now(), digest: digest})
 	return nil
 }

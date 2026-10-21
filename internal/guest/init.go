@@ -26,7 +26,6 @@ import (
 // replace the fields.
 type InitConfig struct {
 	Version string
-	bootMs  map[string]int64
 	// Cmdline is the kernel command line; empty reads /proc/cmdline.
 	Cmdline string
 	// Getpid reports the process id; Init only acts as a VM's PID 1 when it is 1.
@@ -65,7 +64,9 @@ type InitConfig struct {
 // powering the VM off, or exiting with the executor's code in a container.
 func Init(ctx context.Context, cfg InitConfig) int {
 	entry := time.Now()
-	cfg.bootMs = make(map[string]int64)
+	// bootMs is the boot phase timing handed to the executor (ERMITE_BOOT_MS),
+	// which reports it in its Hello.
+	bootMs := make(map[string]int64)
 	log := zerowrap.FromCtx(ctx)
 	// The kernel starts a VM's init with umask 0, which dockerd, the executor
 	// and every step would inherit: files and t.TempDir() directories would be
@@ -100,7 +101,7 @@ func Init(ctx context.Context, cfg InitConfig) int {
 		if b, err := os.ReadFile("/proc/uptime"); err == nil {
 			if fields := strings.Fields(string(b)); len(fields) > 0 {
 				if seconds, err := strconv.ParseFloat(fields[0], 64); err == nil && seconds >= 0 {
-					cfg.bootMs["kernel"] = max(0, int64(seconds*1000)-time.Since(entry).Milliseconds())
+					bootMs["kernel"] = max(0, int64(seconds*1000)-time.Since(entry).Milliseconds())
 				}
 			}
 		}
@@ -110,9 +111,9 @@ func Init(ctx context.Context, cfg InitConfig) int {
 			powerOff()
 			return 1
 		}
-		cfg.bootMs["setup"] = time.Since(start).Milliseconds()
+		bootMs["setup"] = time.Since(start).Milliseconds()
 	}
-	code := runPayload(ctx, cfg, mode, args)
+	code := runPayload(ctx, cfg, mode, args, bootMs)
 	if inVM {
 		powerOff()
 	}
@@ -127,7 +128,9 @@ const StepUmask = 0o022
 // with an empty environment.
 const defaultPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
-func runPayload(ctx context.Context, cfg InitConfig, mode string, args map[string]string) int {
+// runPayload starts dockerd and the executor and waits for them. It adds its
+// boot phases to bootMs, which the executor gets.
+func runPayload(ctx context.Context, cfg InitConfig, mode string, args map[string]string, bootMs map[string]int64) int {
 	log := zerowrap.FromCtx(ctx)
 	if os.Getenv("PATH") == "" {
 		_ = os.Setenv("PATH", defaultPath)
@@ -149,9 +152,6 @@ func runPayload(ctx context.Context, cfg InitConfig, mode string, args map[strin
 		return 1
 	}
 
-	if cfg.bootMs == nil {
-		cfg.bootMs = make(map[string]int64)
-	}
 	var dockerStart time.Time
 	var dockerPid, containerdPid int
 	_, statErr := os.Stat("/usr/bin/dockerd")
@@ -169,7 +169,7 @@ func runPayload(ctx context.Context, cfg InitConfig, mode string, args map[strin
 			// A containerd that never came up still cost its wait: keep it in the
 			// breakdown. A missing binary returns at once (0 ms) and is omitted.
 			if ms := time.Since(start).Milliseconds(); ok || ms > 0 {
-				cfg.bootMs["containerd"] = ms
+				bootMs["containerd"] = ms
 			}
 			if ok {
 				containerdPid = pid
@@ -210,7 +210,7 @@ func runPayload(ctx context.Context, cfg InitConfig, mode string, args map[strin
 			timeout = dockerReadyTimeout
 		}
 		err := waitDockerReady(ctx, log, sock, dockerPid, timeout, sigs)
-		cfg.bootMs["dockerd"] = time.Since(dockerStart).Milliseconds()
+		bootMs["dockerd"] = time.Since(dockerStart).Milliseconds()
 		var exited *dockerdExitError
 		var abort *abortBootError
 		switch {
@@ -223,7 +223,7 @@ func runPayload(ctx context.Context, cfg InitConfig, mode string, args map[strin
 		}
 	}
 
-	execEnv := append(os.Environ(), "ERMITE_CONNECT="+target, "ERMITE_SANDBOX="+mode, "ERMITE_VERSION="+cfg.Version, "ERMITE_BOOT_MS="+formatBootMs(cfg.bootMs))
+	execEnv := append(os.Environ(), "ERMITE_CONNECT="+target, "ERMITE_SANDBOX="+mode, "ERMITE_VERSION="+cfg.Version, "ERMITE_BOOT_MS="+formatBootMs(bootMs))
 	execPid, err := spawn(cfg.ExecArgs, execEnv)
 	if err != nil {
 		log.Error().Err(err).Msg("init: start executor")

@@ -60,9 +60,10 @@ type jobRun struct {
 	cancelKind execpb.CancelKind // kind of the first cancel request
 	stopping   bool              // the runner is shutting down
 
+	mu    sync.Mutex
+	steps map[int32]*ermite.StepUpdate
+	// timeline is the job's phase timing, guarded by mu.
 	timeline timeline
-	mu       sync.Mutex
-	steps    map[int32]*ermite.StepUpdate
 	// What the guest has told us, for the validation of the next frame: the
 	// guest is untrusted code, its step numbers and lines are checked before
 	// they reach the server (see violate).
@@ -724,14 +725,7 @@ func (j *jobRun) drive(conn sandbox.Conn, rt *Runner) (*execpb.Exit, error) {
 		Hello: func(h *execpb.Hello) {
 			j.mu.Lock()
 			defer j.mu.Unlock()
-			if j.timeline == nil {
-				j.timeline = make(timeline)
-			}
-			for k, v := range h.BootMs {
-				if v >= 0 {
-					j.timeline["guest_"+k+"_ms"] = v
-				}
-			}
+			j.timeline.addGuestBoot(h.GetBootMs())
 		},
 		StepStarted: j.stepStarted, StepCompleted: j.stepCompleted,
 		Log:             j.logLine,

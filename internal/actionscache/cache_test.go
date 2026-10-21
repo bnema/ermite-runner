@@ -383,16 +383,3 @@ func TestKeyNeverUsesARef(t *testing.T) {
 		t.Error("shape")
 	}
 }
-
-func TestParseMax(t *testing.T) {
-	for in, want := range map[string]int64{"": DefaultMax, "0": 0, "500M": 500 << 20, "2G": 2 << 30, "2GiB": 2 << 30, "1024": 1024} {
-		if got, err := ParseMax(in); err != nil || got != want {
-			t.Errorf("%q: %d %v", in, got, err)
-		}
-	}
-	for _, in := range []string{"-1", "x", "G"} {
-		if _, err := ParseMax(in); err == nil {
-			t.Errorf("%q accepted", in)
-		}
-	}
-}

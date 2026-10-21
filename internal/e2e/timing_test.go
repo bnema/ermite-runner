@@ -10,11 +10,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bnema/zerowrap"
+
 	ermite "bnema.dev/ermite-api/gen/ermite"
 	"bnema.dev/ermite-api/gen/ermite/ermiteconnect"
+
 	"bnema.dev/ermite-runner/internal/host"
 	"bnema.dev/ermite-runner/internal/host/hosttest"
-	"github.com/bnema/zerowrap"
 )
 
 type timingWriter struct {

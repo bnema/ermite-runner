@@ -1,15 +1,17 @@
 // SPDX-License-Identifier: MIT
+
 package registryproxy
 
 import (
 	"bytes"
 	"encoding/json"
-	"github.com/bnema/zerowrap"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"strings"
 	"testing"
+
+	"github.com/bnema/zerowrap"
 )
 
 // An opt-in manual check using curl against a real local HTTP listener, with

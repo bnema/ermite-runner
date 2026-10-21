@@ -45,8 +45,6 @@ type Runner struct {
 	// which the guest reaches on its loopback (cachesvc.DefaultPort), and each
 	// job gets a token scoped to its repository and refs.
 	Cache *cachesvc.Service
-	// Registry enables the runtime channel for anonymous registry-only jobs.
-	Registry bool
 	// Archives, when not nil (and Cache is), is the host's cache of action
 	// archives: the host downloads them and the sandbox reads them from the cache
 	// channel (see cacheArchives). ArchiveHTTP is its HTTP client (tests); nil
@@ -213,7 +211,7 @@ func (r *Runner) startJob(ctx context.Context, log zerowrap.Logger, job *ermite.
 		r: r, job: job, client: r.Job(job.JobToken), t: t, ctx: jctx, cancel: cancel,
 		log:        zerowrap.Logger{Logger: log.With().Str("job_id", job.JobId).Int64("run_id", job.RunId).Int32("attempt", job.Attempt).Logger()},
 		receivedAt: r.clock(), cancelCh: make(chan *execpb.Cancel, 1), steps: map[int32]*ermite.StepUpdate{},
-		annSeen: map[int32]bool{}, sumSeen: map[int32]bool{},
+		annSeen: map[int32]bool{}, sumSeen: map[int32]bool{}, timeline: timeline{},
 	}
 	jr.log.Info().Str("job_key", job.JobKey).Msg("job assigned")
 	r.active.Add(1)

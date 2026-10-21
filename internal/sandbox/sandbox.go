@@ -91,6 +91,8 @@ type Sandbox interface {
 
 // Timed is implemented by sandboxes that measure their start phases.
 type Timed interface {
+	// StartTimings returns a copy of the phase durations (ms) of a successful
+	// Start, nil after a failed one. Call it only once Start has returned.
 	StartTimings() map[string]int64
 }
 

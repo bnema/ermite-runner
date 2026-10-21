@@ -81,7 +81,7 @@ func TestReportBudgetFollowsTheShutdownChannel(t *testing.T) {
 			cl := &stubClient{}
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			j := &jobRun{client: cl, t: tm, ctx: ctx, job: &ermite.Job{JobId: "j1"}, steps: map[int32]*ermite.StepUpdate{},
+			j := &jobRun{client: cl, t: tm, ctx: ctx, job: &ermite.Job{JobId: "j1"}, steps: map[int32]*ermite.StepUpdate{}, timeline: timeline{},
 				cancelCh: make(chan *execpb.Cancel, 1), log: zerowrap.New(zerowrap.Config{Level: "debug", Format: "json", Output: &logBuf{}})}
 			j.outbox = newOutbox(cl, "j1", tm, func(error) {}, j.log)
 			j.outbox.start(ctx)

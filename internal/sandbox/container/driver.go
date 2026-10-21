@@ -22,6 +22,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"net/netip"
 	"os"
@@ -306,16 +307,9 @@ type containerSandbox struct {
 	attached  bool
 }
 
-// StartTimings returns a copy of the successful start's phase durations.
-func (s *containerSandbox) StartTimings() map[string]int64 {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	out := make(map[string]int64, len(s.timings))
-	for k, v := range s.timings {
-		out[k] = v
-	}
-	return out
-}
+// StartTimings returns a copy of the phase durations of a successful Start.
+// It is valid once Start has returned, which writes them.
+func (s *containerSandbox) StartTimings() map[string]int64 { return maps.Clone(s.timings) }
 
 // ID implements sandbox.Sandbox.
 func (s *containerSandbox) ID() string { return s.id }

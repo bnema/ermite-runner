@@ -53,9 +53,13 @@ func setupCache(ctx context.Context, scfg *sandbox.Config) (*cachesvc.Service, *
 	default:
 		return nil, nil, fmt.Errorf("%s: %q is not 0 or 1", envCache, os.Getenv(envCache))
 	}
-	max, err := cachesvc.ParseMax(os.Getenv(cachesvc.EnvMax))
+	// The cache API cannot be turned off by its size: 0 is refused.
+	max, err := cachesvc.ParseSize(os.Getenv(cachesvc.EnvMax), cachesvc.DefaultMax)
+	if err == nil && max == 0 {
+		err = errors.New("0 is not a size cap; " + envCache + "=0 turns the cache off")
+	}
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("%s: %w", cachesvc.EnvMax, err)
 	}
 	archives, err := setupArchives(ctx, scfg.StateDir)
 	if err != nil {
@@ -79,9 +83,9 @@ func setupCache(ctx context.Context, scfg *sandbox.Config) (*cachesvc.Service, *
 // service, so it is only used when that is on.
 func setupArchives(ctx context.Context, stateDir string) (*actionscache.Cache, error) {
 	log := zerowrap.FromCtx(ctx)
-	max, err := actionscache.ParseMax(os.Getenv(actionscache.EnvMax))
+	max, err := cachesvc.ParseSize(os.Getenv(actionscache.EnvMax), actionscache.DefaultMax)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%s: %w", actionscache.EnvMax, err)
 	}
 	if max == 0 {
 		log.Info().Msg("the action archive cache is off (" + actionscache.EnvMax + "=0)")
@@ -95,23 +99,23 @@ func setupArchives(ctx context.Context, stateDir string) (*actionscache.Cache, e
 	return c, nil
 }
 
+// envRegistryMax is the size cap of the Docker Hub mirror (default
+// defaultRegistryMax); 0 turns it off.
 const envRegistryMax = "ERMITE_RUNNER_REGISTRY_CACHE_MAX"
+
+const defaultRegistryMax = 10 << 30
 
 // setupRegistry opens the Docker Hub mirror. The caller only calls this when
 // the cache channel is enabled; its capacity is independent of the cache API.
 func setupRegistry(ctx context.Context, stateDir string) (http.Handler, error) {
 	log := zerowrap.FromCtx(ctx)
-	value := strings.TrimSpace(os.Getenv(envRegistryMax))
-	if zeroSize(value) {
-		log.Info().Msg("registry proxy off (" + envRegistryMax + "=" + value + ")")
-		return nil, nil
-	}
-	if value == "" {
-		value = "10G"
-	}
-	max, err := cachesvc.ParseMax(value)
+	max, err := cachesvc.ParseSize(os.Getenv(envRegistryMax), defaultRegistryMax)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", envRegistryMax, err)
+	}
+	if max == 0 {
+		log.Info().Msg("registry proxy off (" + envRegistryMax + "=0)")
+		return nil, nil
 	}
 	p, err := registryproxy.New(registryproxy.Config{Dir: filepath.Join(stateDir, "registry"), Max: max, Log: log})
 	if err != nil {
@@ -119,12 +123,6 @@ func setupRegistry(ctx context.Context, stateDir string) (http.Handler, error) {
 	}
 	log.Info().Int64("max_bytes", max).Msg("registry proxy on (Docker Hub pull-through)")
 	return p, nil
-}
-
-// zeroSize reports a size of zero in any unit: 0, 00, 0M, 0G, 0GiB...
-func zeroSize(v string) bool {
-	digits := strings.TrimRight(v, "kKmMgGtTiIbB")
-	return digits != "" && strings.Trim(digits, "0") == ""
 }
 
 // envCache=0 turns the cache service off.
@@ -345,7 +343,6 @@ func runCmd(ctx context.Context) int {
 		},
 		Features: hcfg.ServerFeaturesFunc(url),
 		Cache:    cache,
-		Registry: cache != nil && cache.RegistryEnabled(),
 		Archives: archives,
 		Results:  results,
 		Artifacts: func(tok string) ermiteconnect.JobArtifactServiceClient {

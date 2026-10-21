@@ -62,11 +62,13 @@ const (
 	// progress at once, so that one sandbox's pulls leave room for its cache and
 	// artifact traffic. dockerd pulls 3 layers at once by default.
 	DefaultRegistryPerChannel = 8
-	// DefaultRegistryDownloadsPerChannel bounds the cold Docker Hub downloads
-	// one channel may have started at once (dockerd's default
+	// RegistryDownloadsPerChannel bounds the cold Docker Hub downloads one
+	// channel may have started at once (dockerd's default
 	// max-concurrent-downloads), so that one sandbox cannot take every slot of
 	// the registry proxy.
-	DefaultRegistryDownloadsPerChannel = 3
+	RegistryDownloadsPerChannel = 3
+	// RegistryPath is the prefix of the Docker registry API on the channel.
+	RegistryPath = "/v2/"
 )
 
 // Config configures a Service.
@@ -94,7 +96,6 @@ type Config struct {
 	ProgressTimeout              time.Duration
 	ConnsPerListener, Conns      int
 	RegistryPerChannel           int
-	RegistryDownloadsPerChannel  int
 	MinCharge                    int64
 	MaxPending, MaxPendingPerJob int
 	// hookChunk, when set, is called by an upload once its range is admitted and
@@ -119,12 +120,10 @@ type Service struct {
 	registry http.Handler
 	// registryPerChannel caps the registry requests in progress per handler.
 	registryPerChannel int
-	// registryDownloads is the cold download quota of each channel.
-	registryDownloads int
-	hookChunk         func(id int64)
-	progress          time.Duration
-	perListener       int
-	connsGlobal       chan struct{}
+	hookChunk          func(id int64)
+	progress           time.Duration
+	perListener        int
+	connsGlobal        chan struct{}
 }
 
 type listener struct {
@@ -165,11 +164,8 @@ func New(cfg Config) (*Service, error) {
 	if cfg.RegistryPerChannel <= 0 {
 		cfg.RegistryPerChannel = DefaultRegistryPerChannel
 	}
-	if cfg.RegistryDownloadsPerChannel <= 0 {
-		cfg.RegistryDownloadsPerChannel = DefaultRegistryDownloadsPerChannel
-	}
 	s := &Service{store: st, sign: sg, now: cfg.Now, log: cfg.Log, channels: map[string]*listener{}, stop: make(chan struct{}),
-		archives: cfg.Archives, registry: cfg.Registry, hookChunk: cfg.hookChunk, progress: cfg.ProgressTimeout, perListener: cfg.ConnsPerListener, connsGlobal: make(chan struct{}, cfg.Conns), registryPerChannel: cfg.RegistryPerChannel, registryDownloads: cfg.RegistryDownloadsPerChannel}
+		archives: cfg.Archives, registry: cfg.Registry, hookChunk: cfg.hookChunk, progress: cfg.ProgressTimeout, perListener: cfg.ConnsPerListener, connsGlobal: make(chan struct{}, cfg.Conns), registryPerChannel: cfg.RegistryPerChannel}
 	s.wg.Add(1)
 	go s.housekeeping()
 	return s, nil
@@ -319,14 +315,17 @@ func (s *Service) CloseAll() error {
 	return s.store.flush()
 }
 
-// ParseMax reads ERMITE_RUNNER_CACHE_MAX: a number of bytes or a size with a K,
-// M, G or T suffix (optionally followed by iB or B). Empty means DefaultMax.
-func ParseMax(v string) (int64, error) {
+// ParseSize reads a size: a number of bytes or a number with a K, M, G or T
+// suffix (powers of 1024), optionally followed by iB or B, such as 10G, 500M
+// or 2GiB. Surrounding spaces are ignored; empty means def. Zero in any unit
+// (0, 0G, 0GiB) is 0. The error names no variable: the caller prefixes it.
+func ParseSize(v string, def int64) (int64, error) {
+	v = strings.TrimSpace(v)
 	if v == "" {
-		return DefaultMax, nil
+		return def, nil
 	}
 	s := []byte(v)
-	for len(s) > 0 && (s[len(s)-1] == 'B' || s[len(s)-1] == 'b' || s[len(s)-1] == 'i') {
+	for len(s) > 0 && strings.IndexByte("bBiI", s[len(s)-1]) >= 0 {
 		s = s[:len(s)-1]
 	}
 	mult := int64(1)
@@ -343,8 +342,8 @@ func ParseMax(v string) (int64, error) {
 		}
 	}
 	n, err := strconv.ParseInt(string(s), 10, 64)
-	if err != nil || n <= 0 || n > (1<<62)/mult {
-		return 0, fmt.Errorf("%s: %q is not a size (examples: 10G, 500M)", EnvMax, v)
+	if err != nil || n < 0 || n > (1<<62)/mult {
+		return 0, fmt.Errorf("%q is not a size (examples: 10G, 500M)", v)
 	}
 	return n * mult, nil
 }

@@ -30,7 +30,7 @@ const (
 // busy runner does not trip the forge's rate limit (codeload 429).
 //
 // It only ever improves a resolution: an action that cannot be cached (no cache,
-// no channel for this job, a ref that did not resolve to a sha, a download that
+// no cache scope for this job, a ref that did not resolve to a sha, a download that
 // failed, a full disk) keeps its original URL and token, and the sandbox
 // downloads it as before, with its retries and its messages. The sandbox prints
 // "Download action repository" in either case, so a hit reads like a miss in the
@@ -41,7 +41,7 @@ func (j *jobRun) cacheArchives(ctx context.Context, orig []*ermite.ResolvedActio
 		return
 	}
 	if _, ok, err := cacheScope(j.job, j.contexts); err != nil || !ok {
-		return // no channel for this job: the guest has no relay either
+		return // action archives are served only to jobs with a cache scope
 	}
 	ttl := time.Duration(j.timeoutMinutes())*time.Minute + cacheTokenMargin
 	for i, a := range orig {
@@ -54,9 +54,13 @@ func (j *jobRun) cacheArchives(ctx context.Context, orig []*ermite.ResolvedActio
 		if !ok {
 			continue
 		}
+		// fetched: this call ran the download itself. An invalid key, a wait
+		// that was cancelled or a joined download that failed are no misses.
+		var fetched bool
 		var fetchTime time.Duration
 		var bytes int64
 		hit, verify, err := rt.Archives.Ensure(ctx, key, func(ctx context.Context, w io.Writer) error {
+			fetched = true
 			start := time.Now()
 			cw := &archiveCountWriter{Writer: w}
 			err := j.fetchArchive(ctx, a, origin, cw)
@@ -64,11 +68,11 @@ func (j *jobRun) cacheArchives(ctx context.Context, orig []*ermite.ResolvedActio
 			bytes += cw.n
 			return err
 		})
-		if !hit {
+		if fetched {
 			j.mu.Lock()
-			j.timeline.add("archive_miss_ms", fetchTime)
-			j.timeline["archive_misses"]++
-			j.timeline["archive_miss_bytes"] += bytes
+			j.timeline.addMs("archive_miss_ms", fetchTime)
+			j.timeline.add("archive_misses", 1)
+			j.timeline.add("archive_miss_bytes", bytes)
 			j.mu.Unlock()
 		}
 		log := j.log.With().Str("action", a.NameWithOwner).Str("sha", a.ResolvedSha).Logger()
@@ -81,7 +85,7 @@ func (j *jobRun) cacheArchives(ctx context.Context, orig []*ermite.ResolvedActio
 			continue
 		}
 		event := log.Info().Bool("hit", hit).Int64("verify_ms", verify.Milliseconds())
-		if !hit {
+		if fetched {
 			event = event.Int64("fetch_ms", fetchTime.Milliseconds()).Int64("bytes", bytes)
 		}
 		event.Msg("action archive cache")

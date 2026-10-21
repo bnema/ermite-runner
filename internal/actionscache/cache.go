@@ -316,13 +316,12 @@ func (w *countWriter) Write(p []byte) (int, error) {
 
 // verify re-hashes the archive of key against its sum. Any mismatch (or a
 // missing file) drops the entry and returns ErrNotFound.
-func (c *Cache) verify(key string) (duration time.Duration, err error) {
+func (c *Cache) verify(key string) (time.Duration, error) {
 	start := time.Now()
-	defer func() { duration = time.Since(start) }()
 	sb, err := os.ReadFile(c.sumPath(key))
 	if err != nil {
 		c.drop(key)
-		return 0, ErrNotFound
+		return time.Since(start), ErrNotFound
 	}
 	want, sizeS, _ := strings.Cut(strings.TrimSpace(string(sb)), " ")
 	size, perr := strconv.ParseInt(sizeS, 10, 64)
@@ -332,7 +331,7 @@ func (c *Cache) verify(key string) (duration time.Duration, err error) {
 			_ = f.Close()
 		}
 		c.drop(key)
-		return 0, ErrNotFound
+		return time.Since(start), ErrNotFound
 	}
 	defer func() { _ = f.Close() }()
 	h := sha256.New()
@@ -340,9 +339,9 @@ func (c *Cache) verify(key string) (duration time.Duration, err error) {
 	if err != nil || n != size || hex.EncodeToString(h.Sum(nil)) != want {
 		c.log.Warn().Str("key", key).Msg("action archive failed its integrity check; dropped")
 		c.drop(key)
-		return 0, ErrNotFound
+		return time.Since(start), ErrNotFound
 	}
-	return 0, nil
+	return time.Since(start), nil
 }
 
 func (c *Cache) drop(key string) {
@@ -417,35 +416,6 @@ func (c *Cache) Size() int64 {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.total
-}
-
-// ParseMax reads ERMITE_RUNNER_ACTIONS_CACHE_MAX: empty is DefaultMax, 0 is off
-// (returned as 0), otherwise a number of bytes or a size with a K, M, G or T
-// suffix (optionally followed by iB or B).
-func ParseMax(v string) (int64, error) {
-	v = strings.TrimSpace(v)
-	if v == "" {
-		return DefaultMax, nil
-	}
-	s := strings.TrimRight(strings.ToUpper(v), "IB")
-	mult := int64(1)
-	if n := len(s); n > 0 {
-		switch s[n-1] {
-		case 'K':
-			mult, s = 1<<10, s[:n-1]
-		case 'M':
-			mult, s = 1<<20, s[:n-1]
-		case 'G':
-			mult, s = 1<<30, s[:n-1]
-		case 'T':
-			mult, s = 1<<40, s[:n-1]
-		}
-	}
-	n, err := strconv.ParseInt(s, 10, 64)
-	if err != nil || n < 0 || n > (1<<62)/mult {
-		return 0, fmt.Errorf("%s: %q is not a size (examples: 2G, 500M, 0)", EnvMax, v)
-	}
-	return n * mult, nil
 }
 
 // Dir is the directory of the cache (tests).

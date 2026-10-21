@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+
 package cachesvc
 
 import (
@@ -8,6 +9,8 @@ import (
 	"testing"
 )
 
+// The registry is served under RegistryPath on the cache handler and the
+// channel, never by the results service; without one, those paths are 404.
 func TestRegistryRoute(t *testing.T) {
 	for _, on := range []bool{false, true} {
 		cfg := Config{}
@@ -21,7 +24,7 @@ func TestRegistryRoute(t *testing.T) {
 		})
 		for _, h := range []http.Handler{r.svc.Handler(), r.svc.channelHandler("job", results)} {
 			w := httptest.NewRecorder()
-			h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/v2/", nil))
+			h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, RegistryPath, nil))
 			if on {
 				if w.Code != http.StatusOK || w.Body.String() != "registry" {
 					t.Fatalf("%d %s", w.Code, w.Body)

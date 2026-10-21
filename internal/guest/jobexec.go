@@ -353,7 +353,7 @@ func (c cacheRelay) close() {
 func startCacheRelay(ctx context.Context, target Target, spec *execpb.JobSpec, bridge bridgeLookup) cacheRelay {
 	port := spec.GetCachePort()
 	url := cacheURL(port)
-	if url == "" || spec.GetCacheToken() == "" {
+	if url == "" {
 		return cacheRelay{}
 	}
 	log := zerowrap.FromCtx(ctx)
@@ -365,10 +365,10 @@ func startCacheRelay(ctx context.Context, target Target, spec *execpb.JobSpec, b
 		return cacheRelay{}
 	}
 	results := spec.GetResults()
-	// Registry-only jobs need dockerd's loopback relay, but no action runtime
-	// URLs or token. Leave those fields empty so neither node nor docker
-	// actions receive ACTIONS_* runtime variables.
-	if !results && spec.GetCacheMode() == "" {
+	// A registry-only job (no cache scope, no results service: the host sends
+	// no token) needs dockerd's loopback relay, but no action runtime URLs or
+	// token: neither node nor docker actions get ACTIONS_* variables.
+	if spec.GetCacheToken() == "" || (!results && spec.GetCacheMode() == "") {
 		return cacheRelay{relay: r}
 	}
 	c := cacheRelay{relay: r, url: url, token: spec.GetCacheToken(), mode: spec.GetCacheMode(),

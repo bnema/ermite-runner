@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+
 package registryproxy
 
 import (
@@ -27,12 +28,22 @@ func WithQuota(ctx context.Context, q *Quota) context.Context {
 
 type quotaKey struct{}
 
-// QuotaOf returns the quota attached by WithQuota, or nil.
-func QuotaOf(ctx context.Context) *Quota { return quotaFrom(ctx) }
-
 func quotaFrom(ctx context.Context) *Quota {
 	q, _ := ctx.Value(quotaKey{}).(*Quota)
 	return q
+}
+
+// WithJob attaches the id of the job a request serves to its context: the
+// Proxy logs it as job_id on its registry lines.
+func WithJob(ctx context.Context, job string) context.Context {
+	return context.WithValue(ctx, jobKey{}, job)
+}
+
+type jobKey struct{}
+
+func jobFrom(ctx context.Context) string {
+	job, _ := ctx.Value(jobKey{}).(string)
+	return job
 }
 
 func (q *Quota) tryAcquire() bool {

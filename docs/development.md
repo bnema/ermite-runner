@@ -23,6 +23,7 @@ They are opt-in. They run the real stub executor. Output and exit codes come bac
 | `ERMITE_RUNNER_IT_E2E=1` | End-to-end job tests in `internal/e2e` |
 | `ERMITE_RUNNER_IT_NET=1` | Packet-level firewall test |
 | `ERMITE_RUNNER_IT_DOCKER_API=1` | Docker Engine calls against any daemon, including rootless |
+| `ERMITE_RUNNER_IT_REGISTRY=1` | Live Docker Hub pulls through the registry proxy with `curl` (`TestDockerHubCurl`). Needs internet access |
 | `ERMITE_RUNNER_IT_NODE_DIR` | Directory with `node-v24.21.0-linux-x64.tar.gz`, for offline hosts |
 | `ERMITE_RUNNER_TEST_IMAGE` | Image used by the container and end-to-end tests |
 
@@ -70,7 +71,7 @@ Build and register the [runner container](container.md) as usual, then constrain
 its CPU budget to reproduce a small host without changing the boot sequence:
 
 ```sh
-docker run --name runner-timing --cpus=1 \
+docker run -d --name runner-timing --cpus=1 \
   --device /dev/kvm --device /dev/net/tun --cap-add NET_ADMIN \
   -v runner-timing-state:/var/lib/ermite-runner \
   --env-file runner.env -e ERMITE_RUNNER_LOG_FORMAT=json ermite-runner:<tag>

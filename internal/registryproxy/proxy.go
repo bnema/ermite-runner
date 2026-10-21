@@ -28,8 +28,6 @@ type Config struct {
 	Max      int64
 	Upstream string // default https://registry-1.docker.io
 	AuthURL  string // default https://auth.docker.io/token
-	Client   *http.Client
-	Now      func() time.Time
 	Log      zerowrap.Logger
 	// RequestTimeout bounds auth, manifests and HEAD (default 10s).
 	RequestTimeout time.Duration
@@ -38,7 +36,7 @@ type Config struct {
 	BlobIdleTimeout time.Duration
 	// KeepAliveInterval is how often a client waiting for a cold blob is kept
 	// alive while the download progresses (default 1s), when its
-	// ResponseWriter has a KeepAlive method.
+	// ResponseWriter is a KeepAliver.
 	KeepAliveInterval time.Duration
 	// AbandonGrace is how long a download nobody waits for any more keeps
 	// running in case another request joins it; then it is cancelled and its
@@ -52,6 +50,15 @@ type Config struct {
 	SlotWait time.Duration
 }
 
+// KeepAliver is a ResponseWriter that can move its connection's deadlines
+// without writing. While a request waits for a cold blob, the Proxy calls
+// KeepAlive every KeepAliveInterval as long as the download progresses, so
+// that a slow but moving download does not time the client out before the
+// first byte of the reply.
+type KeepAliver interface {
+	KeepAlive()
+}
+
 // Proxy implements http.Handler for GET and HEAD under /v2/.
 type Proxy struct {
 	s         *store
@@ -62,9 +69,6 @@ type Proxy struct {
 
 // New opens the persistent cache. It starts no goroutines or listeners.
 func New(c Config) (*Proxy, error) {
-	if c.Now == nil {
-		c.Now = time.Now
-	}
 	if c.Upstream == "" {
 		c.Upstream = "https://registry-1.docker.io"
 	}
@@ -95,14 +99,14 @@ func New(c Config) (*Proxy, error) {
 	if c.SlotWait <= 0 {
 		c.SlotWait = 30 * time.Second
 	}
-	client, blobs := upstreamClients(c)
-
-	st, err := openStore(c.Dir, c.Max, c.Now)
+	st, err := openStore(storeConfig{dir: c.Dir, max: c.Max, now: time.Now, grace: c.AbandonGrace,
+		maxDownloads: c.MaxDownloads, slotWait: c.SlotWait, log: c.Log})
 	if err != nil {
 		return nil, err
 	}
-	st.grace, st.maxDownloads, st.slotWait, st.log = c.AbandonGrace, c.MaxDownloads, c.SlotWait, c.Log
-	return &Proxy{s: st, u: &upstream{base: strings.TrimRight(c.Upstream, "/"), auth: c.AuthURL, client: client, blobClient: blobs, requestTimeout: c.RequestTimeout, blobIdle: c.BlobIdleTimeout, now: c.Now, tokens: map[string]bearer{}}, log: c.Log, keepEvery: c.KeepAliveInterval}, nil
+	client, blobs := upstreamClients(c.RequestTimeout)
+	return &Proxy{s: st, u: &upstream{base: strings.TrimRight(c.Upstream, "/"), auth: c.AuthURL, client: client, blobClient: blobs,
+		requestTimeout: c.RequestTimeout, blobIdle: c.BlobIdleTimeout, tokens: map[string]bearer{}}, log: c.Log, keepEvery: c.KeepAliveInterval}, nil
 }
 
 var namePattern = regexp.MustCompile(`^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$`)
@@ -147,23 +151,32 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	name, kind := path[:i], path[i+1:]
+	name, route := path[:i], path[i+1:]
 	// dockerd's legacy client sends one Accept line per media type.
 	accept := strings.Join(r.Header.Values("Accept"), ",")
 	if len(name) > 255 || !namePattern.MatchString(name) || len(accept) > 8192 {
 		http.NotFound(w, r)
 		return
 	}
-	if kind == "manifests" && (validDigest(ref) || tagPattern.MatchString(ref)) {
+	if route == kindManifest.dir() && (validDigest(ref) || tagPattern.MatchString(ref)) {
 		p.manifest(w, r, name, ref, normalizeAccept(accept))
 		return
 	}
-	if kind == "blobs" && validDigest(ref) {
+	if route == kindBlob.dir() && validDigest(ref) {
 		p.blob(w, r, name, ref)
 		return
 	}
 	http.NotFound(w, r)
 }
+
+// logFor is the Proxy's logger, with the job_id of the request (WithJob).
+func (p *Proxy) logFor(ctx context.Context) zerowrap.Logger {
+	if job := jobFrom(ctx); job != "" {
+		return zerowrap.Logger{Logger: p.log.With().Str("job_id", job).Logger()}
+	}
+	return p.log
+}
+
 func serveFile(w http.ResponseWriter, r *http.Request, f *storedFile, media, digest string) {
 	defer func() { _ = f.Close() }()
 	fi, err := f.Stat()
@@ -176,29 +189,39 @@ func serveFile(w http.ResponseWriter, r *http.Request, f *storedFile, media, dig
 	http.ServeContent(w, r, "", fi.ModTime(), f)
 }
 
+// serveStaleTag serves the manifest a tag pointed to when upstream could not
+// answer, if that manifest is still stored. It reports whether it served one.
+func (p *Proxy) serveStaleTag(w http.ResponseWriter, r *http.Request, name, tag, accept string) bool {
+	digest := p.s.tag(name, tag, accept)
+	if !validDigest(digest) {
+		return false
+	}
+	f, media, err := p.s.open(kindManifest, digest)
+	if err != nil {
+		return false
+	}
+	serveFile(w, r, f, media, digest)
+	return true
+}
+
 // manifest serves a manifest by tag or digest. accept is normalized.
 func (p *Proxy) manifest(w http.ResponseWriter, r *http.Request, name, ref, accept string) {
 	start := time.Now()
 	hit := false
+	log := p.logFor(r.Context())
 	defer func() {
-		p.log.Info().Str("repo", name).Str("ref", ref).Bool("hit", hit).Int64("ms", time.Since(start).Milliseconds()).Msg("registry manifest")
+		log.Info().Str("repo", name).Str("ref", ref).Bool("hit", hit).Int64("ms", time.Since(start).Milliseconds()).Msg("registry manifest")
 	}()
 	ctx, cancel := context.WithTimeout(r.Context(), p.u.requestTimeout)
 	defer cancel()
 	digest := ref
 	tag := !validDigest(ref)
 	if tag {
-		resp, err := p.u.request(ctx, http.MethodHead, name, "manifests", ref, accept)
+		resp, err := p.u.request(ctx, http.MethodHead, name, kindManifest, ref, accept)
 		if err != nil {
-			if unavailable(err) {
-				digest = p.s.tag(name, ref, accept)
-				if validDigest(digest) {
-					if f, media, e := p.s.open("manifests", digest); e == nil {
-						hit = true
-						serveFile(w, r, f, media, digest)
-						return
-					}
-				}
+			if unavailable(err) && p.serveStaleTag(w, r, name, ref, accept) {
+				hit = true
+				return
 			}
 			http.Error(w, "registry upstream unavailable", proxyStatus(err))
 			return
@@ -211,10 +234,10 @@ func (p *Proxy) manifest(w http.ResponseWriter, r *http.Request, name, ref, acce
 		}
 	}
 	// Shared flight, as for blobs: it must not end with the initiator's request.
-	f, media, cached, err := p.s.ensure(ctx, "manifests", digest, func(flightCtx context.Context, dst io.Writer) (string, error) {
+	f, media, cached, err := p.s.ensure(ctx, kindManifest, digest, func(flightCtx context.Context, dst io.Writer) (string, error) {
 		fillCtx, fillCancel := context.WithTimeout(flightCtx, p.u.requestTimeout)
 		defer fillCancel()
-		resp, err := p.u.request(fillCtx, http.MethodGet, name, "manifests", digest, accept)
+		resp, err := p.u.request(fillCtx, http.MethodGet, name, kindManifest, digest, accept)
 		if err != nil {
 			return "", err
 		}
@@ -231,15 +254,9 @@ func (p *Proxy) manifest(w http.ResponseWriter, r *http.Request, name, ref, acce
 	}, keepalive{})
 	hit = cached
 	if err != nil {
-		if tag && unavailable(err) {
-			previous := p.s.tag(name, ref, accept)
-			if validDigest(previous) {
-				if old, oldMedia, e := p.s.open("manifests", previous); e == nil {
-					hit = true
-					serveFile(w, r, old, oldMedia, previous)
-					return
-				}
-			}
+		if tag && unavailable(err) && p.serveStaleTag(w, r, name, ref, accept) {
+			hit = true
+			return
 		}
 		http.Error(w, "registry fetch failed", proxyStatus(err))
 		return
@@ -249,8 +266,9 @@ func (p *Proxy) manifest(w http.ResponseWriter, r *http.Request, name, ref, acce
 	}
 	serveFile(w, r, f, media, digest)
 }
+
 func (p *Proxy) blob(w http.ResponseWriter, r *http.Request, name, digest string) {
-	if f, media, err := p.s.open("blobs", digest); err == nil {
+	if f, media, err := p.s.open(kindBlob, digest); err == nil {
 		serveFile(w, r, f, media, digest)
 		return
 	}
@@ -258,7 +276,7 @@ func (p *Proxy) blob(w http.ResponseWriter, r *http.Request, name, digest string
 	if r.Method == http.MethodHead {
 		ctx, cancel := context.WithTimeout(r.Context(), p.u.requestTimeout)
 		defer cancel()
-		resp, err := p.u.request(ctx, http.MethodHead, name, "blobs", digest, "")
+		resp, err := p.u.request(ctx, http.MethodHead, name, kindBlob, digest, "")
 		if err != nil {
 			http.Error(w, "registry fetch failed", proxyStatus(err))
 			return
@@ -282,18 +300,19 @@ func (p *Proxy) blob(w http.ResponseWriter, r *http.Request, name, digest string
 	// when no client has waited for it for AbandonGrace. At most MaxDownloads
 	// run at once, and at most its Quota per client: a request over either
 	// waits up to SlotWait for a slot, then gets 503, which dockerd retries
-	// (about 50 s) before pulling from Docker Hub. While it waits, a writer
-	// with KeepAlive (the cache channel's progress deadline) is kept alive as
-	// long as the download moves.
+	// (about 50 s) before pulling from Docker Hub. While it waits, a
+	// KeepAliver writer (the cache channel's progress deadline) is kept alive
+	// as long as the download moves.
 	keep := keepalive{every: p.keepEvery}
-	if k, ok := w.(interface{ KeepAlive() }); ok {
+	if k, ok := w.(KeepAliver); ok {
 		keep.fn = k.KeepAlive
 	}
-	f, media, _, err := p.s.ensure(r.Context(), "blobs", digest, func(downloadCtx context.Context, dst io.Writer) (string, error) {
+	log := p.logFor(r.Context())
+	f, media, _, err := p.s.ensure(r.Context(), kindBlob, digest, func(downloadCtx context.Context, dst io.Writer) (string, error) {
 		start := time.Now()
 		var size int64
 		defer func() {
-			p.log.Debug().Str("digest", digest).Int64("bytes", size).Int64("ms", time.Since(start).Milliseconds()).Msg("registry blob")
+			log.Debug().Str("digest", digest).Int64("bytes", size).Int64("ms", time.Since(start).Milliseconds()).Msg("registry blob")
 		}()
 		resp, err := p.u.blob(downloadCtx, name, digest)
 		if err != nil {

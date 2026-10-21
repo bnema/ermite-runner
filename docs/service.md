@@ -67,9 +67,10 @@ The security boundary of a job is its microVM or container, not the unit.
 
 ## Job timing
 
-The existing `job finished` line carries integer milliseconds (all `*_ms`
-fields). Phases that did not run are omitted; driver timings are available only
-when sandbox start succeeds. Guest phases are omitted when they did not run.
+The `job finished` line carries integer milliseconds (all `*_ms` fields).
+Phases that did not run are omitted, and the driver (`sb_*`) timings appear only
+when the sandbox started. `resolve_ms` includes `archive_miss_ms`, and both are
+part of `run_ms`.
 
 | Fields | Meaning |
 | --- | --- |

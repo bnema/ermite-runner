@@ -1,6 +1,6 @@
 # Cache and artifacts
 
-The runner serves the GitHub Actions cache and artifacts v4 to jobs. Both use one channel per sandbox.
+The runner serves the GitHub Actions cache, artifacts v4 and a Docker Hub mirror to jobs. All three use one channel per sandbox.
 
 ## Channel
 
@@ -84,11 +84,11 @@ Works with `actions/cache`, `setup-go` and `setup-node` with `cache:`, and anyth
 
 The runner provides an anonymous, pull-only Docker Hub mirror on the same private
 channel. Each job's dockerd uses `http://127.0.0.1:9089` as a registry mirror.
-Other registries are not cached; there is no HTTPS interception or guest network
-policy change. Guest credentials are never forwarded upstream. Private pulls
+Other registries are not cached. There is no HTTPS interception, and the mirror
+needs no network policy rule. Guest credentials are never forwarded upstream. Private pulls
 fall back to Docker Hub directly, where dockerd can use the job's credentials.
 
-Verified sha256 blobs and manifests live under `<state>/registry/`. Tags are
+Verified sha256 blobs and manifests live under `<state dir>/registry/`. Tags are
 revalidated by an upstream HEAD on each request, with the client's Accept headers
 reduced to the known manifest media types. If Docker Hub is unreachable, times
 out, returns a server error or rate-limits (429), a previously cached tag can be
@@ -111,24 +111,26 @@ have at most 8 registry requests in progress; one more gets 503 at once.
 
 Downloads have no total time limit, but they fail after 30 s without progress.
 Auth, manifest and HEAD requests are limited to 10 s. Auth and manifest requests
-never follow redirects; blob requests follow the CDN redirect without the bearer
-token. Stored blobs support range requests. Cold blob HEAD requests fetch only
-upstream metadata, not the layer body.
+never follow redirects; blob requests, HEAD included, follow the CDN redirect
+without the bearer token. Stored blobs support range requests. Cold blob HEAD
+requests fetch only upstream metadata, not the layer body.
 
 `ERMITE_RUNNER_REGISTRY_CACHE_MAX` defaults to `10G`. Blobs, manifests and tag
-files (charged 4 KiB each) share one least-recently-used eviction; an entry that
-is being served is never evicted. This cap is independent of
+files share one least-recently-used eviction; each is charged at least 4 KiB, so
+the number of files stays below the cap divided by 4 KiB. An entry that is being served is
+never evicted. This cap is independent of
 `ERMITE_RUNNER_CACHE_MAX`. A zero size in any unit (`0`, `0M`, `0G`) disables only
 the proxy. `ERMITE_RUNNER_CACHE=0` disables the whole channel and therefore also
 the proxy (logged at startup). Dockerd retains its mirror setting and falls back
-to Docker Hub if the mirror is unavailable. No deployment is needed to clear
-entries: stop the runner before removing `<state>/registry/`.
+to Docker Hub if the mirror is unavailable. To clear the cache, stop the runner
+and remove `<state dir>/registry/`.
 
-Jobs with neither cache permissions nor artifacts still get the loopback channel
-for dockerd, but no `ACTIONS_CACHE_URL`, `ACTIONS_RESULTS_URL`, or
+Jobs with neither cache permissions nor artifacts get the loopback channel for
+dockerd when the proxy is on, but no `ACTIONS_CACHE_URL`, `ACTIONS_RESULTS_URL`, or
 `ACTIONS_RUNTIME_TOKEN` is exposed to their steps. Registry routes need no token:
 only public content is served over a channel exclusive to that sandbox.
 
-The host logs one `registry manifest` line per request with `repo`, `ref`, `hit`
-and `ms`. Blob misses log `registry blob` at debug level with `digest`, `bytes`
-and `ms`.
+The host logs one `registry manifest` line per request with `job_id`, `repo`,
+`ref`, `hit` and `ms`. Blob misses log `registry blob` at debug level with
+`job_id`, `digest`, `bytes` and `ms`; `job_id` is the job that started the
+download.

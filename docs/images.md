@@ -29,6 +29,7 @@ scripts/build-image.sh tmp/image    # builds the OCI image and tmp/image/base.ex
 - `/home/runner/work` and `/opt/hostedtoolcache`, owned by `runner`. The tool cache holds the toolchains listed in `images/ubuntu-26.04/toolcache.lock` for the image architecture.
 - `bash` and `sh`. `python3` and a `python` command for `shell: python`.
 - `dockerd` and passwordless `sudo` for `runner`, for jobs that use Docker.
+- No `registry-mirrors` in `/etc/docker/daemon.json`. The runner starts dockerd with `--registry-mirror` (its Docker Hub mirror), and dockerd refuses to start when an option is set both as a flag and in that file.
 - Common tools: git, curl, jq, build-essential, ca-certificates, tzdata, zip and unzip.
 
 `pwsh` is not in the image. A step that asks for it fails with `pwsh: command not found`.

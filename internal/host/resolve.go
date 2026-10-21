@@ -116,8 +116,8 @@ func (j *jobRun) resolveActions(ctx context.Context, req *execpb.ResolveRequest)
 	defer func() {
 		j.mu.Lock()
 		defer j.mu.Unlock()
-		j.timeline.add("resolve_ms", time.Since(start))
-		j.timeline["resolve_calls"]++
+		j.timeline.addMs("resolve_ms", time.Since(start))
+		j.timeline.add("resolve_calls", 1)
 	}()
 	fail := func(format string, a ...any) *execpb.ResolveResponse {
 		return &execpb.ResolveResponse{Error: fmt.Sprintf(format, a...)}

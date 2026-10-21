@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+
 package e2e
 
 import (
@@ -10,10 +11,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bnema/zerowrap"
+
 	"bnema.dev/ermite-runner/internal/cachesvc"
 	"bnema.dev/ermite-runner/internal/execstream/execpb"
 	"bnema.dev/ermite-runner/internal/registryproxy"
-	"github.com/bnema/zerowrap"
 )
 
 type registryLogs struct {
@@ -71,8 +73,8 @@ jobs:
     steps:
       - run: echo alpine-job
 `)
+		// A registry-only job: the host sends the port and no token.
 		spec.CachePort = cachesvc.DefaultPort
-		spec.CacheToken = svc.Token("e2e", cachesvc.Scope{}, time.Hour)
 		s := runJob(t, d, spec, nil)
 		if s.Result == nil || s.Result.Conclusion != execpb.StepConclusion_STEP_CONCLUSION_SUCCESS {
 			t.Fatalf("pull job %d: %v\n%s", i, s.Result, strings.Join(s.Logs, "\n"))

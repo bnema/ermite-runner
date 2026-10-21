@@ -48,9 +48,9 @@ func (s *Service) Handler() http.Handler { return s.handler("") }
 func (s *Service) handler(job string) http.Handler {
 	mux := http.NewServeMux()
 	if s.registry != nil {
-		registry := s.serveRegistry(make(chan struct{}, s.registryPerChannel), registryproxy.NewQuota(s.registryDownloads))
-		mux.HandleFunc("GET /v2/", registry)
-		mux.HandleFunc("HEAD /v2/", registry)
+		registry := s.serveRegistry(job, make(chan struct{}, s.registryPerChannel), registryproxy.NewQuota(RegistryDownloadsPerChannel))
+		mux.HandleFunc("GET "+RegistryPath, registry)
+		mux.HandleFunc("HEAD "+RegistryPath, registry)
 	}
 	// The routes are those of the toolkit's v1 client (cacheHttpClient.ts):
 	//   GET   cache?keys=k1,k2&version=v  :89  lookup
@@ -80,8 +80,8 @@ func (s *Service) handler(job string) http.Handler {
 	})
 }
 
-// channelHandler is the handler of a sandbox's channel: the cache API and the
-// action archives, and when results is not nil everything else goes to it (the results service of the
+// channelHandler is the handler of a sandbox's channel: the cache API, the
+// action archives and the registry, and when results is not nil everything else goes to it (the results service of the
 // job: Twirp and blob paths). The results service gets the same progress
 // deadlines as the cache: its bodies and replies must keep moving.
 func (s *Service) channelHandler(job string, results http.Handler) http.Handler {
@@ -90,7 +90,7 @@ func (s *Service) channelHandler(job string, results http.Handler) http.Handler 
 		return cache
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, APIPath) || strings.HasPrefix(r.URL.Path, ArchivePath) || strings.HasPrefix(r.URL.Path, "/v2/") {
+		if strings.HasPrefix(r.URL.Path, APIPath) || strings.HasPrefix(r.URL.Path, ArchivePath) || strings.HasPrefix(r.URL.Path, RegistryPath) {
 			cache.ServeHTTP(w, r)
 			return
 		}
@@ -395,6 +395,8 @@ func (p *progressWriter) Write(b []byte) (int, error) {
 // Unwrap lets http.ResponseController reach the real writer.
 func (p *progressWriter) Unwrap() http.ResponseWriter { return p.ResponseWriter }
 
+var _ registryproxy.KeepAliver = (*progressWriter)(nil)
+
 // KeepAlive moves the deadlines without writing. The registry proxy calls it
 // while the client waits for a shared upstream download that is progressing,
 // before the first byte of the reply. The read deadline moves too: once it
@@ -411,8 +413,9 @@ func (p *progressWriter) KeepAlive() {
 // slots caps the requests of this channel in progress at once; one over the
 // cap gets 503 at once, which dockerd retries or answers by pulling from
 // Docker Hub, so the channel's connections stay free for the cache. quota is
-// the channel's share of the proxy's cold downloads.
-func (s *Service) serveRegistry(slots chan struct{}, quota *registryproxy.Quota) http.HandlerFunc {
+// the channel's share of the proxy's cold downloads. job, when not empty, is
+// the channel's job, which the registry logs.
+func (s *Service) serveRegistry(job string, slots chan struct{}, quota *registryproxy.Quota) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		select {
 		case slots <- struct{}{}:
@@ -424,7 +427,11 @@ func (s *Service) serveRegistry(slots chan struct{}, quota *registryproxy.Quota)
 		}
 		rc := http.NewResponseController(w)
 		defer func() { _ = rc.SetWriteDeadline(deadline(s.progress, nil)) }()
-		r = r.WithContext(registryproxy.WithQuota(r.Context(), quota))
+		ctx := registryproxy.WithQuota(r.Context(), quota)
+		if job != "" {
+			ctx = registryproxy.WithJob(ctx, job)
+		}
+		r = r.WithContext(ctx)
 		s.registry.ServeHTTP(&progressWriter{ResponseWriter: w, rc: rc, idle: s.progress}, r)
 	}
 }
