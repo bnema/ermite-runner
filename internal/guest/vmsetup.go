@@ -3,8 +3,10 @@
 package guest
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -140,6 +142,10 @@ func setupVM(log zerowrap.Logger, args map[string]string) error {
 			log.Warn().Err(err).Str("target", m.dst).Msg("init: mount")
 		}
 	}
+	// /proc and /dev have already been mounted and moved into this root.
+	if err := createDevSymlinks("/"); err != nil {
+		log.Warn().Err(err).Msg("init: create /dev symlinks")
+	}
 	// Mounted at boot on GitHub's image (systemd's
 	// proc-sys-fs-binfmt_misc.automount): jobs read the handlers that
 	// setup-qemu-action registers there. A kernel without BINFMT_MISC has no
@@ -163,6 +169,25 @@ func setupVM(log zerowrap.Logger, args map[string]string) error {
 	// second line of defence when the module is built in but not disabled.
 	_ = os.WriteFile("/proc/sys/net/ipv6/conf/all/disable_ipv6", []byte("1\n"), 0o644)
 	return nil
+}
+
+// createDevSymlinks supplies the standard aliases absent from devtmpfs.
+// Existing entries are left alone, including dangling symlinks. Try every alias
+// even if one fails; the caller logs failures without aborting guest init.
+func createDevSymlinks(root string) error {
+	var errs []error
+	for _, link := range []struct{ name, target string }{
+		{"fd", "/proc/self/fd"},
+		{"stdin", "/proc/self/fd/0"},
+		{"stdout", "/proc/self/fd/1"},
+		{"stderr", "/proc/self/fd/2"},
+		{"core", "/proc/kcore"},
+	} {
+		if err := os.Symlink(link.target, filepath.Join(root, "dev", link.name)); err != nil && !os.IsExist(err) {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // writeResolvConf points the guest at the gateway, where the runner's DNS
