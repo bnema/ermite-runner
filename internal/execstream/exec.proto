@@ -30,6 +30,8 @@ message Frame {
     ResolveRequest resolve_request = 12;   // executor -> host
     ResolveResponse resolve_response = 13; // host -> executor, answers a ResolveRequest
     NamedValue secret = 14; // host -> executor, one per secret, before Run
+    DepsFileChunk deps_file_chunk = 16;
+    DepsResult deps_result = 17;
     NamedValue var = 15;    // host -> executor, one per variable, before Run
   }
 }
@@ -60,6 +62,7 @@ message Run {
   string script = 1;
   map<string, string> env = 2;
   JobSpec job = 3;
+  DepsRequest deps = 4;
 }
 
 // JobSpec is the job to run: the fields of the job that ermite handed to the
@@ -299,4 +302,34 @@ message ResolvedAction {
   // host sets it for archives served by the ermite server, from its own
   // configuration, never from the URL alone.
   string auth_origin = 9;
+}
+
+message DepsRequest {
+  repeated DepsUpdate updates = 1;
+  string go_version = 2;
+  string repo = 3;
+  string sha = 4;
+  string clone_url = 5;
+  string token = 6;
+  // Loopback port of the registry-only relay (0: none). No cache or results
+  // credentials are sent with it.
+  uint32 registry_port = 7;
+  // Accept an http clone URL (ERMITE_RUNNER_INSECURE_HTTP=1).
+  bool allow_insecure_http = 8;
+}
+message DepsUpdate {
+  string ecosystem = 1;
+  string directory = 2;
+  string name = 3;
+  string version = 4;
+}
+message DepsFileChunk {
+  string path = 1;
+  uint64 offset = 2;
+  bytes data = 3;
+  bool last = 4;
+}
+message DepsResult {
+  string error = 1;
+  uint32 file_count = 2;
 }

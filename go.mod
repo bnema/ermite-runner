@@ -4,7 +4,7 @@ go 1.27
 
 require (
 	bnema.dev/ermite-actions v0.2.1
-	bnema.dev/ermite-api v0.16.1
+	bnema.dev/ermite-api v0.19.0
 	connectrpc.com/connect v1.21.0
 	github.com/bnema/zerowrap v1.4.1
 	github.com/containerd/errdefs v1.0.0

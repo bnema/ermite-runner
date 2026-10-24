@@ -51,7 +51,7 @@ func needE2E(t *testing.T) string {
 func buildRunner(t *testing.T, dir string) string {
 	t.Helper()
 	exe := filepath.Join(dir, "ermite-runner")
-	root, err := exec.Command("go", "list", "-m", "-f", "{{.Dir}}").Output()
+	root, err := exec.Command("go", "list", "-m", "-f", "{{.Dir}}", "bnema.dev/ermite-runner").Output()
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -260,6 +260,8 @@ type Frame struct {
 	//	*Frame_ResolveRequest
 	//	*Frame_ResolveResponse
 	//	*Frame_Secret
+	//	*Frame_DepsFileChunk
+	//	*Frame_DepsResult
 	//	*Frame_Var
 	Body          isFrame_Body `protobuf_oneof:"body"`
 	unknownFields protoimpl.UnknownFields
@@ -429,6 +431,24 @@ func (x *Frame) GetSecret() *NamedValue {
 	return nil
 }
 
+func (x *Frame) GetDepsFileChunk() *DepsFileChunk {
+	if x != nil {
+		if x, ok := x.Body.(*Frame_DepsFileChunk); ok {
+			return x.DepsFileChunk
+		}
+	}
+	return nil
+}
+
+func (x *Frame) GetDepsResult() *DepsResult {
+	if x != nil {
+		if x, ok := x.Body.(*Frame_DepsResult); ok {
+			return x.DepsResult
+		}
+	}
+	return nil
+}
+
 func (x *Frame) GetVar() *NamedValue {
 	if x != nil {
 		if x, ok := x.Body.(*Frame_Var); ok {
@@ -498,6 +518,14 @@ type Frame_Secret struct {
 	Secret *NamedValue `protobuf:"bytes,14,opt,name=secret,proto3,oneof"` // host -> executor, one per secret, before Run
 }
 
+type Frame_DepsFileChunk struct {
+	DepsFileChunk *DepsFileChunk `protobuf:"bytes,16,opt,name=deps_file_chunk,json=depsFileChunk,proto3,oneof"`
+}
+
+type Frame_DepsResult struct {
+	DepsResult *DepsResult `protobuf:"bytes,17,opt,name=deps_result,json=depsResult,proto3,oneof"`
+}
+
 type Frame_Var struct {
 	Var *NamedValue `protobuf:"bytes,15,opt,name=var,proto3,oneof"` // host -> executor, one per variable, before Run
 }
@@ -529,6 +557,10 @@ func (*Frame_ResolveRequest) isFrame_Body() {}
 func (*Frame_ResolveResponse) isFrame_Body() {}
 
 func (*Frame_Secret) isFrame_Body() {}
+
+func (*Frame_DepsFileChunk) isFrame_Body() {}
+
+func (*Frame_DepsResult) isFrame_Body() {}
 
 func (*Frame_Var) isFrame_Body() {}
 
@@ -667,6 +699,7 @@ type Run struct {
 	Script        string                 `protobuf:"bytes,1,opt,name=script,proto3" json:"script,omitempty"`
 	Env           map[string]string      `protobuf:"bytes,2,rep,name=env,proto3" json:"env,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	Job           *JobSpec               `protobuf:"bytes,3,opt,name=job,proto3" json:"job,omitempty"`
+	Deps          *DepsRequest           `protobuf:"bytes,4,opt,name=deps,proto3" json:"deps,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -718,6 +751,13 @@ func (x *Run) GetEnv() map[string]string {
 func (x *Run) GetJob() *JobSpec {
 	if x != nil {
 		return x.Job
+	}
+	return nil
+}
+
+func (x *Run) GetDeps() *DepsRequest {
+	if x != nil {
+		return x.Deps
 	}
 	return nil
 }
@@ -1926,12 +1966,303 @@ func (x *ResolvedAction) GetAuthOrigin() string {
 	return ""
 }
 
+type DepsRequest struct {
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	Updates   []*DepsUpdate          `protobuf:"bytes,1,rep,name=updates,proto3" json:"updates,omitempty"`
+	GoVersion string                 `protobuf:"bytes,2,opt,name=go_version,json=goVersion,proto3" json:"go_version,omitempty"`
+	Repo      string                 `protobuf:"bytes,3,opt,name=repo,proto3" json:"repo,omitempty"`
+	Sha       string                 `protobuf:"bytes,4,opt,name=sha,proto3" json:"sha,omitempty"`
+	CloneUrl  string                 `protobuf:"bytes,5,opt,name=clone_url,json=cloneUrl,proto3" json:"clone_url,omitempty"`
+	Token     string                 `protobuf:"bytes,6,opt,name=token,proto3" json:"token,omitempty"`
+	// Loopback port of the registry-only relay (0: none). No cache or results
+	// credentials are sent with it.
+	RegistryPort uint32 `protobuf:"varint,7,opt,name=registry_port,json=registryPort,proto3" json:"registry_port,omitempty"`
+	// Accept an http clone URL (ERMITE_RUNNER_INSECURE_HTTP=1).
+	AllowInsecureHttp bool `protobuf:"varint,8,opt,name=allow_insecure_http,json=allowInsecureHttp,proto3" json:"allow_insecure_http,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
+}
+
+func (x *DepsRequest) Reset() {
+	*x = DepsRequest{}
+	mi := &file_exec_proto_msgTypes[19]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DepsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DepsRequest) ProtoMessage() {}
+
+func (x *DepsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_exec_proto_msgTypes[19]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DepsRequest.ProtoReflect.Descriptor instead.
+func (*DepsRequest) Descriptor() ([]byte, []int) {
+	return file_exec_proto_rawDescGZIP(), []int{19}
+}
+
+func (x *DepsRequest) GetUpdates() []*DepsUpdate {
+	if x != nil {
+		return x.Updates
+	}
+	return nil
+}
+
+func (x *DepsRequest) GetGoVersion() string {
+	if x != nil {
+		return x.GoVersion
+	}
+	return ""
+}
+
+func (x *DepsRequest) GetRepo() string {
+	if x != nil {
+		return x.Repo
+	}
+	return ""
+}
+
+func (x *DepsRequest) GetSha() string {
+	if x != nil {
+		return x.Sha
+	}
+	return ""
+}
+
+func (x *DepsRequest) GetCloneUrl() string {
+	if x != nil {
+		return x.CloneUrl
+	}
+	return ""
+}
+
+func (x *DepsRequest) GetToken() string {
+	if x != nil {
+		return x.Token
+	}
+	return ""
+}
+
+func (x *DepsRequest) GetRegistryPort() uint32 {
+	if x != nil {
+		return x.RegistryPort
+	}
+	return 0
+}
+
+func (x *DepsRequest) GetAllowInsecureHttp() bool {
+	if x != nil {
+		return x.AllowInsecureHttp
+	}
+	return false
+}
+
+type DepsUpdate struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Ecosystem     string                 `protobuf:"bytes,1,opt,name=ecosystem,proto3" json:"ecosystem,omitempty"`
+	Directory     string                 `protobuf:"bytes,2,opt,name=directory,proto3" json:"directory,omitempty"`
+	Name          string                 `protobuf:"bytes,3,opt,name=name,proto3" json:"name,omitempty"`
+	Version       string                 `protobuf:"bytes,4,opt,name=version,proto3" json:"version,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DepsUpdate) Reset() {
+	*x = DepsUpdate{}
+	mi := &file_exec_proto_msgTypes[20]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DepsUpdate) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DepsUpdate) ProtoMessage() {}
+
+func (x *DepsUpdate) ProtoReflect() protoreflect.Message {
+	mi := &file_exec_proto_msgTypes[20]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DepsUpdate.ProtoReflect.Descriptor instead.
+func (*DepsUpdate) Descriptor() ([]byte, []int) {
+	return file_exec_proto_rawDescGZIP(), []int{20}
+}
+
+func (x *DepsUpdate) GetEcosystem() string {
+	if x != nil {
+		return x.Ecosystem
+	}
+	return ""
+}
+
+func (x *DepsUpdate) GetDirectory() string {
+	if x != nil {
+		return x.Directory
+	}
+	return ""
+}
+
+func (x *DepsUpdate) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *DepsUpdate) GetVersion() string {
+	if x != nil {
+		return x.Version
+	}
+	return ""
+}
+
+type DepsFileChunk struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Path          string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
+	Offset        uint64                 `protobuf:"varint,2,opt,name=offset,proto3" json:"offset,omitempty"`
+	Data          []byte                 `protobuf:"bytes,3,opt,name=data,proto3" json:"data,omitempty"`
+	Last          bool                   `protobuf:"varint,4,opt,name=last,proto3" json:"last,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DepsFileChunk) Reset() {
+	*x = DepsFileChunk{}
+	mi := &file_exec_proto_msgTypes[21]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DepsFileChunk) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DepsFileChunk) ProtoMessage() {}
+
+func (x *DepsFileChunk) ProtoReflect() protoreflect.Message {
+	mi := &file_exec_proto_msgTypes[21]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DepsFileChunk.ProtoReflect.Descriptor instead.
+func (*DepsFileChunk) Descriptor() ([]byte, []int) {
+	return file_exec_proto_rawDescGZIP(), []int{21}
+}
+
+func (x *DepsFileChunk) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+func (x *DepsFileChunk) GetOffset() uint64 {
+	if x != nil {
+		return x.Offset
+	}
+	return 0
+}
+
+func (x *DepsFileChunk) GetData() []byte {
+	if x != nil {
+		return x.Data
+	}
+	return nil
+}
+
+func (x *DepsFileChunk) GetLast() bool {
+	if x != nil {
+		return x.Last
+	}
+	return false
+}
+
+type DepsResult struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Error         string                 `protobuf:"bytes,1,opt,name=error,proto3" json:"error,omitempty"`
+	FileCount     uint32                 `protobuf:"varint,2,opt,name=file_count,json=fileCount,proto3" json:"file_count,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DepsResult) Reset() {
+	*x = DepsResult{}
+	mi := &file_exec_proto_msgTypes[22]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DepsResult) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DepsResult) ProtoMessage() {}
+
+func (x *DepsResult) ProtoReflect() protoreflect.Message {
+	mi := &file_exec_proto_msgTypes[22]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DepsResult.ProtoReflect.Descriptor instead.
+func (*DepsResult) Descriptor() ([]byte, []int) {
+	return file_exec_proto_rawDescGZIP(), []int{22}
+}
+
+func (x *DepsResult) GetError() string {
+	if x != nil {
+		return x.Error
+	}
+	return ""
+}
+
+func (x *DepsResult) GetFileCount() uint32 {
+	if x != nil {
+		return x.FileCount
+	}
+	return 0
+}
+
 var File_exec_proto protoreflect.FileDescriptor
 
 const file_exec_proto_rawDesc = "" +
 	"\n" +
 	"\n" +
-	"exec.proto\x12\x15ermite.runner.exec.v1\"\xde\a\n" +
+	"exec.proto\x12\x15ermite.runner.exec.v1\"\xf4\b\n" +
 	"\x05Frame\x124\n" +
 	"\x05hello\x18\x01 \x01(\v2\x1c.ermite.runner.exec.v1.HelloH\x00R\x05hello\x12.\n" +
 	"\x03run\x18\x02 \x01(\v2\x1a.ermite.runner.exec.v1.RunH\x00R\x03run\x127\n" +
@@ -1948,7 +2279,10 @@ const file_exec_proto_rawDesc = "" +
 	"\fstep_summary\x18\v \x01(\v2\".ermite.runner.exec.v1.StepSummaryH\x00R\vstepSummary\x12P\n" +
 	"\x0fresolve_request\x18\f \x01(\v2%.ermite.runner.exec.v1.ResolveRequestH\x00R\x0eresolveRequest\x12S\n" +
 	"\x10resolve_response\x18\r \x01(\v2&.ermite.runner.exec.v1.ResolveResponseH\x00R\x0fresolveResponse\x12;\n" +
-	"\x06secret\x18\x0e \x01(\v2!.ermite.runner.exec.v1.NamedValueH\x00R\x06secret\x125\n" +
+	"\x06secret\x18\x0e \x01(\v2!.ermite.runner.exec.v1.NamedValueH\x00R\x06secret\x12N\n" +
+	"\x0fdeps_file_chunk\x18\x10 \x01(\v2$.ermite.runner.exec.v1.DepsFileChunkH\x00R\rdepsFileChunk\x12D\n" +
+	"\vdeps_result\x18\x11 \x01(\v2!.ermite.runner.exec.v1.DepsResultH\x00R\n" +
+	"depsResult\x125\n" +
 	"\x03var\x18\x0f \x01(\v2!.ermite.runner.exec.v1.NamedValueH\x00R\x03varB\x06\n" +
 	"\x04body\"6\n" +
 	"\n" +
@@ -1962,11 +2296,12 @@ const file_exec_proto_rawDesc = "" +
 	"\aboot_ms\x18\x04 \x03(\v2(.ermite.runner.exec.v1.Hello.BootMsEntryR\x06bootMs\x1a9\n" +
 	"\vBootMsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\x03R\x05value:\x028\x01\"\xbe\x01\n" +
+	"\x05value\x18\x02 \x01(\x03R\x05value:\x028\x01\"\xf6\x01\n" +
 	"\x03Run\x12\x16\n" +
 	"\x06script\x18\x01 \x01(\tR\x06script\x125\n" +
 	"\x03env\x18\x02 \x03(\v2#.ermite.runner.exec.v1.Run.EnvEntryR\x03env\x120\n" +
-	"\x03job\x18\x03 \x01(\v2\x1e.ermite.runner.exec.v1.JobSpecR\x03job\x1a6\n" +
+	"\x03job\x18\x03 \x01(\v2\x1e.ermite.runner.exec.v1.JobSpecR\x03job\x126\n" +
+	"\x04deps\x18\x04 \x01(\v2\".ermite.runner.exec.v1.DepsRequestR\x04deps\x1a6\n" +
 	"\bEnvEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xc9\x06\n" +
@@ -2078,7 +2413,33 @@ const file_exec_proto_rawDesc = "" +
 	"\x06source\x18\a \x01(\tR\x06source\x12\x14\n" +
 	"\x05error\x18\b \x01(\tR\x05error\x12\x1f\n" +
 	"\vauth_origin\x18\t \x01(\tR\n" +
-	"authOrigin*Y\n" +
+	"authOrigin\"\x97\x02\n" +
+	"\vDepsRequest\x12;\n" +
+	"\aupdates\x18\x01 \x03(\v2!.ermite.runner.exec.v1.DepsUpdateR\aupdates\x12\x1d\n" +
+	"\n" +
+	"go_version\x18\x02 \x01(\tR\tgoVersion\x12\x12\n" +
+	"\x04repo\x18\x03 \x01(\tR\x04repo\x12\x10\n" +
+	"\x03sha\x18\x04 \x01(\tR\x03sha\x12\x1b\n" +
+	"\tclone_url\x18\x05 \x01(\tR\bcloneUrl\x12\x14\n" +
+	"\x05token\x18\x06 \x01(\tR\x05token\x12#\n" +
+	"\rregistry_port\x18\a \x01(\rR\fregistryPort\x12.\n" +
+	"\x13allow_insecure_http\x18\b \x01(\bR\x11allowInsecureHttp\"v\n" +
+	"\n" +
+	"DepsUpdate\x12\x1c\n" +
+	"\tecosystem\x18\x01 \x01(\tR\tecosystem\x12\x1c\n" +
+	"\tdirectory\x18\x02 \x01(\tR\tdirectory\x12\x12\n" +
+	"\x04name\x18\x03 \x01(\tR\x04name\x12\x18\n" +
+	"\aversion\x18\x04 \x01(\tR\aversion\"c\n" +
+	"\rDepsFileChunk\x12\x12\n" +
+	"\x04path\x18\x01 \x01(\tR\x04path\x12\x16\n" +
+	"\x06offset\x18\x02 \x01(\x04R\x06offset\x12\x12\n" +
+	"\x04data\x18\x03 \x01(\fR\x04data\x12\x12\n" +
+	"\x04last\x18\x04 \x01(\bR\x04last\"A\n" +
+	"\n" +
+	"DepsResult\x12\x14\n" +
+	"\x05error\x18\x01 \x01(\tR\x05error\x12\x1d\n" +
+	"\n" +
+	"file_count\x18\x02 \x01(\rR\tfileCount*Y\n" +
 	"\n" +
 	"StreamKind\x12\x1b\n" +
 	"\x17STREAM_KIND_UNSPECIFIED\x10\x00\x12\x16\n" +
@@ -2116,7 +2477,7 @@ func file_exec_proto_rawDescGZIP() []byte {
 }
 
 var file_exec_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
-var file_exec_proto_msgTypes = make([]protoimpl.MessageInfo, 23)
+var file_exec_proto_msgTypes = make([]protoimpl.MessageInfo, 27)
 var file_exec_proto_goTypes = []any{
 	(StreamKind)(0),          // 0: ermite.runner.exec.v1.StreamKind
 	(CancelKind)(0),          // 1: ermite.runner.exec.v1.CancelKind
@@ -2141,10 +2502,14 @@ var file_exec_proto_goTypes = []any{
 	(*ResolveRequest)(nil),   // 20: ermite.runner.exec.v1.ResolveRequest
 	(*ResolveResponse)(nil),  // 21: ermite.runner.exec.v1.ResolveResponse
 	(*ResolvedAction)(nil),   // 22: ermite.runner.exec.v1.ResolvedAction
-	nil,                      // 23: ermite.runner.exec.v1.Hello.BootMsEntry
-	nil,                      // 24: ermite.runner.exec.v1.Run.EnvEntry
-	nil,                      // 25: ermite.runner.exec.v1.TokenPermissions.LevelsEntry
-	nil,                      // 26: ermite.runner.exec.v1.JobResult.OutputsEntry
+	(*DepsRequest)(nil),      // 23: ermite.runner.exec.v1.DepsRequest
+	(*DepsUpdate)(nil),       // 24: ermite.runner.exec.v1.DepsUpdate
+	(*DepsFileChunk)(nil),    // 25: ermite.runner.exec.v1.DepsFileChunk
+	(*DepsResult)(nil),       // 26: ermite.runner.exec.v1.DepsResult
+	nil,                      // 27: ermite.runner.exec.v1.Hello.BootMsEntry
+	nil,                      // 28: ermite.runner.exec.v1.Run.EnvEntry
+	nil,                      // 29: ermite.runner.exec.v1.TokenPermissions.LevelsEntry
+	nil,                      // 30: ermite.runner.exec.v1.JobResult.OutputsEntry
 }
 var file_exec_proto_depIdxs = []int32{
 	6,  // 0: ermite.runner.exec.v1.Frame.hello:type_name -> ermite.runner.exec.v1.Hello
@@ -2161,26 +2526,30 @@ var file_exec_proto_depIdxs = []int32{
 	20, // 11: ermite.runner.exec.v1.Frame.resolve_request:type_name -> ermite.runner.exec.v1.ResolveRequest
 	21, // 12: ermite.runner.exec.v1.Frame.resolve_response:type_name -> ermite.runner.exec.v1.ResolveResponse
 	5,  // 13: ermite.runner.exec.v1.Frame.secret:type_name -> ermite.runner.exec.v1.NamedValue
-	5,  // 14: ermite.runner.exec.v1.Frame.var:type_name -> ermite.runner.exec.v1.NamedValue
-	23, // 15: ermite.runner.exec.v1.Hello.boot_ms:type_name -> ermite.runner.exec.v1.Hello.BootMsEntry
-	24, // 16: ermite.runner.exec.v1.Run.env:type_name -> ermite.runner.exec.v1.Run.EnvEntry
-	8,  // 17: ermite.runner.exec.v1.Run.job:type_name -> ermite.runner.exec.v1.JobSpec
-	9,  // 18: ermite.runner.exec.v1.JobSpec.token_permissions:type_name -> ermite.runner.exec.v1.TokenPermissions
-	25, // 19: ermite.runner.exec.v1.TokenPermissions.levels:type_name -> ermite.runner.exec.v1.TokenPermissions.LevelsEntry
-	0,  // 20: ermite.runner.exec.v1.Output.stream:type_name -> ermite.runner.exec.v1.StreamKind
-	1,  // 21: ermite.runner.exec.v1.Cancel.kind:type_name -> ermite.runner.exec.v1.CancelKind
-	3,  // 22: ermite.runner.exec.v1.StepCompleted.conclusion:type_name -> ermite.runner.exec.v1.StepConclusion
-	3,  // 23: ermite.runner.exec.v1.StepCompleted.outcome:type_name -> ermite.runner.exec.v1.StepConclusion
-	2,  // 24: ermite.runner.exec.v1.Annotation.level:type_name -> ermite.runner.exec.v1.AnnotationLevel
-	15, // 25: ermite.runner.exec.v1.StepAnnotations.annotations:type_name -> ermite.runner.exec.v1.Annotation
-	3,  // 26: ermite.runner.exec.v1.JobResult.conclusion:type_name -> ermite.runner.exec.v1.StepConclusion
-	26, // 27: ermite.runner.exec.v1.JobResult.outputs:type_name -> ermite.runner.exec.v1.JobResult.OutputsEntry
-	22, // 28: ermite.runner.exec.v1.ResolveResponse.actions:type_name -> ermite.runner.exec.v1.ResolvedAction
-	29, // [29:29] is the sub-list for method output_type
-	29, // [29:29] is the sub-list for method input_type
-	29, // [29:29] is the sub-list for extension type_name
-	29, // [29:29] is the sub-list for extension extendee
-	0,  // [0:29] is the sub-list for field type_name
+	25, // 14: ermite.runner.exec.v1.Frame.deps_file_chunk:type_name -> ermite.runner.exec.v1.DepsFileChunk
+	26, // 15: ermite.runner.exec.v1.Frame.deps_result:type_name -> ermite.runner.exec.v1.DepsResult
+	5,  // 16: ermite.runner.exec.v1.Frame.var:type_name -> ermite.runner.exec.v1.NamedValue
+	27, // 17: ermite.runner.exec.v1.Hello.boot_ms:type_name -> ermite.runner.exec.v1.Hello.BootMsEntry
+	28, // 18: ermite.runner.exec.v1.Run.env:type_name -> ermite.runner.exec.v1.Run.EnvEntry
+	8,  // 19: ermite.runner.exec.v1.Run.job:type_name -> ermite.runner.exec.v1.JobSpec
+	23, // 20: ermite.runner.exec.v1.Run.deps:type_name -> ermite.runner.exec.v1.DepsRequest
+	9,  // 21: ermite.runner.exec.v1.JobSpec.token_permissions:type_name -> ermite.runner.exec.v1.TokenPermissions
+	29, // 22: ermite.runner.exec.v1.TokenPermissions.levels:type_name -> ermite.runner.exec.v1.TokenPermissions.LevelsEntry
+	0,  // 23: ermite.runner.exec.v1.Output.stream:type_name -> ermite.runner.exec.v1.StreamKind
+	1,  // 24: ermite.runner.exec.v1.Cancel.kind:type_name -> ermite.runner.exec.v1.CancelKind
+	3,  // 25: ermite.runner.exec.v1.StepCompleted.conclusion:type_name -> ermite.runner.exec.v1.StepConclusion
+	3,  // 26: ermite.runner.exec.v1.StepCompleted.outcome:type_name -> ermite.runner.exec.v1.StepConclusion
+	2,  // 27: ermite.runner.exec.v1.Annotation.level:type_name -> ermite.runner.exec.v1.AnnotationLevel
+	15, // 28: ermite.runner.exec.v1.StepAnnotations.annotations:type_name -> ermite.runner.exec.v1.Annotation
+	3,  // 29: ermite.runner.exec.v1.JobResult.conclusion:type_name -> ermite.runner.exec.v1.StepConclusion
+	30, // 30: ermite.runner.exec.v1.JobResult.outputs:type_name -> ermite.runner.exec.v1.JobResult.OutputsEntry
+	22, // 31: ermite.runner.exec.v1.ResolveResponse.actions:type_name -> ermite.runner.exec.v1.ResolvedAction
+	24, // 32: ermite.runner.exec.v1.DepsRequest.updates:type_name -> ermite.runner.exec.v1.DepsUpdate
+	33, // [33:33] is the sub-list for method output_type
+	33, // [33:33] is the sub-list for method input_type
+	33, // [33:33] is the sub-list for extension type_name
+	33, // [33:33] is the sub-list for extension extendee
+	0,  // [0:33] is the sub-list for field type_name
 }
 
 func init() { file_exec_proto_init() }
@@ -2203,6 +2572,8 @@ func file_exec_proto_init() {
 		(*Frame_ResolveRequest)(nil),
 		(*Frame_ResolveResponse)(nil),
 		(*Frame_Secret)(nil),
+		(*Frame_DepsFileChunk)(nil),
+		(*Frame_DepsResult)(nil),
 		(*Frame_Var)(nil),
 	}
 	type x struct{}
@@ -2211,7 +2582,7 @@ func file_exec_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_exec_proto_rawDesc), len(file_exec_proto_rawDesc)),
 			NumEnums:      4,
-			NumMessages:   23,
+			NumMessages:   27,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

@@ -152,6 +152,8 @@ func resolveFrame(r *execpb.ResolveResponse) *execpb.Frame {
 // frames. The functions are called from the goroutine of DriveJob, in the
 // order of the stream.
 type JobHandler struct {
+	DepsFileChunk func(*execpb.DepsFileChunk)
+	DepsResult    func(*execpb.DepsResult)
 	Hello         func(*execpb.Hello)
 	Output        func(*execpb.Output)
 	StepStarted   func(*execpb.StepStarted)
@@ -259,6 +261,14 @@ func DriveJob(rw io.ReadWriter, run *execpb.Run, cancel <-chan *execpb.Cancel, h
 		case *execpb.Frame_Log:
 			if h.Log != nil {
 				h.Log(b.Log)
+			}
+		case *execpb.Frame_DepsFileChunk:
+			if h.DepsFileChunk != nil {
+				h.DepsFileChunk(b.DepsFileChunk)
+			}
+		case *execpb.Frame_DepsResult:
+			if h.DepsResult != nil {
+				h.DepsResult(b.DepsResult)
 			}
 		case *execpb.Frame_JobResult:
 			if h.JobResult != nil {

@@ -142,7 +142,7 @@ func (r *Runner) Run(ctx context.Context) error {
 			pollID = newPollID()
 		}
 		pctx, cancel := context.WithTimeout(ctx, t.PollTimeout)
-		resp, err := r.Poll.FetchJob(pctx, connect.NewRequest(&ermite.FetchJobRequest{PollId: pollID, Version: r.Cfg.Version}))
+		resp, err := r.Poll.FetchJob(pctx, connect.NewRequest(&ermite.FetchJobRequest{PollId: pollID, Version: r.Cfg.Version, Kinds: []string{"workflow", "deps"}}))
 		cancel()
 		if err != nil {
 			<-slots
@@ -207,8 +207,14 @@ func (r *Runner) recover(ctx context.Context, log zerowrap.Logger, slots chan st
 
 func (r *Runner) startJob(ctx context.Context, log zerowrap.Logger, job *ermite.Job, t Timing, shutdown <-chan struct{}, slots chan struct{}) {
 	jctx, cancel := context.WithCancelCause(context.WithoutCancel(ctx))
+	// Deps jobs have an empty job_token: the server authenticates their job
+	// calls with the runner token.
+	client := r.Job(job.JobToken)
+	if job.Deps != nil {
+		client = r.Poll
+	}
 	jr := &jobRun{
-		r: r, job: job, client: r.Job(job.JobToken), t: t, ctx: jctx, cancel: cancel,
+		r: r, job: job, client: client, t: t, ctx: jctx, cancel: cancel,
 		log:        zerowrap.Logger{Logger: log.With().Str("job_id", job.JobId).Int64("run_id", job.RunId).Int32("attempt", job.Attempt).Logger()},
 		receivedAt: r.clock(), cancelCh: make(chan *execpb.Cancel, 1), steps: map[int32]*ermite.StepUpdate{},
 		annSeen: map[int32]bool{}, sumSeen: map[int32]bool{}, timeline: timeline{},

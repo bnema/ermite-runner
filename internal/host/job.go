@@ -89,10 +89,11 @@ type jobRun struct {
 	annSeen, sumSeen map[int32]bool
 	annDropped       int // annotations dropped for lack of room, see reportDroppedAnnotations
 	// hard stops the sandbox at once; set before the session starts.
-	hard    func()
-	result  *execpb.JobResult
-	outbox  *outbox
-	endedBy error // the server ended the job, or the assignment is gone
+	hard       func()
+	depsReport *ermite.DepsReport
+	result     *execpb.JobResult
+	outbox     *outbox
+	endedBy    error // the server ended the job, or the assignment is gone
 }
 
 var errAbandoned = errors.New("the server ended the job or revoked the assignment")
@@ -458,9 +459,13 @@ func (j *jobRun) run(rt *Runner, shutdown <-chan struct{}) {
 		return
 	}
 	var bg sync.WaitGroup
-	bg.Add(2)
+	bg.Add(1)
 	go func() { defer bg.Done(); j.heartbeats(ctx) }()
-	go func() { defer bg.Done(); j.watch(ctx) }()
+	// The server has no WatchJob (nor cancel) for deps jobs.
+	if j.job.Deps == nil {
+		bg.Add(1)
+		go func() { defer bg.Done(); j.watch(ctx) }()
+	}
 	// The context is cancelled first, so that the heartbeat and watch loops end.
 	defer func() { j.cancel(nil); bg.Wait() }()
 
@@ -610,6 +615,9 @@ func failure() outcome { return outcome{conclusion: ermite.CiConclusion_CI_CONCL
 
 // execute starts the sandbox, runs the job in it and returns how it ended.
 func (j *jobRun) execute(ctx context.Context, rt *Runner, stopHard <-chan struct{}) outcome {
+	if j.job.Deps != nil {
+		return j.executeDeps(ctx, rt, stopHard)
+	}
 	var err error
 	j.setOrigins(j.job.Contexts, rt.Cfg.URL, rt.Cfg.GuestForgeOrigin)
 	if j.contexts, err = RewriteServerURLs(j.job.Contexts, rt.Cfg.GuestForgeOrigin); err != nil {
@@ -775,16 +783,7 @@ func (j *jobRun) outcomeOf(ctx context.Context, exit *execpb.Exit, driveErr erro
 		}
 		return outcome{conclusion: c, outputs: res.Outputs, shutdown: res.RunnerShutdown && c == ermite.CiConclusion_CI_CONCLUSION_CANCELLED}
 	case j.cancelRequested() || ctx.Err() != nil:
-		// The executor did not report: it was stopped. A timeout wins over a
-		// shutdown or a user cancel that came later, as on the server (the first
-		// reason decides, and the timeout is the first when it fired first).
-		switch {
-		case j.firstCancelKind() == execpb.CancelKind_CANCEL_KIND_TIMEOUT:
-			return outcome{conclusion: ermite.CiConclusion_CI_CONCLUSION_TIMED_OUT}
-		case j.isStopping():
-			return outcome{conclusion: ermite.CiConclusion_CI_CONCLUSION_CANCELLED, shutdown: true}
-		}
-		return outcome{conclusion: ermite.CiConclusion_CI_CONCLUSION_CANCELLED}
+		return j.stoppedOutcome()
 	}
 	why := "the executor ended without a result"
 	if driveErr != nil {
@@ -794,6 +793,19 @@ func (j *jobRun) outcomeOf(ctx context.Context, exit *execpb.Exit, driveErr erro
 	}
 	j.sandboxError(fmt.Sprintf("The job's sandbox ended unexpectedly: %s", why))
 	return failure()
+}
+
+// stoppedOutcome is the outcome of a job the host stopped. A timeout wins over
+// a shutdown or a user cancel that came later, as on the server (the first
+// reason decides, and the timeout is the first when it fired first).
+func (j *jobRun) stoppedOutcome() outcome {
+	switch {
+	case j.firstCancelKind() == execpb.CancelKind_CANCEL_KIND_TIMEOUT:
+		return outcome{conclusion: ermite.CiConclusion_CI_CONCLUSION_TIMED_OUT}
+	case j.isStopping():
+		return outcome{conclusion: ermite.CiConclusion_CI_CONCLUSION_CANCELLED, shutdown: true}
+	}
+	return outcome{conclusion: ermite.CiConclusion_CI_CONCLUSION_CANCELLED}
 }
 
 // timeoutMinutes is the job timeout: at least 1, 360 when the job has none
@@ -842,7 +854,7 @@ func (j *jobRun) complete(ctx context.Context, conclusion ermite.CiConclusion, o
 	start := time.Now()
 	defer func() { j.timeSet("complete_ms", time.Since(start)) }()
 	req := &ermite.CompleteJobRequest{
-		JobId: j.job.JobId, Conclusion: conclusion, Outputs: outputs,
+		JobId: j.job.JobId, Conclusion: conclusion, Outputs: outputs, DepsReport: j.depsReport,
 		RunnerShutdown: shutdown && conclusion == ermite.CiConclusion_CI_CONCLUSION_CANCELLED,
 		Steps:          j.finalSteps(conclusion),
 		// The annotations no UpdateJob has carried: all of them with the
@@ -864,6 +876,9 @@ func (j *jobRun) complete(ctx context.Context, conclusion ermite.CiConclusion, o
 	req = &ermite.CompleteJobRequest{
 		JobId: j.job.JobId, Conclusion: ermite.CiConclusion_CI_CONCLUSION_FAILURE,
 		Steps: j.rebuiltSteps(),
+	}
+	if j.job.Deps != nil {
+		req.DepsReport = &ermite.DepsReport{Error: "the server refused the dependency result"}
 	}
 	if err := j.sendComplete(ctx, req, req.Conclusion); err != nil && ctx.Err() == nil {
 		j.log.Error().Err(err).Msg("CompleteJob refused again, giving up")

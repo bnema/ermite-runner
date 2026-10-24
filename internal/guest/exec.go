@@ -198,6 +198,9 @@ func serve(ctx context.Context, rw io.ReadWriteCloser, cfg ExecConfig) (int, err
 	if err != nil {
 		return 1, err
 	}
+	if run.GetDeps() != nil {
+		return sendExit(conn, runDeps(ctx, conn, run.GetDeps(), newDepsEnv(cfg.Target)), nil)
+	}
 	if run.GetJob() != nil {
 		return sendExit(conn, runJob(ctx, conn, cfg, run.GetJob(), vals), nil)
 	}

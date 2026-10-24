@@ -14,6 +14,8 @@
 
 ermite-runner fetches jobs from an ermite server and runs workflows written for GitHub Actions (`.github/workflows/*.yml`). Each job runs in its own sandbox, destroyed when the job ends.
 
+The runner also offers `deps` jobs for Bernard's Go module updates. In the same job sandbox, it checks out the assigned commit over HTTPS (HTTP with `ERMITE_RUNNER_INSECURE_HTTP=1`) and runs `go get` and `go mod tidy` per module directory using `golang:<go_version>` with the local toolchain and public Go proxy/checksum database. It returns only changed `go.mod` and `go.sum` files (64 files maximum, 2 MiB per file, 8 MiB total). Other ecosystems and invalid Go versions fail with an error report. Command logs and heartbeats follow the normal job lifecycle.
+
 ## Isolation modes
 
 | Mode | Sandbox | Needs |
