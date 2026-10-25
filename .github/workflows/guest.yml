@@ -40,6 +40,8 @@ jobs:
     permissions:
       contents: write
     env:
+      # The VM /tmp is a tmpfs: keep temporary files on the runner disk.
+      TMPDIR: ${{ runner.temp }}
       # libarchive (mkfs.ext4 -d tarball) fails on a non-UTF-8 locale.
       LANG: C.UTF-8
       LC_ALL: C.UTF-8

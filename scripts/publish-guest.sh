@@ -20,10 +20,11 @@
 #                   OUT_DIR as the build of the current id, without building.
 #                   For the first publication of a build made before OUT_DIR/GUEST_ID
 #                   existed; only use it when that build is from the current inputs.
-#   FORCE=1         delete the existing release and publish it again
+#   FORCE=1         upload every asset again (--clobber) even if the release is complete
 #   DRY_RUN=1       build and package, print the ermite commands instead of running them
 #   TARGET          commit or branch the tag is created on when the release is
-#                   new (default: HEAD, which the forge must already have)
+#                   new (default: HEAD, which the forge must already have; a
+#                   commit missing from origin's branches is refused)
 #   ERMITE_URL, ERMITE_TOKEN  forge and credentials, read by the ermite CLI
 #   REPO            forge repository (default ermite-runner)
 #   JOBS            kernel build parallelism (see scripts/build-kernel.sh)
@@ -51,7 +52,7 @@ ermite() {
 }
 
 if [ "$dry" != 1 ]; then
-  command -v ermite >/dev/null || { echo "need the ermite CLI" >&2; exit 1; }
+  type -P ermite >/dev/null || { echo "need the ermite CLI" >&2; exit 1; }
 fi
 command -v zstd >/dev/null || { echo "need zstd" >&2; exit 1; }
 command -v jq >/dev/null || [ "$dry" = 1 ] || { echo "need jq" >&2; exit 1; }
@@ -60,18 +61,33 @@ command -v jq >/dev/null || [ "$dry" = 1 ] || { echo "need jq" >&2; exit 1; }
 exists=0
 complete=0
 if [ "$dry" != 1 ]; then
-  if view=$(command ermite release view "$repo" "$tag" --json 2>&1); then
+  errf=$(mktemp)
+  trap 'rm -f "$errf"' EXIT
+  if view=$(command ermite release view "$repo" "$tag" --json 2>"$errf"); then
     exists=1
     if echo "$view" | jq -e '[.assets[].name] | (index("vmlinux") and index("base.ext4.zst") and index("kernel.config") and index("SHA256SUMS"))' >/dev/null; then
       complete=1
     fi
-  elif ! echo "$view" | grep -qi 'not found'; then
-    echo "cannot look up release $tag: $view" >&2
+  elif ! grep -qi 'not found' "$errf"; then
+    echo "cannot look up release $tag: $(cat "$errf")" >&2
     exit 1
   fi
   if [ "$complete" = 1 ] && [ "${FORCE:-0}" != 1 ]; then
     echo "release $tag already has all its assets (FORCE=1 to publish it again)"
     exit 0
+  fi
+  if [ "$exists" = 0 ]; then
+    # A tag created on a commit the forge lacks would point nowhere.
+    case "$target" in
+      *[!0-9a-f]* | '') ;; # a branch name: the forge resolves it
+      *)
+        sha=$(git -C "$root" rev-parse --verify --quiet "$target^{commit}") || sha=$target
+        if [ -z "$(git -C "$root" branch -r --contains "$sha" --list 'origin/*' 2>/dev/null)" ]; then
+          echo "commit $sha is not on the forge: push it first or set TARGET=main" >&2
+          exit 1
+        fi
+        ;;
+    esac
   fi
 fi
 
@@ -105,13 +121,9 @@ assets=(vmlinux base.ext4.zst kernel.config SHA256SUMS)
 files=()
 for a in "${assets[@]}"; do files+=("$out/$a"); done
 
-if [ "$exists" = 1 ] && [ "${FORCE:-0}" = 1 ]; then
-  ermite release delete "$repo" "$tag" --yes
-  exists=0
-fi
-
 if [ "$exists" = 1 ]; then
-  # An interrupted publication left some assets: replace them all.
+  # Replace every asset (an interrupted run or FORCE=1); SHA256SUMS goes last so
+  # a complete release always has final sums.
   ermite release upload "$repo" "$tag" "${files[@]}" --clobber
 else
   args=()

@@ -43,10 +43,12 @@ verified() {
   [ "$(cat "$out/GUEST_ID" 2>/dev/null || true)" = "$id" ] || return 1
   [ -f "$out/vmlinux" ] && [ -f "$out/base.ext4" ] && [ -f "$out/SHA256SUMS" ] || return 1
   local list=$out/.verify.sums
-  grep -E '  (vmlinux|base\.ext4)$' "$out/SHA256SUMS" >"$list" || return 1
-  [ "$(wc -l <"$list")" -eq 2 ] || return 1
-  (cd "$out" && sha256sum --quiet -c "$list" >/dev/null 2>&1)
-  local rc=$?
+  local rc=0
+  if ! grep -E '  (vmlinux|base\.ext4)$' "$out/SHA256SUMS" >"$list" || [ "$(wc -l <"$list")" -ne 2 ]; then
+    rc=1
+  elif ! (cd "$out" && sha256sum --quiet -c "$list" >/dev/null 2>&1); then
+    rc=1
+  fi
   rm -f "$list"
   return $rc
 }

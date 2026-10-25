@@ -5,7 +5,8 @@
 docs
 images
 scripts
-tmp/kernel
-tmp/image/*.zst
-tmp/image/kernel.config
-tmp/image/SHA256SUMS
+tmp/*
+!tmp/image/
+tmp/image/*
+!tmp/image/vmlinux
+!tmp/image/base.ext4

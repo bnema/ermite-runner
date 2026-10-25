@@ -11,7 +11,8 @@
 #   scripts/guest-id.sh --write [--allow-dirty]  write images/GUEST_ID
 #
 # A modified or untracked input makes the id meaningless, so it is refused
-# unless --allow-dirty is given.
+# unless --allow-dirty is given. --allow-dirty hashes the git index (staged
+# content), not unstaged edits. --check and --write are mutually exclusive.
 set -euo pipefail
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -21,8 +22,8 @@ dirty=0
 
 for arg in "$@"; do
   case "$arg" in
-    --check) mode=check ;;
-    --write) mode="write" ;;
+    --check) [ "$mode" != write ] || { echo "guest-id.sh: --check and --write are exclusive" >&2; exit 2; }; mode=check ;;
+    --write) [ "$mode" != check ] || { echo "guest-id.sh: --check and --write are exclusive" >&2; exit 2; }; mode="write" ;;
     --allow-dirty) dirty=1 ;;
     *) echo "usage: guest-id.sh [--check|--write] [--allow-dirty]" >&2; exit 2 ;;
   esac

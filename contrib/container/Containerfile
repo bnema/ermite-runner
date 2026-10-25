@@ -36,15 +36,15 @@ RUN apk add --no-cache curl \
  && install -m 0755 "/tmp/release-${FIRECRACKER_VERSION}-x86_64/firecracker-${FIRECRACKER_VERSION}-x86_64" /out-firecracker
 
 FROM docker.io/library/alpine:3.22
-ARG GUEST_ID
-# The guest id names the kernel and base image below (images/GUEST_ID).
-RUN test -n "${GUEST_ID}" || { echo "build argument GUEST_ID is required (--build-arg GUEST_ID=\"\$(cat images/GUEST_ID)\")" >&2; exit 1; }
-LABEL dev.bnema.ermite-runner.guest-id="${GUEST_ID}"
 # ip (TAP devices), nft (job network policy), mkfs.ext4 (scratch and exec
 # disks; e2fsprogs >= 1.47), ca-certificates (Node.js externals downloads).
 RUN apk add --no-cache iproute2 nftables e2fsprogs ca-certificates tini
 COPY --from=firecracker /out-firecracker /usr/local/bin/firecracker
 COPY --from=build /out/ermite-runner /usr/local/bin/ermite-runner
+ARG GUEST_ID
+# The guest id names the kernel and base image below (images/GUEST_ID).
+RUN test -n "${GUEST_ID}" || { echo "build argument GUEST_ID is required (--build-arg GUEST_ID=\"\$(cat images/GUEST_ID)\")" >&2; exit 1; }
+LABEL dev.bnema.ermite-runner.guest-id="${GUEST_ID}"
 COPY tmp/image/vmlinux tmp/image/base.ext4 /opt/ermite-runner/image/
 
 ENV ERMITE_RUNNER_ISOLATION=vm \

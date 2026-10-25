@@ -1,8 +1,9 @@
 # Deploys a tagged release to Gordon: fetches the published guest image, builds
 # the runner image around it, pushes it to Gordon's CI host with this job's
-# OIDC identity and runs exactly that digest in one service. No Gordon secret is stored in the repository: Gordon accepts only
-# the subject repo:bnema/ermite-runner:environment:production, for this app,
-# service and image repository.
+# OIDC identity and runs exactly that digest in one service. No Gordon secret
+# is stored in the repository: Gordon accepts only the subject
+# repo:bnema/ermite-runner:environment:production, for this app, service and
+# image repository.
 name: Deploy
 
 on:
