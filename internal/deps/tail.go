@@ -2,6 +2,7 @@
 package deps
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -17,64 +18,44 @@ const tailBytes = 1900 // Leave room for the summary within a 2 KiB error.
 var ansiEscape = regexp.MustCompile(`\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\))`)
 var pullNoise = regexp.MustCompile(`(?i)^(?:[0-9a-f]+:\s*(?:Pulling fs layer|Waiting|Verifying Checksum|Download complete|Pull complete|Downloading|Extracting)?|Digest:.*|Status: Downloaded.*|Unable to find image.*)$`)
 
-// commandTail retains only a bounded suffix. Secrets are masked before any
-// clipping, including when a credential spans writes or exceeds the line cap.
+// commandTail normalizes and redacts complete bounded lines before clipping.
+// Overlong lines are discarded in their entirety, never exposing partial secrets.
 // exec.Cmd serializes writes when stdout and stderr share this writer.
 type commandTail struct {
-	secrets []string
-	pending string
-	line    string
-	lines   []string
+	secrets   []string
+	line      []byte
+	truncated bool
+	lines     []string
 }
+
+const maxTailLine = 4096
 
 func (t *commandTail) Write(p []byte) (int, error) {
-	for _, b := range p {
-		t.pending += string([]byte{b})
-		t.drain(false)
-	}
-	return len(p), nil
-}
-
-func (t *commandTail) drain(final bool) {
-	for t.pending != "" {
-		prefix := false
-		matched := false
-		for _, secret := range t.secrets {
-			if secret == "" {
-				continue
-			}
-			if strings.HasPrefix(t.pending, secret) {
-				t.emit("[REDACTED]")
-				t.pending = t.pending[len(secret):]
-				matched = true
-				break
-			}
-			if strings.HasPrefix(secret, t.pending) {
-				prefix = true
+	n := len(p)
+	for len(p) > 0 {
+		end := bytes.IndexByte(p, '\n')
+		part := p
+		if end >= 0 {
+			part = p[:end]
+		}
+		if !t.truncated {
+			if len(part) > maxTailLine-len(t.line) {
+				t.truncated = true
+				t.line = t.line[:0]
+			} else {
+				if t.line == nil {
+					t.line = make([]byte, 0, maxTailLine)
+				}
+				t.line = append(t.line, part...)
 			}
 		}
-		if matched {
-			continue
+		if end < 0 {
+			break
 		}
-		if prefix && !final {
-			return
-		}
-		t.emit(t.pending[:1])
-		t.pending = t.pending[1:]
+		t.finishLine()
+		p = p[end+1:]
 	}
-}
-
-func (t *commandTail) emit(s string) {
-	for _, b := range []byte(s) {
-		if b == '\n' {
-			t.finishLine()
-			continue
-		}
-		t.line += string([]byte{b})
-		if len(t.line) > 4096 {
-			t.line = t.line[len(t.line)-4096:]
-		}
-	}
+	return n, nil
 }
 
 func utf8Suffix(s string, n int) string {
@@ -84,12 +65,18 @@ func utf8Suffix(s string, n int) string {
 	for len(s) > 0 && !utf8.RuneStart(s[0]) {
 		s = s[1:]
 	}
-	return strings.ToValidUTF8(s, "")
+	return s
 }
 
 func (t *commandTail) finishLine() {
-	s := strings.TrimSpace(strings.ReplaceAll(ansiEscape.ReplaceAllString(t.line, ""), "\r", ""))
-	t.line = ""
+	// Invalid bytes must not be deleted: doing so could join credential fragments.
+	s := strings.ToValidUTF8(string(t.line), "\uFFFD")
+	s = strings.TrimSpace(strings.ReplaceAll(ansiEscape.ReplaceAllString(s, ""), "\r", ""))
+	if t.truncated {
+		s = "[line truncated]"
+	}
+	t.line = t.line[:0]
+	t.truncated = false
 	for _, secret := range t.secrets {
 		if secret != "" {
 			s = strings.ReplaceAll(s, secret, "[REDACTED]")
@@ -110,8 +97,7 @@ func (t *commandTail) finishLine() {
 }
 
 func (t *commandTail) text() string {
-	t.drain(true)
-	if t.line != "" {
+	if len(t.line) != 0 || t.truncated {
 		t.finishLine()
 	}
 	return strings.Join(t.lines, "\n")
@@ -132,8 +118,17 @@ func runCommand(ctx context.Context, cmd *exec.Cmd, log io.Writer, secrets []str
 		case errors.As(err, &exit):
 			summary = fmt.Sprintf("dependency command failed (exit %d)", exit.ExitCode())
 		}
+		baseSummary := summary
 		if text := tail.text(); text != "" {
 			summary += "\n" + text
+		}
+		// Defense in depth after all normalization, clipping and concatenation.
+		// Discard the tail rather than apply another potentially joining transform.
+		for _, secret := range secrets {
+			if secret != "" && strings.Contains(summary, secret) {
+				summary = baseSummary + "\n[output redacted]"
+				break
+			}
 		}
 		return errors.New(summary)
 	}
