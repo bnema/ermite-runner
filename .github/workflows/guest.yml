@@ -1,0 +1,80 @@
+# Builds the guest image (Firecracker kernel + Ubuntu base disk) and publishes
+# it as the prerelease guest-<id> of this repository, where deploy.yml and
+# scripts/fetch-guest.sh find it. The id is a hash of the guest inputs
+# (scripts/guest-id.sh); a release that already has its assets is left alone
+# unless force is set. The job token publishes the release (contents: write,
+# trusted runs only); no other secret is used.
+name: Guest
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - images/**
+      - scripts/build-kernel.sh
+      - scripts/build-image.sh
+      - scripts/guest-id.sh
+      - scripts/publish-guest.sh
+      - .github/workflows/guest.yml
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Publish again even if guest-<id> already has its assets
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: guest
+  cancel-in-progress: false
+
+jobs:
+  guest:
+    name: Guest
+    # The GitHub mirror publishes nothing.
+    if: github.server_url != 'https://github.com'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    permissions:
+      contents: write
+    env:
+      # libarchive (mkfs.ext4 -d tarball) fails on a non-UTF-8 locale.
+      LANG: C.UTF-8
+      LC_ALL: C.UTF-8
+      # Bounds the kernel build's memory (gcc was killed with -j4 on 6 GiB).
+      JOBS: "3"
+      ERMITE_VERSION: v0.40.0
+      # ermite_0.40.0_linux_amd64.tar.gz in the checksums.txt of that ermite release.
+      ERMITE_SHA256: 096778f7f36d621af1ee0f7a4230defebe438860a7557d686b25e35286df5415
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Install ermite
+        run: |
+          set -euo pipefail
+          archive="ermite_${ERMITE_VERSION#v}_linux_amd64.tar.gz"
+          curl -fsSL -o "$RUNNER_TEMP/$archive" \
+            "https://git.bnema.dev/ermite/releases/download/$ERMITE_VERSION/$archive"
+          echo "$ERMITE_SHA256  $RUNNER_TEMP/$archive" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP" ermite
+          sudo install -m 0755 "$RUNNER_TEMP/ermite" /usr/local/bin/ermite
+          ermite version | head -1
+      - name: Install build tools
+        # mkfs.ext4 needs e2fsprogs >= 1.47.1 with libarchive (tarball input);
+        # the kernel build needs a C toolchain.
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential flex bison bc libelf-dev libssl-dev xz-utils e2fsprogs libarchive13t64 zstd
+      - name: Build and publish the guest
+        env:
+          ERMITE_URL: ${{ github.server_url }}
+          ERMITE_TOKEN: ${{ github.token }}
+          FORCE: ${{ inputs.force && '1' || '0' }}
+        run: |
+          set -euo pipefail
+          scripts/publish-guest.sh tmp/image
