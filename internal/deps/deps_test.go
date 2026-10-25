@@ -25,6 +25,18 @@ func TestScript(t *testing.T) {
 		t.Fatal(s)
 	}
 }
+
+// go get adds or raises the toolchain line; the script must restore the original.
+func TestScriptRestoresToolchain(t *testing.T) {
+	s, err := Script(request())
+	if err != nil {
+		t.Fatal(err)
+	}
+	get, tidy, restore := strings.Index(s, "tc=$(awk"), strings.Index(s, "go mod tidy"), strings.Index(s, `go mod edit -toolchain="${tc:-none}"`)
+	if get < 0 || restore < 0 || get >= tidy || tidy >= restore {
+		t.Fatalf("toolchain must be read before go get and restored after go mod tidy: %s", s)
+	}
+}
 func TestValidation(t *testing.T) {
 	for _, v := range []string{"1.27", "1.27.3"} {
 		r := request()

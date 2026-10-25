@@ -72,7 +72,10 @@ func Script(r *execpb.DepsRequest) (string, error) {
 	sort.Strings(dirs)
 	s := "set -eu\nexport GOFLAGS=-mod=mod GOTOOLCHAIN=local GOPROXY=https://proxy.golang.org GOSUMDB=sum.golang.org GOPRIVATE= GONOSUMDB=\n"
 	for _, d := range dirs {
-		s += "(cd /repo/" + quote(d) + "; go get " + strings.Join(groups[d], " ") + "; go mod tidy)\n"
+		// `go get` adds a toolchain line (the image's Go) to a go.mod that has none, and
+		// raises one that is older. Bernard only accepts the toolchain it was given, so put
+		// the original back, or drop the line when there was none.
+		s += "(cd /repo/" + quote(d) + "; tc=$(awk '$1==\"toolchain\"{print $2}' go.mod); go get " + strings.Join(groups[d], " ") + "; go mod tidy; go mod edit -toolchain=\"${tc:-none}\")\n"
 	}
 	return s, nil
 }
