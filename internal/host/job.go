@@ -461,8 +461,9 @@ func (j *jobRun) run(rt *Runner, shutdown <-chan struct{}) {
 	var bg sync.WaitGroup
 	bg.Add(1)
 	go func() { defer bg.Done(); j.heartbeats(ctx) }()
-	// The server has no WatchJob (nor cancel) for deps jobs.
-	if j.job.Deps == nil {
+	// Without a job token (a deps job from a server without the feature
+	// "deps.runs") there is no WatchJob, hence no cancel.
+	if j.job.JobToken != "" {
 		bg.Add(1)
 		go func() { defer bg.Done(); j.watch(ctx) }()
 	}

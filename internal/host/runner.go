@@ -207,11 +207,11 @@ func (r *Runner) recover(ctx context.Context, log zerowrap.Logger, slots chan st
 
 func (r *Runner) startJob(ctx context.Context, log zerowrap.Logger, job *ermite.Job, t Timing, shutdown <-chan struct{}, slots chan struct{}) {
 	jctx, cancel := context.WithCancelCause(context.WithoutCancel(ctx))
-	// Deps jobs have an empty job_token: the server authenticates their job
-	// calls with the runner token.
-	client := r.Job(job.JobToken)
-	if job.Deps != nil {
-		client = r.Poll
+	// A job without a job token (a deps job from a server without the feature
+	// "deps.runs") has its job calls authenticated with the runner token.
+	client := r.Poll
+	if job.JobToken != "" {
+		client = r.Job(job.JobToken)
 	}
 	jr := &jobRun{
 		r: r, job: job, client: client, t: t, ctx: jctx, cancel: cancel,

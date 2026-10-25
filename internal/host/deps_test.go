@@ -2,10 +2,18 @@
 package host
 
 import (
+	"context"
+	"sync"
+	"testing"
+	"time"
+
+	"connectrpc.com/connect"
+
 	ermite "bnema.dev/ermite-api/gen/ermite"
+	"bnema.dev/ermite-api/gen/ermite/ermiteconnect"
+
 	"bnema.dev/ermite-runner/internal/execstream"
 	"bnema.dev/ermite-runner/internal/execstream/execpb"
-	"testing"
 )
 
 func TestDepsJobReportsFiles(t *testing.T) {
@@ -112,5 +120,145 @@ func TestDepsJobUsesRunnerTokenAndNoWatch(t *testing.T) {
 	}
 	if h.srv.watches != 0 {
 		t.Fatalf("WatchJob called %d times", h.srv.watches)
+	}
+}
+
+// spyClient records which client carried the calls of a job.
+type spyClient struct {
+	ermiteconnect.RunnerServiceClient
+	name    string
+	mu      *sync.Mutex
+	calls   *[]string
+	watched chan struct{}
+	once    *sync.Once
+}
+
+func (c spyClient) record(call string) {
+	c.mu.Lock()
+	*c.calls = append(*c.calls, c.name+":"+call)
+	c.mu.Unlock()
+}
+
+func (c spyClient) CompleteJob(ctx context.Context, r *connect.Request[ermite.CompleteJobRequest]) (*connect.Response[ermite.CompleteJobResponse], error) {
+	c.record("CompleteJob")
+	return c.RunnerServiceClient.CompleteJob(ctx, r)
+}
+
+func (c spyClient) WatchJob(ctx context.Context, r *connect.Request[ermite.WatchJobRequest]) (*connect.ServerStreamForClient[ermite.WatchJobResponse], error) {
+	c.record("WatchJob")
+	c.once.Do(func() { close(c.watched) })
+	return c.RunnerServiceClient.WatchJob(ctx, r)
+}
+
+// The client of a job follows its job token, not its kind: a deps job with a
+// token uses the job client and WatchJob. (Without one it keeps the runner
+// token and has no WatchJob: see TestDepsJobUsesRunnerTokenAndNoWatch.)
+func TestDepsJobClientFollowsJobToken(t *testing.T) {
+	var (
+		mu      sync.Mutex
+		calls   []string
+		watched = make(chan struct{})
+		once    sync.Once
+	)
+	h := newHarness(t, func(t *testing.T, c *execstream.Conn, _ *execpb.Run, _ <-chan *execpb.Cancel) {
+		stepStart(c, 1, "Update dependencies")
+		select {
+		case <-watched:
+		case <-time.After(15 * time.Second):
+			t.Error("WatchJob was not called")
+		}
+		send(c, &execpb.Frame{Body: &execpb.Frame_DepsResult{DepsResult: &execpb.DepsResult{}}})
+		send(c, &execpb.Frame{Body: &execpb.Frame_Exit{Exit: &execpb.Exit{}}})
+	})
+	spy := func(name string, inner ermiteconnect.RunnerServiceClient) ermiteconnect.RunnerServiceClient {
+		return spyClient{RunnerServiceClient: inner, name: name, mu: &mu, calls: &calls, watched: watched, once: &once}
+	}
+	h.runner.Poll = spy("poll", h.runner.Poll)
+	jobClient := h.runner.Job
+	h.runner.Job = func(tok string) ermiteconnect.RunnerServiceClient { return spy("job", jobClient(tok)) }
+	j := depsJob("deps-spy")
+	j.JobToken = "tok"
+	h.srv.jobs = []*ermite.Job{j}
+	stop := h.run(t)
+	eventually(t, "deps completion", func() bool { return h.srv.completeCount() == 1 })
+	if err := stop(); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	hasWatch, hasComplete := false, false
+	for _, c := range calls {
+		hasWatch = hasWatch || c == "job:WatchJob"
+		hasComplete = hasComplete || c == "job:CompleteJob"
+	}
+	if !hasComplete || !hasWatch {
+		t.Fatalf("calls %v, want WatchJob and CompleteJob on the job client", calls)
+	}
+	h.srv.mu.Lock()
+	defer h.srv.mu.Unlock()
+	if got := h.srv.completes[0].Conclusion; got != ermite.CiConclusion_CI_CONCLUSION_SUCCESS {
+		t.Fatalf("conclusion %v", got)
+	}
+}
+
+// A WatchJob cancel reaches the guest of a deps job that has a job token.
+func TestDepsJobWatchCancel(t *testing.T) {
+	got := make(chan *execpb.Cancel, 1)
+	h := newHarness(t, func(t *testing.T, c *execstream.Conn, _ *execpb.Run, cancels <-chan *execpb.Cancel) {
+		stepStart(c, 1, "Update dependencies")
+		logLineFrame(c, 1, "working", false)
+		select {
+		case cn := <-cancels:
+			got <- cn
+		case <-time.After(5 * time.Second):
+			t.Error("no cancel reached the guest")
+		}
+		send(c, &execpb.Frame{Body: &execpb.Frame_Exit{Exit: &execpb.Exit{Code: 1}}})
+	})
+	j := depsJob("deps-cancel")
+	j.JobToken = "tok"
+	h.srv.jobs = []*ermite.Job{j}
+	h.run(t)
+	eventually(t, "the job to run", func() bool { return len(h.srv.snapshotLines()) == 1 })
+	select {
+	case h.srv.watchMsgs <- &ermite.WatchJobResponse{Msg: &ermite.WatchJobResponse_Cancel{Cancel: &ermite.CancelRequest{Reason: ermite.CancelReason_CANCEL_REASON_USER, Message: "Canceled by the owner"}}}:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the cancel was not taken by WatchJob")
+	}
+	select {
+	case cn := <-got:
+		if cn.Kind != execpb.CancelKind_CANCEL_KIND_USER {
+			t.Fatalf("%v", cn)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the cancel did not reach the guest")
+	}
+	eventually(t, "CompleteJob", func() bool { return h.srv.completeCount() == 1 })
+	h.srv.mu.Lock()
+	defer h.srv.mu.Unlock()
+	if c := h.srv.completes[0]; c.Conclusion != ermite.CiConclusion_CI_CONCLUSION_CANCELLED || c.RunnerShutdown {
+		t.Fatalf("%v", c)
+	}
+}
+
+// A deps job honours timeout_minutes: the host cancels it at the deadline.
+func TestDepsJobHonoursTimeout(t *testing.T) {
+	h := newHarness(t, func(t *testing.T, c *execstream.Conn, _ *execpb.Run, cancels <-chan *execpb.Cancel) {
+		stepStart(c, 1, "Update dependencies")
+		if cn := <-cancels; cn.Kind != execpb.CancelKind_CANCEL_KIND_TIMEOUT {
+			t.Errorf("kind %v", cn.Kind)
+		}
+		send(c, &execpb.Frame{Body: &execpb.Frame_Exit{Exit: &execpb.Exit{Code: 1}}})
+	})
+	h.runner.now = func() time.Time { return time.Now().Add(-59*time.Second - 700*time.Millisecond) } // received 59.7 s ago
+	j := depsJob("deps-timeout")
+	j.TimeoutMinutes = 1
+	h.srv.jobs = []*ermite.Job{j}
+	h.run(t)
+	eventually(t, "CompleteJob", func() bool { return h.srv.completeCount() == 1 })
+	h.srv.mu.Lock()
+	defer h.srv.mu.Unlock()
+	if c := h.srv.completes[0]; c.Conclusion != ermite.CiConclusion_CI_CONCLUSION_TIMED_OUT {
+		t.Fatalf("%v", c.Conclusion)
 	}
 }

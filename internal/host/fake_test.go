@@ -95,8 +95,8 @@ func (s *fakeServer) checkRunner(h http.Header) error {
 
 func (s *fakeServer) checkJob(h http.Header, id string) (*ermite.Job, error) {
 	tok := strings.TrimPrefix(h.Get("Authorization"), "Bearer ")
-	if j := s.assigned[id]; j != nil && j.Deps != nil {
-		// Deps jobs authenticate with the runner token only.
+	if j := s.assigned[id]; j != nil && j.Deps != nil && j.JobToken == "" {
+		// Deps jobs without a job token authenticate with the runner token only.
 		if tok != s.runnerTok {
 			return nil, connect.NewError(connect.CodeUnauthenticated, io.EOF)
 		}
