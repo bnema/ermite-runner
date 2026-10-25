@@ -55,13 +55,13 @@ jobs:
           gordon version | head -1
       - name: Build kernel and base image
         # The image bakes the guest kernel (vmlinux) and the ext4 base disk;
-        # mkfs.ext4 needs e2fsprogs >= 1.47.1 and the kernel build needs a
-        # C toolchain.
+        # mkfs.ext4 needs e2fsprogs >= 1.47.1 with libarchive (tarball input)
+        # and the kernel build needs a C toolchain.
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential flex bison bc libelf-dev libssl-dev xz-utils e2fsprogs
+            build-essential flex bison bc libelf-dev libssl-dev xz-utils e2fsprogs libarchive13t64
           scripts/build-kernel.sh tmp/image
           scripts/build-image.sh tmp/image
       - name: Build image

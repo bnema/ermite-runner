@@ -17,7 +17,7 @@ scripts/build-image.sh tmp/image    # builds the OCI image and tmp/image/base.ex
 ```
 
 - `build-kernel.sh` downloads Linux 6.18 LTS from kernel.org and checks the tarball against the published sha256 sums. It needs `bc`, `flex`, `bison`, `pahole`, libelf and openssl headers.
-- `build-image.sh` needs Docker or Podman (rootless is fine) and e2fsprogs 1.47.1 or newer. No root is needed.
+- `build-image.sh` needs Docker or Podman (rootless is fine) and e2fsprogs 1.47.1 or newer with libarchive, which `mkfs.ext4` loads to read the rootfs tarball (`libarchive13t64` on Ubuntu). No root is needed.
 - The OCI image is tagged `ermite-runner-ubuntu-26.04:latest`. Set `IMAGE_TAG` to change it.
 - The kernel config is `images/kernel/config-6.18` plus per-architecture fragments. The build fails if a listed option does not survive `olddefconfig`.
 - arm64 builds with `ARCH_NAME=arm64`.
