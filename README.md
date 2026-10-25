@@ -44,7 +44,7 @@ The container image bundles the runner, Firecracker, the guest kernel and the ba
 - For `vm`: `/dev/kvm`, `firecracker` and `jailer` in `PATH`, a guest kernel and a base image.
 - For `container`: a rootful Docker Engine and the job image. [sysbox](https://github.com/nestybox/sysbox) is optional: without it the runner uses a privileged container.
 
-[docs/images.md](docs/images.md) explains how to build the kernel and the images.
+[docs/images.md](docs/images.md) explains how to fetch or build the kernel and the images.
 
 ## Build
 

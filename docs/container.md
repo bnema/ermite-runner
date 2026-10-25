@@ -11,10 +11,13 @@
 ## Build
 
 ```sh
-scripts/build-kernel.sh tmp/image
-scripts/build-image.sh tmp/image
-docker build -f contrib/container/Containerfile --build-arg VERSION=<tag> -t ermite-runner:<tag> .
+scripts/fetch-guest.sh "$(cat images/GUEST_ID)" tmp/image
+docker build -f contrib/container/Containerfile \
+  --build-arg VERSION=<tag> --build-arg GUEST_ID="$(cat images/GUEST_ID)" \
+  -t ermite-runner:<tag> .
 ```
+
+`GUEST_ID` is required and becomes the label `dev.bnema.ermite-runner.guest-id`, so `docker inspect` tells which guest an image ships. `tmp/image` can also come from `scripts/build-kernel.sh` and `scripts/build-image.sh` (see [images](images.md)).
 
 ## What the container needs
 

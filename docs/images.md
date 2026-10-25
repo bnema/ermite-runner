@@ -12,9 +12,13 @@ Both come from `images/ubuntu-26.04/Dockerfile` (Ubuntu 26.04 LTS). The runner e
 ## Build
 
 ```sh
+scripts/fetch-guest.sh "$(cat images/GUEST_ID)" tmp/image   # vm: the published guest
+
 scripts/build-kernel.sh tmp/image   # vm only: builds the guest kernel
 scripts/build-image.sh tmp/image    # builds the OCI image and tmp/image/base.ext4
 ```
+
+Fetch the published guest unless you change its inputs.
 
 - `build-kernel.sh` downloads Linux 6.18 LTS from kernel.org and checks the tarball against the published sha256 sums. It needs `bc`, `flex`, `bison`, `pahole`, libelf and openssl headers.
 - `build-image.sh` needs Docker or Podman (rootless is fine) and e2fsprogs 1.47.1 or newer with libarchive, which `mkfs.ext4` loads to read the rootfs tarball (`libarchive13t64` on Ubuntu). No root is needed.
@@ -22,6 +26,20 @@ scripts/build-image.sh tmp/image    # builds the OCI image and tmp/image/base.ex
 - The kernel config is `images/kernel/config-6.18` plus per-architecture fragments. The build fails if a listed option does not survive `olddefconfig`.
 - arm64 builds with `ARCH_NAME=arm64`.
 - `CONFIG_BINFMT_MISC` is built in and mounted by the guest init, so `docker/setup-qemu-action` can run foreign-architecture containers.
+
+## Guest id and publication
+
+The guest is the kernel (`vmlinux`) and `base.ext4`. Its inputs are `images/`, `scripts/build-kernel.sh` and `scripts/build-image.sh`; the runner executable is never part of it. `scripts/guest-id.sh` hashes those inputs as Git tracks them (modes, blob ids and paths, not `images/GUEST_ID` itself) and prints the first 12 hex digits of the sha256.
+
+- `images/GUEST_ID` holds the id of the committed inputs. `scripts/guest-id.sh --write` updates it; `--check` fails when it is stale, which CI runs on every change. A modified input is refused unless `--allow-dirty`.
+- Builds are not reproducible (apt, the `ubuntu:26.04` tag), so the id names the inputs, not the bytes. `SHA256SUMS` of the release pins the bytes.
+- The guest is stored as the prerelease `guest-<id>` of ermite-runner, with the assets `vmlinux`, `base.ext4.zst` (zstd -3), `kernel.config` and `SHA256SUMS` (vmlinux, base.ext4, base.ext4.zst, kernel.config).
+- `.github/workflows/guest.yml` builds and publishes it when the inputs change on `main`, or on demand (`force` publishes again). It skips a release that already has its assets. It installs `libarchive13t64` and sets `LC_ALL=C.UTF-8` (libarchive fails on other locales), and builds the kernel with `JOBS=3`.
+- `scripts/publish-guest.sh [OUT_DIR]` does the same from a workstation with the `ermite` CLI (`ERMITE_URL`, `ERMITE_TOKEN`). It reuses an `OUT_DIR` whose `GUEST_ID` file matches. `ASSUME_BUILT=1` adopts an existing build that has no such file (first publication only), `FORCE=1` replaces the release and `DRY_RUN=1` packages without calling `ermite`.
+- `scripts/fetch-guest.sh <id> <out_dir>` downloads the release from `ERMITE_RELEASES_URL` (default `$GITHUB_SERVER_URL`, then `https://git.bnema.dev`; `GITHUB_TOKEN` is sent for that server), checks `SHA256SUMS` and unpacks `base.ext4` sparse. It needs `curl` and `zstd`, and skips a directory that already holds the verified guest.
+- Delete old releases with `ermite release delete ermite-runner guest-<id>`. Each holds about 650 MiB against the repository's release quota.
+
+The container build reads `images/GUEST_ID` and records it as the image label `dev.bnema.ermite-runner.guest-id`.
 
 ## What the image must contain
 

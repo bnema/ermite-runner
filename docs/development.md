@@ -27,7 +27,7 @@ They are opt-in. They run the real stub executor. Output and exit codes come bac
 | `ERMITE_RUNNER_IT_NODE_DIR` | Directory with `node-v24.21.0-linux-x64.tar.gz`, for offline hosts |
 | `ERMITE_RUNNER_TEST_IMAGE` | Image used by the container and end-to-end tests |
 
-Build the kernel and images first: see [images](images.md).
+Fetch or build the guest kernel and images first (`scripts/fetch-guest.sh "$(cat images/GUEST_ID)" tmp/image`): see [images](images.md).
 
 ### VM
 
