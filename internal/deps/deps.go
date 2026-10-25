@@ -142,10 +142,8 @@ func Run(ctx context.Context, r *execpb.DepsRequest, log io.Writer) (map[string]
 	}()
 	cmd := exec.CommandContext(ctx, "docker", "run", "--rm", "--name", name, "-e", "DEPS_AUTH", "-v", dir+":/out", "golang:"+r.GoVersion, "sh", "-c", prefix+script+suffix)
 	cmd.Env = append(os.Environ(), "DEPS_AUTH="+auth)
-	cmd.Stdout = log
-	cmd.Stderr = log
-	if err := cmd.Run(); err != nil {
-		return nil, errors.New("dependency command failed")
+	if err := runCommand(ctx, cmd, log, Secrets(r.Token)); err != nil {
+		return nil, err
 	}
 	root, err := os.OpenRoot(dir)
 	if err != nil {

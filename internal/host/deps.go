@@ -16,7 +16,10 @@ import (
 func (j *jobRun) executeDeps(ctx context.Context, rt *Runner, stopHard <-chan struct{}) outcome {
 	fail := func(err error) outcome {
 		j.depsReport = &ermite.DepsReport{Error: err.Error()}
-		j.sandboxError(err.Error())
+		// AppendLog accepts single lines; the report keeps the full error.
+		for _, line := range strings.Split(err.Error(), "\n") {
+			j.sandboxError(line)
+		}
 		return failure()
 	}
 	r := &execpb.DepsRequest{Repo: j.job.Repo, Sha: j.job.Sha, GoVersion: j.job.Deps.GoVersion, Token: j.job.GithubToken, CloneUrl: strings.TrimRight(rt.Cfg.URL, "/") + "/" + j.job.Repo + ".git", AllowInsecureHttp: rt.Cfg.InsecureHTTP}

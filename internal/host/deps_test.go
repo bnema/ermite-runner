@@ -262,3 +262,24 @@ func TestDepsJobHonoursTimeout(t *testing.T) {
 		t.Fatalf("%v", c.Conclusion)
 	}
 }
+
+// A multi-line cause survives the guest protocol and the API client unchanged.
+func TestDepsJobReportsMultilineError(t *testing.T) {
+	const cause = "dependency command failed (exit 1)\ngo: module requires go >= 1.26.0\nlast real line"
+	h := newHarness(t, func(_ *testing.T, c *execstream.Conn, _ *execpb.Run, _ <-chan *execpb.Cancel) {
+		stepStart(c, 1, "deps")
+		send(c, &execpb.Frame{Body: &execpb.Frame_DepsResult{DepsResult: &execpb.DepsResult{Error: cause}}})
+	})
+	h.srv.jobs = []*ermite.Job{depsJob("deps-error-tail")}
+	stop := h.run(t)
+	eventually(t, "deps failure", func() bool { return h.srv.completeCount() == 1 })
+	if err := stop(); err != nil {
+		t.Fatal(err)
+	}
+	h.srv.mu.Lock()
+	defer h.srv.mu.Unlock()
+	result := h.srv.completes[0]
+	if result.Conclusion != ermite.CiConclusion_CI_CONCLUSION_FAILURE || result.GetDepsReport().GetError() != cause {
+		t.Fatalf("result: %v", result)
+	}
+}
