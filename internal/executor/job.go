@@ -141,6 +141,10 @@ type Config struct {
 	Signal                          func(pid int, sig syscall.Signal)
 	// Now returns the current time; nil means time.Now.
 	Now func() time.Time
+
+	// runProcess replaces runProcess for the docker commands (tests, to drive
+	// them on a fake clock); nil means runProcess.
+	runProcess func(procSpec) (procResult, error)
 }
 
 type stepResult int

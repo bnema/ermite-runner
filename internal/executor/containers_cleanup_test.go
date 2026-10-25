@@ -3,10 +3,13 @@
 package executor
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -335,46 +338,110 @@ func TestInvalidEnvNamesAreRefused(t *testing.T) {
 	}
 }
 
+// budgetJob is a job with a job container, eight services and a network to
+// remove, whose docker commands go through run (see Config.runProcess) instead
+// of a process. It returns the job and its "Stop containers" step.
+func budgetJob(t *testing.T, budget time.Duration, run func(procSpec) (procResult, error)) (*job, *stepRun, *recorder) {
+	t.Helper()
+	rec := newRecorder()
+	rec.StepStarted(1, "Stop containers", time.Now())
+	j := &job{
+		cfg: Config{
+			Reporter: rec, TermAfter: 200 * time.Millisecond, runProcess: run,
+			Actions: ActionsConfig{DockerPath: "/fake/docker", Containers: ContainerTimeouts{
+				Command: time.Minute, Pull: time.Minute, CleanupCommand: time.Minute, CleanupBudget: budget,
+			}},
+		},
+		cancel: NewCanceller(), state: newTestState(t), trackID: "github_test",
+	}
+	j.masker.Store(newMasker())
+	cs := &containerSet{networkTry: "github_network_test"}
+	for i, n := range []string{"job", "a", "b", "c", "d", "e", "f", "g", "h"} {
+		cs.services = append(cs.services, &container{name: n, id: fmt.Sprintf("%064d", i+1), createTried: true})
+	}
+	cs.job, cs.services = cs.services[0], cs.services[1:]
+	cs.job.isJob = true
+	j.cs = cs
+	return j, &stepRun{j: j, num: 1}, rec
+}
+
+// stalledRemovals is the docker of a daemon that no longer answers `rm`: the
+// command waits for its cancellation and, ignoring SIGINT like the fake docker
+// of hang_ignore, only ends when TermAfter has passed. It records the commands
+// it was asked to start. Everything else answers at once.
+type stalledRemovals struct {
+	mu      sync.Mutex
+	started []string
+}
+
+func (d *stalledRemovals) run(spec procSpec) (procResult, error) {
+	d.mu.Lock()
+	d.started = append(d.started, strings.Join(spec.Argv[1:], " "))
+	d.mu.Unlock()
+	if spec.Argv[1] == "rm" {
+		<-spec.Cancel
+		time.Sleep(spec.TermAfter)
+		return procResult{ExitCode: 143, Cancelled: true}, nil
+	}
+	return procResult{}, nil
+}
+
+func (d *stalledRemovals) count(prefix string) int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	n := 0
+	for _, c := range d.started {
+		if strings.HasPrefix(c, prefix) {
+			n++
+		}
+	}
+	return n
+}
+
 // GO-008: the budget of the whole cleanup is checked before every command. With
 // a budget spent by the first stalled removal, the others (and the retry of the
 // fallback) are not started: they would each cost a signal escalation.
+//
+// The commands are not processes: the clock of the synctest bubble is the only
+// clock, so the budget (1 s) and the escalation (TermAfter, 200 ms) are exact
+// and the outcome does not depend on how loaded the machine is.
 func TestCleanupBudgetIsCheckedBeforeEveryCommand(t *testing.T) {
-	f := newFakeCtr(t)
-	f.set(t, "hang_for", "rm --force")
-	f.set(t, "hang_ignore", "1") // SIGINT is ignored: a started command costs TermAfter
-	svcs := ""
-	for _, n := range []string{"a", "b", "c", "d", "e", "f", "g", "h"} {
-		svcs += "      " + n + ":\n        image: redis:7\n"
-	}
-	start := time.Now()
-	rec, res := ctrRun(t, f, "    container: ubuntu:24.04\n    services:\n"+svcs, "      - run: echo ok\n", func(c *Config) {
-		c.Actions.Containers = ContainerTimeouts{Command: time.Minute, Pull: time.Minute, CleanupCommand: time.Minute, CleanupBudget: time.Second}
-	})
-	total := time.Since(start)
-	if res.Conclusion == ConclusionSuccess {
-		t.Fatalf("an unfinished cleanup must be visible: %+v", res)
-	}
-	stop := rec.step(t, "Stop containers")
-	took := stop.Completed.Sub(stop.Started)
-	// The budget (1 s) and one escalation (TermAfter 200 ms in the tests, plus the kill delay).
-	if took > 1900*time.Millisecond || total > 12*time.Second {
-		t.Errorf("Stop containers took %s (run %s), want about the budget plus one escalation", took, total)
-	}
-	rms := 0
-	for _, c := range f.calls(t) {
-		if c[0] == "rm" {
-			rms++
+	synctest.Test(t, func(t *testing.T) {
+		d := &stalledRemovals{}
+		j, s, rec := budgetJob(t, time.Second, d.run)
+		start := time.Now()
+		res := j.stopContainers(s, nil)
+		if res != resFailed {
+			t.Fatalf("an unfinished cleanup must be visible: %v", res)
 		}
-	}
-	if rms != 1 {
-		t.Errorf("%d removals started, want 1 (the budget was spent by it)", rms)
-	}
-	log := logOf(stop)
-	if !strings.Contains(log, "##[error]The cleanup of the containers ran out of time (1s): stopped: docker rm --force ") ||
-		!strings.Contains(log, "ran out of time (1s): not run: docker ") {
-		t.Errorf("log:\n%s", log)
-	}
-	if strings.Count(log, "not run: docker network rm") != 1 {
-		t.Errorf("the network removal must be reported as not run once:\n%s", log)
-	}
+		// The budget, then one escalation: no other command was started.
+		if took := time.Since(start); took != time.Second+200*time.Millisecond {
+			t.Errorf("Stop containers took %s, want the budget plus one escalation (1.2s)", took)
+		}
+		if n := d.count("rm "); n != 1 {
+			t.Errorf("%d removals started, want 1 (the budget was spent by it): %q", n, d.started)
+		}
+		if n := d.count("network rm"); n != 0 {
+			t.Errorf("the network removal was started after the budget: %q", d.started)
+		}
+		log := logOf(rec.step(t, "Stop containers"))
+		if !strings.Contains(log, "##[error]The cleanup of the containers ran out of time (1s): stopped: docker rm --force ") ||
+			!strings.Contains(log, "ran out of time (1s): not run: docker ") {
+			t.Errorf("log:\n%s", log)
+		}
+		if strings.Count(log, "not run: docker network rm") != 1 {
+			t.Errorf("the network removal must be reported as not run once:\n%s", log)
+		}
+
+		// The fallback of the job shares the budget: it starts nothing either.
+		before := len(d.started)
+		start = time.Now()
+		j.fallbackCleanup()
+		if got := d.started[before:]; len(got) != 0 {
+			t.Errorf("the fallback started %q after the budget was spent", got)
+		}
+		if took := time.Since(start); took != 0 {
+			t.Errorf("the fallback took %s, want nothing", took)
+		}
+	})
 }

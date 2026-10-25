@@ -157,7 +157,7 @@ func (j *job) cleanupContainers(s *stepRun) (errs []error) {
 	}
 	remaining := time.Until(cs.deadline)
 	cs.mu.Unlock()
-	budget, budgetOut, stop := bound(nil, max(remaining, time.Nanosecond))
+	budget, budgetOut, stop := bound(nil, remaining)
 	defer stop()
 	defer func() { errs = dedupeErrors(errs) }()
 	out := func(line string) {

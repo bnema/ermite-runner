@@ -177,12 +177,17 @@ func (e *cmdTimeoutError) Error() string {
 
 // bound returns a channel that closes when cancel does (nil never) or after d,
 // and a function that tells whether it was the time, with the one that
-// releases the timer.
+// releases the timer. With d <= 0 the channel is closed on return: a command
+// that checks it right away must not race the timer.
 func bound(cancel <-chan struct{}, d time.Duration) (ch <-chan struct{}, timedOut func() bool, stop func()) {
 	out := make(chan struct{})
 	var once sync.Once
 	var fired atomic.Bool
 	closeOut := func() { once.Do(func() { close(out) }) }
+	if d <= 0 {
+		fired.Store(true)
+		closeOut()
+	}
 	t := time.AfterFunc(d, func() { fired.Store(true); closeOut() })
 	done := make(chan struct{})
 	if cancel != nil {
@@ -229,7 +234,11 @@ func (j *job) dockerDo(c dockerCmd, o dockerOpts) (lines []string, code int, err
 	cancel, timedOut, stop := bound(o.cancel, d)
 	defer stop()
 	var mu sync.Mutex
-	res, perr := runProcess(procSpec{
+	run := runProcess
+	if j.cfg.runProcess != nil {
+		run = j.cfg.runProcess
+	}
+	res, perr := run(procSpec{
 		Argv: c.argv, Dir: dirOrCwd(j.githubValue("workspace")), Env: append(j.processEnv(newOrdered()), c.env...), Credential: j.cfg.Credential,
 		OnLine: func(l string) {
 			mu.Lock()
