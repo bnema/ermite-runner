@@ -37,6 +37,10 @@ jobs:
         run: |
           go mod tidy
           git diff --exit-code -- go.mod go.sum
+      - name: Guest id
+        # images/GUEST_ID must match the guest inputs, so a change to them
+        # cannot merge without a new id (and a guest release).
+        run: scripts/guest-id.sh --check
       - run: go vet ./...
       - name: Static build
         # The runner binary is attached read-only to every sandbox, which has no

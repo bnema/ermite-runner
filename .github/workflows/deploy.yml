@@ -1,6 +1,6 @@
-# Deploys a tagged release to Gordon: builds the image, pushes it to Gordon's
-# CI host with this job's OIDC identity and runs exactly that digest in one
-# service. No Gordon secret is stored in the repository: Gordon accepts only
+# Deploys a tagged release to Gordon: fetches the published guest image, builds
+# the runner image around it, pushes it to Gordon's CI host with this job's
+# OIDC identity and runs exactly that digest in one service. No Gordon secret is stored in the repository: Gordon accepts only
 # the subject repo:bnema/ermite-runner:environment:production, for this app,
 # service and image repository.
 name: Deploy
@@ -28,7 +28,7 @@ jobs:
     needs: check
     if: github.server_url != 'https://github.com'
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 40
     environment: production
     permissions:
       contents: read
@@ -53,22 +53,23 @@ jobs:
           tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP" gordon
           sudo install -m 0755 "$RUNNER_TEMP/gordon" /usr/local/bin/gordon
           gordon version | head -1
-      - name: Build kernel and base image
-        # The image bakes the guest kernel (vmlinux) and the ext4 base disk;
-        # mkfs.ext4 needs e2fsprogs >= 1.47.1 with libarchive (tarball input)
-        # and the kernel build needs a C toolchain.
+      - name: Fetch guest
+        # The Guest workflow publishes the kernel and the base image as the
+        # release guest-<id>; the tag's images/GUEST_ID says which one this
+        # runner ships. The job token reads it.
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential flex bison bc libelf-dev libssl-dev xz-utils e2fsprogs libarchive13t64
-          scripts/build-kernel.sh tmp/image
-          scripts/build-image.sh tmp/image
+          sudo apt-get install -y --no-install-recommends zstd
+          scripts/fetch-guest.sh "$(cat images/GUEST_ID)" tmp/image
       - name: Build image
         run: |
           set -euo pipefail
           docker build -f contrib/container/Containerfile \
             --build-arg VERSION="$GITHUB_REF_NAME" \
+            --build-arg GUEST_ID="$(cat images/GUEST_ID)" \
             -t "ermite-runner:$GITHUB_REF_NAME" .
       # gordon reads ACTIONS_ID_TOKEN_REQUEST_URL/TOKEN itself and exchanges
       # the ID token at the CI host. Only the repository and digest are logged.

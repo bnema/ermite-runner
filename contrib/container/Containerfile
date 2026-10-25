@@ -3,10 +3,15 @@
 # ermite-runner as an unprivileged container (vm isolation, no jailer), for a
 # rootless Podman host. See docs/container.md.
 #
-# Build from the repository root, after scripts/build-kernel.sh and
-# scripts/build-image.sh have written tmp/image/{vmlinux,base.ext4}:
+# Build from the repository root, after scripts/fetch-guest.sh (or
+# scripts/build-kernel.sh and scripts/build-image.sh) has written
+# tmp/image/{vmlinux,base.ext4}. GUEST_ID is required: it is the id of that
+# guest, recorded as an image label.
 #
-#   docker build -f contrib/container/Containerfile --build-arg VERSION=<tag> -t ermite-runner:<tag> .
+#   scripts/fetch-guest.sh "$(cat images/GUEST_ID)" tmp/image
+#   docker build -f contrib/container/Containerfile \
+#     --build-arg VERSION=<tag> --build-arg GUEST_ID="$(cat images/GUEST_ID)" \
+#     -t ermite-runner:<tag> .
 #
 # The guest kernel and the base image are part of the image: the runner then
 # needs nothing on the host but /dev/kvm, /dev/net/tun and NET_ADMIN.
@@ -31,6 +36,10 @@ RUN apk add --no-cache curl \
  && install -m 0755 "/tmp/release-${FIRECRACKER_VERSION}-x86_64/firecracker-${FIRECRACKER_VERSION}-x86_64" /out-firecracker
 
 FROM docker.io/library/alpine:3.22
+ARG GUEST_ID
+# The guest id names the kernel and base image below (images/GUEST_ID).
+RUN test -n "${GUEST_ID}" || { echo "build argument GUEST_ID is required (--build-arg GUEST_ID=\"\$(cat images/GUEST_ID)\")" >&2; exit 1; }
+LABEL dev.bnema.ermite-runner.guest-id="${GUEST_ID}"
 # ip (TAP devices), nft (job network policy), mkfs.ext4 (scratch and exec
 # disks; e2fsprogs >= 1.47), ca-certificates (Node.js externals downloads).
 RUN apk add --no-cache iproute2 nftables e2fsprogs ca-certificates tini

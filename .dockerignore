@@ -1,0 +1,11 @@
+# The image build needs the Go sources and tmp/image/{vmlinux,base.ext4}.
+.git
+.github
+.worktrees
+docs
+images
+scripts
+tmp/kernel
+tmp/image/*.zst
+tmp/image/kernel.config
+tmp/image/SHA256SUMS
