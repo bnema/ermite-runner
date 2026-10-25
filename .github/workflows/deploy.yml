@@ -78,6 +78,9 @@ jobs:
         id: push
         run: |
           set -euo pipefail
+          # gordon writes the image tar (~3 GiB) to the temp dir; the VM /tmp is
+          # a tmpfs, so keep it on the runner disk.
+          export TMPDIR="$RUNNER_TEMP"
           gordon images push "ermite-runner:$GITHUB_REF_NAME" --tag "$GITHUB_REF_NAME" \
             --remote "$GORDON_REMOTE" --json >push.json
           jq -e '.digest | test("^sha256:[0-9a-f]{64}$")' push.json >/dev/null
