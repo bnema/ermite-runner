@@ -300,4 +300,35 @@ func TestDepsCacheScope(t *testing.T) {
 	if _, ok, err := cacheScope(job, scopeCtx); err == nil || ok {
 		t.Fatal("accepted another repository")
 	}
+	// A deps job never gets a workflow scope, whatever the server sends.
+	for _, c := range []*ermite.JobCache{
+		{Repository: "o/r", WriteRef: "refs/heads/main", ReadRefs: []string{"refs/ermite/deps"}},
+		{Repository: "o/r", WriteRef: "refs/ermite/deps", ReadRefs: []string{"refs/heads/main"}},
+		{Repository: "o/r", ReadRefs: []string{"refs/ermite/deps", "refs/heads/main"}},
+	} {
+		job.Cache = c
+		if sc, ok, err := cacheScope(job, scopeCtx); err == nil || ok {
+			t.Fatalf("accepted %+v: %+v", c, sc)
+		}
+	}
+}
+
+// A deps job given a workflow ref runs without a cache: no token.
+func TestRuntimeForDepsForeignRefDisablesCache(t *testing.T) {
+	svc, err := cachesvc.New(cachesvc.Config{Dir: filepath.Join(t.TempDir(), "cache")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = svc.CloseAll() })
+	j := &jobRun{
+		job:      &ermite.Job{JobId: "j1", TimeoutMinutes: 5, Deps: &ermite.DepsJob{}, Cache: &ermite.JobCache{Repository: "o/r", WriteRef: "refs/heads/main", ReadRefs: []string{"refs/heads/main"}}},
+		contexts: scopeCtx, log: zerowrap.New(zerowrap.Config{Output: &bytes.Buffer{}, Format: "json", Level: "debug"}),
+	}
+	if _, tok, mode, _ := j.runtimeFor(&Runner{Cache: svc}); tok != "" || mode != "" {
+		t.Fatalf("deps job got a workflow cache token: %q %q", tok, mode)
+	}
+	j.job.Cache = &ermite.JobCache{Repository: "o/r", WriteRef: "refs/ermite/deps", ReadRefs: []string{"refs/ermite/deps"}}
+	if _, tok, mode, _ := j.runtimeFor(&Runner{Cache: svc}); tok == "" || mode != "write" {
+		t.Fatalf("deps job without its cache: %q %q", tok, mode)
+	}
 }

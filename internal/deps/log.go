@@ -58,11 +58,13 @@ func (f *downloadFilter) Write(p []byte) (int, error) {
 	return n, nil
 }
 func (f *downloadFilter) close() {
-	if len(f.prefix) > 0 {
+	partial := len(f.prefix) > 0
+	if partial {
 		_, _ = f.dst.Write(f.prefix)
 	}
 	if f.count > 0 {
-		if f.decided && !f.drop {
+		// End an unterminated line so that the summary stands on its own.
+		if partial || (f.decided && !f.drop) {
 			_, _ = io.WriteString(f.dst, "\n")
 		}
 		_, _ = fmt.Fprintf(f.dst, "go: downloaded %d modules\n", f.count)

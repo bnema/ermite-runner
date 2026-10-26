@@ -119,7 +119,7 @@ func extractCache(src io.Reader, dir string, limit int64, count int) error {
 		return err
 	}
 	defer func() { _ = root.Close() }()
-	expanded := &io.LimitedReader{R: gz, N: cacheLimit + 1}
+	expanded := &io.LimitedReader{R: gz, N: limit + 1}
 	tr := tar.NewReader(expanded)
 	var total int64
 	for n := 0; ; n++ {

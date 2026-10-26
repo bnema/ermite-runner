@@ -31,4 +31,18 @@ func TestDownloadFilter(t *testing.T) {
 	if out.String() != "go: added x\npartial" {
 		t.Fatal(out.String())
 	}
+	// A final partial line that starts like a download line is ended before
+	// the summary.
+	for size := 1; size <= 3; size++ {
+		input := "go: downloading example.org/a v1\ngo: "
+		out.Reset()
+		f = &downloadFilter{dst: &out}
+		for start := 0; start < len(input); start += size {
+			_, _ = f.Write([]byte(input[start:min(start+size, len(input))]))
+		}
+		f.close()
+		if out.String() != "go: \ngo: downloaded 1 modules\n" {
+			t.Fatalf("%q", out.String())
+		}
+	}
 }

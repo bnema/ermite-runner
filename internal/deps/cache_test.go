@@ -75,6 +75,31 @@ func TestExtractCacheRejectsUnsafe(t *testing.T) {
 		})
 	}
 }
+func TestExtractCacheRejectsExpandedBomb(t *testing.T) {
+	// A valid tar followed by a long run of zeros: tiny once compressed, but
+	// its expanded stream exceeds the limit.
+	var b bytes.Buffer
+	gz := gzip.NewWriter(&b)
+	tw := tar.NewWriter(gz)
+	if err := tw.WriteHeader(&tar.Header{Name: "cache/download", Typeflag: tar.TypeDir}); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gz.Write(make([]byte, 1<<20)); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if b.Len() > 64<<10 {
+		t.Fatalf("bomb is %d bytes compressed", b.Len())
+	}
+	if err := extractCache(bytes.NewReader(b.Bytes()), t.TempDir(), 64<<10, 10); err == nil {
+		t.Fatal("accepted an archive whose expanded stream exceeds the limit")
+	}
+}
 func TestCacheArchiveRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "cache/download/example.org/a/@v")

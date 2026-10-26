@@ -19,6 +19,10 @@ import (
 // the archive URLs of a lookup expire with it.
 const cacheTokenMargin = 15 * time.Minute
 
+// depsCacheRef is the only cache ref of a dependency job: its module cache
+// never shares entries with the caches of workflow jobs, either way.
+const depsCacheRef = "refs/ermite/deps"
+
 // maxCacheReadRefs bounds Job.cache.read_refs (own ref, base branch, default
 // branch, with room to spare).
 const maxCacheReadRefs = 8
@@ -62,6 +66,9 @@ func cacheScope(job *ermite.Job, contexts string) (sc cachesvc.Scope, ok bool, e
 	// must never share a scope.
 	sc.Repository = repo
 	if w := jc.WriteRef; w != "" {
+		if job.Deps != nil && w != depsCacheRef {
+			return cachesvc.Scope{}, false, fmt.Errorf("the deps cache write ref %q is not %s", w, depsCacheRef)
+		}
 		if !fullRef(w) {
 			return cachesvc.Scope{}, false, fmt.Errorf("the cache write ref %q is not a full ref name", w)
 		}
@@ -70,6 +77,9 @@ func cacheScope(job *ermite.Job, contexts string) (sc cachesvc.Scope, ok bool, e
 	for _, r := range jc.ReadRefs {
 		if r == "" {
 			continue
+		}
+		if job.Deps != nil && r != depsCacheRef {
+			return cachesvc.Scope{}, false, fmt.Errorf("the deps cache read ref %q is not %s", r, depsCacheRef)
 		}
 		if !fullRef(r) {
 			return cachesvc.Scope{}, false, fmt.Errorf("the cache read ref %q is not a full ref name", r)
