@@ -2,9 +2,7 @@
 package host
 
 import (
-	"bnema.dev/ermite-runner/internal/cachesvc"
 	"context"
-	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -14,6 +12,7 @@ import (
 	ermite "bnema.dev/ermite-api/gen/ermite"
 	"bnema.dev/ermite-api/gen/ermite/ermiteconnect"
 
+	"bnema.dev/ermite-runner/internal/cachesvc"
 	"bnema.dev/ermite-runner/internal/execstream"
 	"bnema.dev/ermite-runner/internal/execstream/execpb"
 )
@@ -287,15 +286,20 @@ func TestDepsJobReportsMultilineError(t *testing.T) {
 }
 
 func TestDepsCacheRequest(t *testing.T) {
-	for _, explicit := range []bool{false, true} {
-		t.Run(fmt.Sprint(explicit), func(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		explicit bool
+	}{{"old server", false}, {"explicit scope", true}} {
+		t.Run(tc.name, func(t *testing.T) {
 			svc, err := cachesvc.New(cachesvc.Config{Dir: t.TempDir()})
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer func() { _ = svc.CloseAll() }()
+			called := make(chan struct{})
 			h := newHarness(t, func(t *testing.T, c *execstream.Conn, r *execpb.Run, _ <-chan *execpb.Cancel) {
-				if explicit {
+				defer close(called)
+				if tc.explicit {
 					if r.Deps.CacheToken == "" || r.Deps.CacheMode != "write" || r.Deps.RegistryPort != cachesvc.DefaultPort {
 						t.Error("missing cache credentials")
 					}
@@ -311,15 +315,22 @@ func TestDepsCacheRequest(t *testing.T) {
 			j := depsJob("deps-cache")
 			j.Contexts = scopeCtx
 			j.Ref = "refs/heads/main"
-			if explicit {
+			if tc.explicit {
 				j.Cache = &ermite.JobCache{Repository: "o/r", WriteRef: "refs/ermite/deps", ReadRefs: []string{"refs/ermite/deps"}}
 			}
 			h.runner.Cache = svc
 			h.srv.jobs = []*ermite.Job{j}
 			stop := h.run(t)
+			// The harness has no completion signal of its own, so the server's
+			// CompleteJob is polled; the scripted guest signals that it ran.
 			eventually(t, "deps cache completion", func() bool { return h.srv.completeCount() == 1 })
 			if err := stop(); err != nil {
 				t.Fatal(err)
+			}
+			select {
+			case <-called:
+			default:
+				t.Fatal("the fake guest never received the deps request")
 			}
 		})
 	}

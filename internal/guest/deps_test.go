@@ -2,7 +2,6 @@
 package guest
 
 import (
-	"bnema.dev/ermite-runner/internal/deps"
 	"context"
 	"io"
 	"net"
@@ -10,8 +9,10 @@ import (
 	"strings"
 	"testing"
 
+	"bnema.dev/ermite-runner/internal/deps"
 	"bnema.dev/ermite-runner/internal/execstream"
 	"bnema.dev/ermite-runner/internal/execstream/execpb"
+	"bnema.dev/ermite-runner/internal/sandbox"
 )
 
 func TestRunDepsStartsRegistryOnlyRelayAndClosesIt(t *testing.T) {
@@ -34,9 +35,12 @@ func testDepsRelay(t *testing.T, token, mode string) {
 			relayLive = true
 			return cacheRelay{}
 		},
-		run: func(context.Context, *execpb.DepsRequest, io.Writer) (map[string][]byte, error) {
+		run: func(_ context.Context, _ *execpb.DepsRequest, _ io.Writer, workDir string) (map[string][]byte, error) {
 			if !relayLive {
 				t.Error("deps ran before the relay started")
+			}
+			if workDir != sandbox.GuestScratch {
+				t.Errorf("deps work dir %q, want the scratch volume", workDir)
 			}
 			return nil, nil
 		},
@@ -94,7 +98,14 @@ func TestDepsLogMasksBothTokens(t *testing.T) {
 	_ = log.Close()
 	_ = guest.Close()
 	text := <-done
-	if strings.Contains(text, "secret") || !strings.Contains(text, "***") {
-		t.Fatal(text)
+	for _, token := range []string{"clone-secret", "cache-secret"} {
+		for _, secret := range deps.Secrets(token) {
+			if strings.Contains(text, secret) {
+				t.Errorf("log leaks %q: %q", secret, text)
+			}
+		}
+	}
+	if !strings.Contains(text, "***") {
+		t.Fatalf("nothing masked: %q", text)
 	}
 }

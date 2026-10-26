@@ -296,7 +296,13 @@ func TestDepsCacheScope(t *testing.T) {
 	if err != nil || !ok || sc.Repository != "o/r" || sc.WriteRef != "refs/ermite/deps" || len(sc.ReadRefs) != 1 || sc.ReadRefs[0] != "refs/ermite/deps" {
 		t.Fatalf("%+v %v %v", sc, ok, err)
 	}
-	job.Cache.Repository = "other/repo"
+	// No write ref: the deps job reads its cache and never writes it.
+	job.Cache = &ermite.JobCache{Repository: "o/r", ReadRefs: []string{"refs/ermite/deps"}}
+	sc, ok, err = cacheScope(job, scopeCtx)
+	if err != nil || !ok || sc.WriteRef != "" || len(sc.ReadRefs) != 1 || sc.ReadRefs[0] != "refs/ermite/deps" {
+		t.Fatalf("read-only scope: %+v %v %v", sc, ok, err)
+	}
+	job.Cache = &ermite.JobCache{Repository: "other/repo", WriteRef: "refs/ermite/deps", ReadRefs: []string{"refs/ermite/deps"}}
 	if _, ok, err := cacheScope(job, scopeCtx); err == nil || ok {
 		t.Fatal("accepted another repository")
 	}
@@ -330,5 +336,10 @@ func TestRuntimeForDepsForeignRefDisablesCache(t *testing.T) {
 	j.job.Cache = &ermite.JobCache{Repository: "o/r", WriteRef: "refs/ermite/deps", ReadRefs: []string{"refs/ermite/deps"}}
 	if _, tok, mode, _ := j.runtimeFor(&Runner{Cache: svc}); tok == "" || mode != "write" {
 		t.Fatalf("deps job without its cache: %q %q", tok, mode)
+	}
+	// Without a write ref the job gets a token in read mode: the guest never saves.
+	j.job.Cache = &ermite.JobCache{Repository: "o/r", ReadRefs: []string{"refs/ermite/deps"}}
+	if _, tok, mode, _ := j.runtimeFor(&Runner{Cache: svc}); tok == "" || mode != "read" {
+		t.Fatalf("read-only deps job: %q %q", tok, mode)
 	}
 }
