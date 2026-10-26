@@ -47,3 +47,20 @@ func TestRuntimeForRegistryOnly(t *testing.T) {
 		t.Fatalf("scoped job: %q %q", tok, mode)
 	}
 }
+
+func TestOldServerDepsRetainsRegistryOnly(t *testing.T) {
+	proxy, err := registryproxy.New(registryproxy.Config{Dir: t.TempDir(), Max: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc, err := cachesvc.New(cachesvc.Config{Dir: t.TempDir(), Registry: proxy})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = svc.CloseAll() }()
+	j := &jobRun{job: &ermite.Job{Deps: &ermite.DepsJob{}, JobId: "deps", Ref: "refs/heads/main"}, contexts: scopeCtx}
+	port, token, mode, results := j.runtimeFor(&Runner{Cache: svc})
+	if port != cachesvc.DefaultPort || token != "" || mode != "" || results {
+		t.Fatalf("%d %q %q %v", port, token, mode, results)
+	}
+}

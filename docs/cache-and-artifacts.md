@@ -33,11 +33,19 @@ Works with `actions/cache`, `setup-go` and `setup-node` with `cache:`, and anyth
 
 - **Scopes.** Entries belong to (repository, ref, key, version). A job writes to its write ref and reads its read refs in priority order. Another repository's entries are never visible.
 - **Server scope.** The server sends the repository, write ref and read refs (feature `ci.cache`). The runner checks them: the repository must be the job's own, refs are full `refs/...` names, at most 8 read refs. An empty write ref makes the job read-only. A scope that fails the checks disables the cache for that job.
-- **Old servers.** Without a scope from the server, the scope is `github.repository` and the job ref, for reading and writing.
+- **Old servers.** Workflow jobs without a scope from the server use `github.repository` and the job ref, for reading and writing.
 - **Duplicates.** A second reservation of the same entry while one exists is a `409`.
 - **Reservations.** Dropped after an hour without activity, or at the expiry of the token that made them.
 - **Limits.** Each entry is charged at least 4 KiB. At most 256 uploads in progress (32 per job). An entry being downloaded is never evicted. A reservation that cannot get room answers `503`.
 - **Bandwidth.** A VM's cache traffic does not cross `eth0`. The runner limits it per sandbox at `ERMITE_RUNNER_JOB_NET_BANDWIDTH`. Containers have no limit.
+
+### Deps module downloads
+
+Bernard deps jobs use an explicit server scope (repository plus `refs/ermite/deps` for reading and writing). Without `Job.cache`, deps jobs have no cache and retain the registry-only relay. The runner checks the scope against `github.repository` and issues the same job-bound, timeout-plus-15-minute token as for workflows.
+
+The guest restores `gomod-<goVersion>-<commit SHA>`, falling back to the newest `gomod-<goVersion>-` entry. The format version is SHA-256 of `ermite-deps-gomod-download-v1`. Only `GOMODCACHE/cache/download` is archived as tar+gzip, not extracted module source directories. Go verifies module downloads against go.sum and the checksum database. The single update container still owns the checkout.
+
+Archives are limited to 1 GiB compressed and expanded (including tar overhead), with at most 200,000 entries and 1 GiB of file contents; the service also enforces its configured size cap. Extraction accepts only regular files and directories beneath `cache/download`, confined with `os.Root`. After a successful update without an exact hit, the guest saves under the commit key. Cache failures emit one short warning and do not fail the job. Entries use the normal LRU eviction policy.
 
 ### Tokens
 

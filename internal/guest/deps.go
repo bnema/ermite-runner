@@ -18,9 +18,13 @@ type depsLog struct {
 	m    *streamMasker
 }
 
-func newDepsLog(c *execstream.Conn, token string) depsLog {
+func newDepsLog(c *execstream.Conn, tokens ...string) depsLog {
 	l := depsLog{conn: c}
-	l.m = newStreamMasker(l.send, deps.Secrets(token)...)
+	var secrets []string
+	for _, token := range tokens {
+		secrets = append(secrets, deps.Secrets(token)...)
+	}
+	l.m = newStreamMasker(l.send, secrets...)
 	return l
 }
 
@@ -63,10 +67,9 @@ func runDeps(parent context.Context, c *execstream.Conn, r *execpb.DepsRequest, 
 		}
 	}()
 	_ = c.Send(&execpb.Frame{Body: &execpb.Frame_StepStarted{StepStarted: &execpb.StepStarted{Number: 1, Name: "Update dependencies", UnixNano: time.Now().UnixNano()}}})
-	log := newDepsLog(c, r.Token)
-	// The relay serves dockerd's registry mirror only: the spec carries a port
-	// and no cache token, so there are no cache-write or artifact credentials.
-	relay := env.relay(ctx, &execpb.JobSpec{CachePort: r.RegistryPort})
+	log := newDepsLog(c, r.Token, r.CacheToken)
+	// The same relay serves the registry mirror and the optional deps cache.
+	relay := env.relay(ctx, &execpb.JobSpec{CachePort: r.RegistryPort, CacheToken: r.CacheToken, CacheMode: r.CacheMode})
 	files, err := env.run(ctx, r, log)
 	relay.close()
 	_ = log.Close()

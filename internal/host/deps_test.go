@@ -2,7 +2,9 @@
 package host
 
 import (
+	"bnema.dev/ermite-runner/internal/cachesvc"
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -281,5 +283,44 @@ func TestDepsJobReportsMultilineError(t *testing.T) {
 	result := h.srv.completes[0]
 	if result.Conclusion != ermite.CiConclusion_CI_CONCLUSION_FAILURE || result.GetDepsReport().GetError() != cause {
 		t.Fatalf("result: %v", result)
+	}
+}
+
+func TestDepsCacheRequest(t *testing.T) {
+	for _, explicit := range []bool{false, true} {
+		t.Run(fmt.Sprint(explicit), func(t *testing.T) {
+			svc, err := cachesvc.New(cachesvc.Config{Dir: t.TempDir()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = svc.CloseAll() }()
+			h := newHarness(t, func(t *testing.T, c *execstream.Conn, r *execpb.Run, _ <-chan *execpb.Cancel) {
+				if explicit {
+					if r.Deps.CacheToken == "" || r.Deps.CacheMode != "write" || r.Deps.RegistryPort != cachesvc.DefaultPort {
+						t.Error("missing cache credentials")
+					}
+					if job, _, _, err := svc.RuntimeToken(r.Deps.CacheToken); err != nil || job != "deps-cache" {
+						t.Errorf("invalid token: %s %v", job, err)
+					}
+				} else if r.Deps.CacheToken != "" || r.Deps.CacheMode != "" || r.Deps.RegistryPort != 0 {
+					t.Error("old server enabled cache")
+				}
+				send(c, &execpb.Frame{Body: &execpb.Frame_DepsResult{DepsResult: &execpb.DepsResult{}}})
+				send(c, &execpb.Frame{Body: &execpb.Frame_Exit{Exit: &execpb.Exit{}}})
+			})
+			j := depsJob("deps-cache")
+			j.Contexts = scopeCtx
+			j.Ref = "refs/heads/main"
+			if explicit {
+				j.Cache = &ermite.JobCache{Repository: "o/r", WriteRef: "refs/ermite/deps", ReadRefs: []string{"refs/ermite/deps"}}
+			}
+			h.runner.Cache = svc
+			h.srv.jobs = []*ermite.Job{j}
+			stop := h.run(t)
+			eventually(t, "deps cache completion", func() bool { return h.srv.completeCount() == 1 })
+			if err := stop(); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }

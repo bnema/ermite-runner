@@ -62,7 +62,7 @@ func TestFailingCommandTail(t *testing.T) {
 	if err == nil || err.Error() != "dependency command failed (exit 7)\nlast real line" {
 		t.Fatalf("error = %v", err)
 	}
-	if log.String() != "go: downloading noise\nlast real line" {
+	if log.String() != "last real line\ngo: downloaded 1 modules\n" {
 		t.Fatalf("log = %q", log.String())
 	}
 }

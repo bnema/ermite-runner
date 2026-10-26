@@ -285,3 +285,19 @@ func TestResultsOnNeedsEverything(t *testing.T) {
 		t.Fatal("everything there: results off")
 	}
 }
+
+func TestDepsCacheScope(t *testing.T) {
+	job := &ermite.Job{Deps: &ermite.DepsJob{}, Ref: "refs/heads/main"}
+	if _, ok, err := cacheScope(job, scopeCtx); err != nil || ok {
+		t.Fatalf("legacy deps scope: %v %v", ok, err)
+	}
+	job.Cache = &ermite.JobCache{Repository: "o/r", WriteRef: "refs/ermite/deps", ReadRefs: []string{"refs/ermite/deps"}}
+	sc, ok, err := cacheScope(job, scopeCtx)
+	if err != nil || !ok || sc.Repository != "o/r" || sc.WriteRef != "refs/ermite/deps" || len(sc.ReadRefs) != 1 || sc.ReadRefs[0] != "refs/ermite/deps" {
+		t.Fatalf("%+v %v %v", sc, ok, err)
+	}
+	job.Cache.Repository = "other/repo"
+	if _, ok, err := cacheScope(job, scopeCtx); err == nil || ok {
+		t.Fatal("accepted another repository")
+	}
+}

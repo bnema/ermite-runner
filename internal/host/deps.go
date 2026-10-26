@@ -3,7 +3,6 @@ package host
 
 import (
 	ermite "bnema.dev/ermite-api/gen/ermite"
-	"bnema.dev/ermite-runner/internal/cachesvc"
 	"bnema.dev/ermite-runner/internal/deps"
 	"bnema.dev/ermite-runner/internal/execstream"
 	"bnema.dev/ermite-runner/internal/execstream/execpb"
@@ -23,9 +22,8 @@ func (j *jobRun) executeDeps(ctx context.Context, rt *Runner, stopHard <-chan st
 		return failure()
 	}
 	r := &execpb.DepsRequest{Repo: j.job.Repo, Sha: j.job.Sha, GoVersion: j.job.Deps.GoVersion, Token: j.job.GithubToken, CloneUrl: strings.TrimRight(rt.Cfg.URL, "/") + "/" + j.job.Repo + ".git", AllowInsecureHttp: rt.Cfg.InsecureHTTP}
-	if rt.Cache != nil && rt.Cache.RegistryEnabled() {
-		r.RegistryPort = cachesvc.DefaultPort
-	}
+	j.contexts = j.job.Contexts
+	r.RegistryPort, r.CacheToken, r.CacheMode, _ = j.runtimeFor(rt)
 	for _, u := range j.job.Deps.Updates {
 		r.Updates = append(r.Updates, &execpb.DepsUpdate{Ecosystem: u.GetEcosystem(), Directory: u.GetDirectory(), Name: u.GetName(), Version: u.GetVersion()})
 	}

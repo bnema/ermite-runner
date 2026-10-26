@@ -311,11 +311,12 @@ message DepsRequest {
   string sha = 4;
   string clone_url = 5;
   string token = 6;
-  // Loopback port of the registry-only relay (0: none). No cache or results
-  // credentials are sent with it.
+  // Loopback port of the cache/registry relay (0: none).
   uint32 registry_port = 7;
   // Accept an http clone URL (ERMITE_RUNNER_INSECURE_HTTP=1).
   bool allow_insecure_http = 8;
+  string cache_token = 9;
+  string cache_mode = 10;
 }
 message DepsUpdate {
   string ecosystem = 1;

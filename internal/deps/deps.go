@@ -135,14 +135,26 @@ func Run(ctx context.Context, r *execpb.DepsRequest, log io.Writer) (map[string]
 		suffix += fmt.Sprintf("if test -f %s && ! cmp -s %s /before/%d; then cp -- %s /out/%d; fi\n", quote("/repo/"+p), quote("/repo/"+p), i, quote("/repo/"+p), i)
 	}
 	name := fmt.Sprintf("ermite-deps-%d", os.Getpid())
+
+	cache := prepareCache(ctx, r, log)
+	success := false
+	defer func() { cache.finish(success, r.CacheMode) }()
 	defer func() {
 		cleanup, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		_ = exec.CommandContext(cleanup, "docker", "rm", "-f", name).Run()
 	}()
-	cmd := exec.CommandContext(ctx, "docker", "run", "--rm", "--name", name, "-e", "DEPS_AUTH", "-v", dir+":/out", "golang:"+r.GoVersion, "sh", "-c", prefix+script+suffix)
+	args := []string{"run", "--rm", "--name", name, "-e", "DEPS_AUTH", "-v", dir + ":/out"}
+	if cache != nil {
+		args = append(args, "-v", cache.dir+":/gomodcache")
+		// EXIT runs on failed updates too. Container-owned files must remain
+		// readable and removable by the guest, including with user namespaces.
+		prefix = "export GOMODCACHE=/gomodcache\ntrap 'chmod -R a+rwX /gomodcache || true' EXIT\n" + prefix
+	}
+	args = append(args, "golang:"+r.GoVersion, "sh", "-c", prefix+script+suffix)
+	cmd := exec.CommandContext(ctx, "docker", args...)
 	cmd.Env = append(os.Environ(), "DEPS_AUTH="+auth)
-	if err := runCommand(ctx, cmd, log, Secrets(r.Token)); err != nil {
+	if err := runCommand(ctx, cmd, log, append(Secrets(r.Token), Secrets(r.CacheToken)...)); err != nil {
 		return nil, err
 	}
 	root, err := os.OpenRoot(dir)
@@ -171,6 +183,7 @@ func Run(ctx context.Context, r *execpb.DepsRequest, log io.Writer) (map[string]
 		}
 		files[p] = b
 	}
+	success = true
 	return files, nil
 }
 

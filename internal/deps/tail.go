@@ -105,7 +105,9 @@ func (t *commandTail) text() string {
 
 func runCommand(ctx context.Context, cmd *exec.Cmd, log io.Writer, secrets []string) error {
 	tail := &commandTail{secrets: secrets}
-	output := io.MultiWriter(log, tail)
+	filter := &downloadFilter{dst: log}
+	defer filter.close()
+	output := io.MultiWriter(filter, tail)
 	cmd.Stdout, cmd.Stderr = output, output
 	if err := cmd.Run(); err != nil {
 		summary := "dependency command failed"

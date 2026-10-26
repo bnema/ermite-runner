@@ -1974,11 +1974,12 @@ type DepsRequest struct {
 	Sha       string                 `protobuf:"bytes,4,opt,name=sha,proto3" json:"sha,omitempty"`
 	CloneUrl  string                 `protobuf:"bytes,5,opt,name=clone_url,json=cloneUrl,proto3" json:"clone_url,omitempty"`
 	Token     string                 `protobuf:"bytes,6,opt,name=token,proto3" json:"token,omitempty"`
-	// Loopback port of the registry-only relay (0: none). No cache or results
-	// credentials are sent with it.
+	// Loopback port of the cache/registry relay (0: none).
 	RegistryPort uint32 `protobuf:"varint,7,opt,name=registry_port,json=registryPort,proto3" json:"registry_port,omitempty"`
 	// Accept an http clone URL (ERMITE_RUNNER_INSECURE_HTTP=1).
-	AllowInsecureHttp bool `protobuf:"varint,8,opt,name=allow_insecure_http,json=allowInsecureHttp,proto3" json:"allow_insecure_http,omitempty"`
+	AllowInsecureHttp bool   `protobuf:"varint,8,opt,name=allow_insecure_http,json=allowInsecureHttp,proto3" json:"allow_insecure_http,omitempty"`
+	CacheToken        string `protobuf:"bytes,9,opt,name=cache_token,json=cacheToken,proto3" json:"cache_token,omitempty"`
+	CacheMode         string `protobuf:"bytes,10,opt,name=cache_mode,json=cacheMode,proto3" json:"cache_mode,omitempty"`
 	unknownFields     protoimpl.UnknownFields
 	sizeCache         protoimpl.SizeCache
 }
@@ -2067,6 +2068,20 @@ func (x *DepsRequest) GetAllowInsecureHttp() bool {
 		return x.AllowInsecureHttp
 	}
 	return false
+}
+
+func (x *DepsRequest) GetCacheToken() string {
+	if x != nil {
+		return x.CacheToken
+	}
+	return ""
+}
+
+func (x *DepsRequest) GetCacheMode() string {
+	if x != nil {
+		return x.CacheMode
+	}
+	return ""
 }
 
 type DepsUpdate struct {
@@ -2413,7 +2428,7 @@ const file_exec_proto_rawDesc = "" +
 	"\x06source\x18\a \x01(\tR\x06source\x12\x14\n" +
 	"\x05error\x18\b \x01(\tR\x05error\x12\x1f\n" +
 	"\vauth_origin\x18\t \x01(\tR\n" +
-	"authOrigin\"\x97\x02\n" +
+	"authOrigin\"\xd7\x02\n" +
 	"\vDepsRequest\x12;\n" +
 	"\aupdates\x18\x01 \x03(\v2!.ermite.runner.exec.v1.DepsUpdateR\aupdates\x12\x1d\n" +
 	"\n" +
@@ -2423,7 +2438,12 @@ const file_exec_proto_rawDesc = "" +
 	"\tclone_url\x18\x05 \x01(\tR\bcloneUrl\x12\x14\n" +
 	"\x05token\x18\x06 \x01(\tR\x05token\x12#\n" +
 	"\rregistry_port\x18\a \x01(\rR\fregistryPort\x12.\n" +
-	"\x13allow_insecure_http\x18\b \x01(\bR\x11allowInsecureHttp\"v\n" +
+	"\x13allow_insecure_http\x18\b \x01(\bR\x11allowInsecureHttp\x12\x1f\n" +
+	"\vcache_token\x18\t \x01(\tR\n" +
+	"cacheToken\x12\x1d\n" +
+	"\n" +
+	"cache_mode\x18\n" +
+	" \x01(\tR\tcacheMode\"v\n" +
 	"\n" +
 	"DepsUpdate\x12\x1c\n" +
 	"\tecosystem\x18\x01 \x01(\tR\tecosystem\x12\x1c\n" +

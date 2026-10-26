@@ -35,7 +35,8 @@ const maxCacheReadRefs = 8
 // write_ref makes the job read-only. A scope that fails the checks is an error:
 // the job runs without a cache.
 //
-// A server that sends no Job.cache (an old server) gets the narrowest scope the
+// Deps jobs without Job.cache have no cache; they never use the legacy fallback.
+// A workflow on a server that sends no Job.cache gets the narrowest scope the
 // job's own fields give: the repository of the github context and the ref that
 // triggered the run, for reading and writing, with no fallback to the base or
 // default branch. A job without a repository or a ref has no cache (ok false,
@@ -44,6 +45,9 @@ func cacheScope(job *ermite.Job, contexts string) (sc cachesvc.Scope, ok bool, e
 	repo := githubRepository(contexts)
 	jc := job.GetCache()
 	if jc == nil {
+		if job.Deps != nil {
+			return cachesvc.Scope{}, false, nil
+		}
 		if repo == "" || job.Ref == "" {
 			return cachesvc.Scope{}, false, nil
 		}
