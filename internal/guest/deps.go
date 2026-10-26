@@ -5,6 +5,7 @@ import (
 	"bnema.dev/ermite-runner/internal/deps"
 	"bnema.dev/ermite-runner/internal/execstream"
 	"bnema.dev/ermite-runner/internal/execstream/execpb"
+	"bnema.dev/ermite-runner/internal/sandbox"
 	"context"
 	"io"
 	"strings"
@@ -44,7 +45,7 @@ func (w depsLog) send(text string) error {
 
 // depsEnv holds what runDeps calls out to, so tests can replace it.
 type depsEnv struct {
-	run   func(context.Context, *execpb.DepsRequest, io.Writer) (map[string][]byte, error)
+	run   func(context.Context, *execpb.DepsRequest, io.Writer, string) (map[string][]byte, error)
 	relay func(context.Context, *execpb.JobSpec) cacheRelay
 }
 
@@ -70,7 +71,8 @@ func runDeps(parent context.Context, c *execstream.Conn, r *execpb.DepsRequest, 
 	log := newDepsLog(c, r.Token, r.CacheToken)
 	// The same relay serves the registry mirror and the optional deps cache.
 	relay := env.relay(ctx, &execpb.JobSpec{CachePort: r.RegistryPort, CacheToken: r.CacheToken, CacheMode: r.CacheMode})
-	files, err := env.run(ctx, r, log)
+	// Large temporary data goes to the scratch volume; /tmp is RAM in a VM.
+	files, err := env.run(ctx, r, log, sandbox.GuestScratch)
 	relay.close()
 	_ = log.Close()
 	result := &execpb.DepsResult{}

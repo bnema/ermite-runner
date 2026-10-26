@@ -43,9 +43,9 @@ Works with `actions/cache`, `setup-go` and `setup-node` with `cache:`, and anyth
 
 Bernard deps jobs use an explicit server scope (repository plus `refs/ermite/deps` for reading and writing). Without `Job.cache`, deps jobs have no cache and retain the registry-only relay. The runner checks the scope against `github.repository` and issues the same job-bound, timeout-plus-15-minute token as for workflows.
 
-The guest restores `gomod-<goVersion>-<commit SHA>`, falling back to the newest `gomod-<goVersion>-` entry. The format version is SHA-256 of `ermite-deps-gomod-download-v1`. Only `GOMODCACHE/cache/download` is archived as tar+gzip, not extracted module source directories. Go verifies module downloads against go.sum and the checksum database. The single update container still owns the checkout.
+Module cache directories and the archive spool live on the sandbox scratch volume (`/scratch`), not in RAM-backed `/tmp`. The guest restores `gomod-<goVersion>-<commit SHA>`, falling back to the newest `gomod-<goVersion>-` entry. The format version is SHA-256 of `ermite-deps-gomod-download-v1`. Only `GOMODCACHE/cache/download` is archived as tar+gzip, not extracted module source directories. Go verifies module downloads against go.sum and the checksum database.
 
-Archives are limited to 1 GiB compressed and expanded (including tar overhead), with at most 200,000 entries and 1 GiB of file contents; the service also enforces its configured size cap. Extraction accepts only regular files and directories beneath `cache/download`, confined with `os.Root`. After a successful update without an exact hit, the guest saves under the commit key. Cache failures emit one short warning and do not fail the job. Entries use the normal LRU eviction policy.
+Archives are limited to 1 GiB compressed and expanded (including tar overhead), with at most 200,000 entries and 1 GiB of file contents; the service also enforces its configured size cap. Extraction accepts only regular files and directories beneath `cache/download`, confined with `os.Root`. After a successful update without an exact hit, the guest saves under the commit key. Each restore has a 10-minute and each save a 20-minute deadline. Cache failures emit one short warning naming the failed stage and HTTP status, and do not fail the job. Entries use the normal LRU eviction policy.
 
 ### Tokens
 

@@ -96,7 +96,10 @@ func Secrets(token string) []string {
 
 // Run uses the sandbox's Docker daemon, never the host daemon. Files are read
 // through an os.Root so repository symlinks cannot escape the checkout.
-func Run(ctx context.Context, r *execpb.DepsRequest, log io.Writer) (map[string][]byte, error) {
+// workDir is where the job puts its temporary data (module cache, archive
+// spool, update output); the guest passes its scratch volume. An empty or
+// missing directory means os.TempDir().
+func Run(ctx context.Context, r *execpb.DepsRequest, log io.Writer, workDir string) (files map[string][]byte, err error) {
 	allowed, err := Allowed(r)
 	if err != nil {
 		return nil, err
@@ -111,7 +114,8 @@ func Run(ctx context.Context, r *execpb.DepsRequest, log io.Writer) (map[string]
 	if !shaPattern.MatchString(r.Sha) {
 		return nil, errors.New("invalid commit SHA")
 	}
-	dir, err := os.MkdirTemp("", "ermite-deps-")
+	base := workBase(workDir)
+	dir, err := os.MkdirTemp(base, "ermite-deps-")
 	if err != nil {
 		return nil, err
 	}
@@ -136,9 +140,8 @@ func Run(ctx context.Context, r *execpb.DepsRequest, log io.Writer) (map[string]
 	}
 	name := fmt.Sprintf("ermite-deps-%d", os.Getpid())
 
-	cache := prepareCache(ctx, r, log)
-	success := false
-	defer func() { cache.finish(success, r.CacheMode) }()
+	cache := prepareCache(ctx, r, log, base)
+	defer func() { cache.finish(err == nil) }()
 	defer func() {
 		cleanup, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -162,7 +165,7 @@ func Run(ctx context.Context, r *execpb.DepsRequest, log io.Writer) (map[string]
 		return nil, err
 	}
 	defer func() { _ = root.Close() }()
-	files := map[string][]byte{}
+	files = map[string][]byte{}
 	total := 0
 	for i, p := range paths {
 		f, err := root.Open(fmt.Sprint(i))
@@ -183,7 +186,6 @@ func Run(ctx context.Context, r *execpb.DepsRequest, log io.Writer) (map[string]
 		}
 		files[p] = b
 	}
-	success = true
 	return files, nil
 }
 
